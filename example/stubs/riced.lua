@@ -45,6 +45,7 @@ config = {}
 ---@field x? number|{ from: number, to: number }
 ---@field onAdded? fun(index: integer, item: any)
 ---@field onRemoved? fun(index: integer, item: any)
+---@field onDisplaced? fun(index: integer, item: any)
 
 ---@class iced.Font
 ---@field family? string
@@ -230,6 +231,7 @@ config = {}
 ---@field on_link_click? string
 ---@field wrapping? boolean|"none"|"word"|"glyph"|"word_or_glyph"
 ---@field columns? iced.TableColumn[]
+---@field key? string
 ---@field render? fun(item: any, index: integer): iced.Element
 ---@field on_item_added? fun(index: integer, item: any)
 ---@field on_item_removed? fun(index: integer, item: any)

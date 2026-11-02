@@ -221,6 +221,16 @@ pub(super) fn list_view(
         .get::<Table>("content")?
         .sequence_values::<Value>()
         .collect::<mlua::Result<Vec<_>>>()?;
+    let key = match node.get::<Option<String>>("key")? {
+        Some(key) if key.is_empty() => {
+            return Err(mlua::Error::runtime("list_view key must be non-empty"));
+        }
+        key => key,
+    };
+    let keys = items
+        .iter()
+        .map(|item| list_key(item, key.as_deref()))
+        .collect::<mlua::Result<Vec<_>>>()?;
 
     let transition = list_transition(node)?;
     let animate = transition.is_some();
@@ -243,61 +253,25 @@ pub(super) fn list_view(
             None => transition.as_ref().and_then(|t| t.removed.clone()),
         },
     };
+    let displaced = transition.as_ref().and_then(|t| t.displaced.clone());
 
-    let previous = state::list(ctx.generation, &id, items.clone(), animate, duration);
+    let previous = state::list(ctx.generation, &id, items.clone(), &keys, animate, duration);
     if let Some(callback) = &added {
-        for (index, item) in items.iter().enumerate().skip(previous.items.len()) {
-            callback.call::<()>((index, item.clone()))?;
+        for (index, item) in &previous.added {
+            callback.call::<()>((*index, item.clone()))?;
         }
     }
     if let Some(callback) = &removed {
-        for (index, item) in previous.items.iter().enumerate().skip(items.len()) {
-            callback.call::<()>((index, item.clone()))?;
+        for (index, item) in &previous.removed {
+            callback.call::<()>((*index, item.clone()))?;
+        }
+    }
+    if let Some(callback) = &displaced {
+        for (index, item) in &previous.displaced {
+            callback.call::<()>((*index, item.clone()))?;
         }
     }
 
-    let render = node.get::<Option<Function>>("render")?;
-    let mut children = Vec::with_capacity(items.len() + previous.leaving.len());
-    for (index, item) in items.into_iter().enumerate() {
-        let child = list_item(item, index, render.as_ref(), ctx)?;
-        if animate {
-            children.push(
-                ScaleItem::new(
-                    child,
-                    index >= previous.items.len(),
-                    duration,
-                    transition
-                        .as_ref()
-                        .map(|transition| transition.x)
-                        .unwrap_or((0.0, 0.0)),
-                    None,
-                    ctx.window(),
-                )
-                .into(),
-            );
-        } else {
-            children.push(child);
-        }
-    }
-    for (item, index, at) in previous.leaving {
-        let child = list_item(item, index, render.as_ref(), ctx)?;
-        children.push(
-            ScaleItem::new(
-                child,
-                false,
-                duration,
-                transition
-                    .as_ref()
-                    .map(|transition| transition.x)
-                    .unwrap_or((0.0, 0.0)),
-                Some(at),
-                ctx.window(),
-            )
-            .into(),
-        );
-    }
-
-    let spacing = number(node, "spacing", 0.0)?;
     let horizontal = match node.get::<Option<String>>("direction")?.as_deref() {
         None | Some("vertical") => false,
         Some("horizontal") => true,
@@ -307,7 +281,60 @@ pub(super) fn list_view(
             )));
         }
     };
-    let content = if horizontal {
+
+    let render = node.get::<Option<Function>>("render")?;
+    let x = transition
+        .as_ref()
+        .map(|transition| transition.x)
+        .unwrap_or((0.0, 0.0));
+    let mut children: Vec<Element<'static, Message>> =
+        Vec::with_capacity(items.len() + previous.leaving.len());
+    let mut keyed: Vec<(u64, Element<'static, Message>)> =
+        Vec::with_capacity(items.len() + previous.leaving.len());
+    for (index, item) in items.into_iter().enumerate() {
+        let child = list_item(item, index, render.as_ref(), ctx)?;
+        if animate {
+            let child = ScaleItem::new(
+                child,
+                previous.entering[index],
+                duration,
+                x,
+                None,
+                true,
+                ctx.window(),
+            )
+            .into();
+            keyed.push((previous.tokens[index], child));
+        } else {
+            children.push(child);
+        }
+    }
+    for leaving in previous.leaving {
+        let child = list_item(leaving.item, leaving.index, render.as_ref(), ctx)?;
+        let child = ScaleItem::new(
+            child,
+            false,
+            duration,
+            x,
+            Some(leaving.at),
+            false,
+            ctx.window(),
+        )
+        .into();
+        keyed.push((leaving.token, child));
+    }
+
+    let spacing = number(node, "spacing", 0.0)?;
+    let content = if animate {
+        let mut list = super::keyed::KeyedList::new(keyed, spacing, horizontal);
+        if let Some(width) = layout.width {
+            list = list.width(width);
+        }
+        if let Some(height) = layout.height {
+            list = list.height(height);
+        }
+        list.into()
+    } else if horizontal {
         let mut row = widget::Row::with_children(children).spacing(spacing);
         if let Some(width) = layout.width {
             row = row.width(width);
@@ -329,11 +356,32 @@ pub(super) fn list_view(
     Ok(content)
 }
 
+/// Identity for list matching. `key` names a scalar field on table items; when
+/// it is absent, the item value itself is the identity.
+fn list_key(item: &Value, key: Option<&str>) -> mlua::Result<Value> {
+    let Some(field) = key else {
+        return Ok(item.clone());
+    };
+    let Value::Table(table) = item else {
+        return Err(mlua::Error::runtime(
+            "list_view key requires table items; use render for data items",
+        ));
+    };
+    let value = table.get::<Value>(field)?;
+    match value {
+        Value::String(_) | Value::Integer(_) | Value::Number(_) | Value::Boolean(_) => Ok(value),
+        _ => Err(mlua::Error::runtime(format!(
+            "list_view item key {field:?} must be a string, number, or boolean"
+        ))),
+    }
+}
+
 struct ListTransition {
     duration: Duration,
     x: (f32, f32),
     added: Option<Function>,
     removed: Option<Function>,
+    displaced: Option<Function>,
 }
 
 fn list_transition(node: &Table) -> mlua::Result<Option<ListTransition>> {
@@ -344,9 +392,13 @@ fn list_transition(node: &Table) -> mlua::Result<Option<ListTransition>> {
             x: (0.0, 0.0),
             added: None,
             removed: None,
+            displaced: None,
         })),
         Value::Table(table) => {
-            crate::runtime::keys(&table, &["duration", "x", "onAdded", "onRemoved"])?;
+            crate::runtime::keys(
+                &table,
+                &["duration", "x", "onAdded", "onRemoved", "onDisplaced"],
+            )?;
             let duration = table.get::<Option<f64>>("duration")?.unwrap_or(200.0);
             if !(1.0..=86_400_000.0).contains(&duration) || duration.fract() != 0.0 {
                 return Err(mlua::Error::runtime(
@@ -379,6 +431,7 @@ fn list_transition(node: &Table) -> mlua::Result<Option<ListTransition>> {
                 x,
                 added: table.get::<Option<Function>>("onAdded")?,
                 removed: table.get::<Option<Function>>("onRemoved")?,
+                displaced: table.get::<Option<Function>>("onDisplaced")?,
             }))
         }
         _ => Err(mlua::Error::runtime(

@@ -3,6 +3,7 @@ mod canvas;
 mod containers;
 mod enums;
 mod input;
+mod keyed;
 mod layout;
 mod media;
 mod region;
@@ -475,6 +476,7 @@ fn build(
         "table" => &["columns", "spacing"],
         "list_view" => &[
             "id",
+            "key",
             "direction",
             "spacing",
             "render",
@@ -794,7 +796,7 @@ mod tests {
             "{kind='combo_box',id='combo',options={'a','b'},value='a',placeholder='pick',on_select='select',on_input='input',style={background='#111111',text_color='#ffffff'}}",
             "{kind='table',columns={{header='a',width=100,align_x='left'},{header='b',align_y='center'}},content={{'1','2'},{'3','4'}},spacing=1}",
             "{kind='list_view',id='list',content={{kind='text',content='x'}},spacing=4,render=function(item,index) return item end,on_item_added=function() end,on_item_removed=function() end}",
-            "{kind='list_view',id='list-animated',content={{kind='text',content='x'}},transition={duration=200,x={from=-180,to=0},onAdded=function() end,onRemoved=function() end}}",
+            "{kind='list_view',id='list-animated',content={{kind='text',content='x'}},transition={duration=200,x={from=-180,to=0},onAdded=function() end,onRemoved=function() end,onDisplaced=function() end}}",
             "{kind='region',content={kind='text',content='x'}}",
             "{kind='markdown',content='# hi',text_size=14,spacing=8,on_link_click='link',style={link_color='#22ff22',inline_code_color='#ffffff'}}",
             "{kind='responsive',content=function(size) return {kind='text',content=tostring(size.width)} end}",
@@ -835,6 +837,8 @@ mod tests {
             "{kind='list_view',id='list',content={},transition={duration=0}}",
             "{kind='list_view',id='list',content={},transition={x={from='left'}}}",
             "{kind='list_view',id='list',content={},transition={bogus=true}}",
+            "{kind='list_view',id='list',key='',content={}}",
+            "{kind='list_view',id='list',key='id',content={{kind='text',content='x'}}}",
             "{kind='region'}",
             "{kind='markdown',content='x',style={bogus='#ffffff'}}",
             "{kind='canvas',content={{type='rect',x=0,y=0,width=0,height=10,color='#ff0000'}}}",
@@ -1000,6 +1004,73 @@ mod tests {
         element(second, &ctx).unwrap();
         assert_eq!(lua.globals().get::<u32>("added").unwrap(), 2);
         assert_eq!(lua.globals().get::<u32>("removed").unwrap(), 1);
+    }
+
+    #[test]
+    fn list_view_displaces_survivors_and_fires_the_callback() {
+        let lua = mlua::Lua::new();
+        lua.load("added = ''; removed = ''; moved = ''")
+            .exec()
+            .unwrap();
+        let ctx = Ctx::new(8);
+        let first: Table = lua
+            .load(
+                "{kind='list_view',id='list-displaced',content={'a','b','c'},\
+                 transition={duration=100,onDisplaced=function(index,item) moved = moved .. item .. index end},\
+                 on_item_added=function(index,item) added = added .. item .. index end,\
+                 on_item_removed=function(index,item) removed = removed .. item .. index end}",
+            )
+            .eval()
+            .unwrap();
+        element(first, &ctx).unwrap();
+        assert_eq!(lua.globals().get::<String>("added").unwrap(), "a0b1c2");
+        assert_eq!(lua.globals().get::<String>("removed").unwrap(), "");
+        assert_eq!(lua.globals().get::<String>("moved").unwrap(), "");
+
+        let second: Table = lua
+            .load(
+                "{kind='list_view',id='list-displaced',content={'b','c'},\
+                 transition={duration=100,onDisplaced=function(index,item) moved = moved .. item .. index end},\
+                 on_item_added=function(index,item) added = added .. item .. index end,\
+                 on_item_removed=function(index,item) removed = removed .. item .. index end}",
+            )
+            .eval()
+            .unwrap();
+        element(second, &ctx).unwrap();
+        assert_eq!(lua.globals().get::<String>("added").unwrap(), "a0b1c2");
+        assert_eq!(lua.globals().get::<String>("removed").unwrap(), "a0");
+        assert_eq!(lua.globals().get::<String>("moved").unwrap(), "b0c1");
+    }
+
+    #[test]
+    fn list_view_key_keeps_identity_for_rebuilt_data_items() {
+        let lua = mlua::Lua::new();
+        lua.load("added = ''; moved = ''").exec().unwrap();
+        let ctx = Ctx::new(9);
+        let first: Table = lua
+            .load(
+                "{kind='list_view',id='list-key',key='id',content={{id='a'},{id='b'}},\
+                 render=function(item) return {kind='text',content=item.id} end,\
+                 transition={duration=100,onAdded=function(index,item) added = added .. item.id .. index end,\
+                 onDisplaced=function(index,item) moved = moved .. item.id .. index end}}",
+            )
+            .eval()
+            .unwrap();
+        element(first, &ctx).unwrap();
+        assert_eq!(lua.globals().get::<String>("added").unwrap(), "a0b1");
+
+        let second: Table = lua
+            .load(
+                "{kind='list_view',id='list-key',key='id',content={{id='a'},{id='x'},{id='b'}},\
+                 render=function(item) return {kind='text',content=item.id} end,\
+                 transition={duration=100,onAdded=function(index,item) added = added .. item.id .. index end,\
+                 onDisplaced=function(index,item) moved = moved .. item.id .. index end}}",
+            )
+            .eval()
+            .unwrap();
+        element(second, &ctx).unwrap();
+        assert_eq!(lua.globals().get::<String>("added").unwrap(), "a0b1x1");
+        assert_eq!(lua.globals().get::<String>("moved").unwrap(), "b2");
     }
 
     #[test]

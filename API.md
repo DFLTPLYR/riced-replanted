@@ -427,7 +427,7 @@ Every constructor also accepts these common props:
 | `transition` | `true`, table, or `false`   | Animate supported property changes; see [transitions](#property-transitions) |
 
 Widget-specific props are listed below. `transition` on `list_view` means item
-enter/leave animation instead of property animation.
+enter/leave/displacement animation instead of property animation.
 
 ### Widget reference
 
@@ -685,20 +685,24 @@ Props:
 | Prop             | Type       | Meaning                                                     |
 | ---------------- | ---------- | ----------------------------------------------------------- |
 | `id`             | string     | Required, nonempty identity for item tracking               |
+| `key`            | string     | Table field used as item identity; requires `render`        |
 | `direction`      | string     | `"vertical"` default or `"horizontal"`                      |
 | `spacing`        | number     | Gap between items                                           |
 | `render`         | function   | `(item, index) -> element`; index is zero-based             |
-| `on_item_added`  | function   | `(index, item)` when items are appended or first rendered   |
-| `on_item_removed`| function   | `(index, item)` when trailing items disappear               |
+| `on_item_added`  | function   | `(index, item)` when a value first appears                   |
+| `on_item_removed`| function   | `(index, item)` when a value disappears; index is its old slot |
 | `onItemAdded`    | function   | Alias for `on_item_added`                                   |
 | `onItemRemoved`  | function   | Alias for `on_item_removed`                                 |
-| `transition`     | boolean/table | Item enter/leave animation; see below                    |
+| `transition`     | boolean/table | Item enter/leave/displacement animation; see below        |
 
-Diffing is by item count only. Appended items and removals from the end are
-detected. Reordering or removing from the middle is not. Callbacks run during
-render, so state they change takes effect on the next render. The direct
-callbacks take precedence over `transition.onAdded`/`onRemoved` when both are
-set.
+Diffing matches items by `key` when set, otherwise by value. Inserting,
+removing, or reordering distinct items is detected and their positions animate;
+duplicate keys are matched in order. Lists whose Lua values are rebuilt every
+render (tables) fall back to index matching when no key or value matches, so
+they keep continuity but do not displace; set `key` to the stable field (for
+example `"id"`) to animate data items. Callbacks run during render, so state they
+change takes effect on the next render. The direct callbacks take precedence over
+`transition.onAdded`/`onRemoved` when both are set.
 
 `transition = true` uses a 200 ms scale animation. A table accepts:
 
@@ -708,12 +712,15 @@ transition = {
     x = { from = -180, to = 0 },          -- slide range; number means { n, 0 }
     onAdded = function(index, item) end,
     onRemoved = function(index, item) end,
+    onDisplaced = function(index, item) end,
 }
 ```
 
 New items transition from `x.from` to `x.to` while scaling from 0 to 1. Leaving
-items reverse that. Leaving items keep their layout space until the animation
-finishes. The transition only changes drawing; layout is not animated.
+items reverse that. `onDisplaced` runs for surviving items whose index changed;
+they glide from their previous slot to the new one over the same duration.
+Leaving items are drawn until the animation finishes. Transforms only change
+drawing; layout itself is not interpolated.
 
 #### `iced.markdown(content, props)`
 
@@ -1176,8 +1183,9 @@ it.
   from Lua; the host keeps the live layout per `id` until a shell reload.
 - `text_editor`, `combo_box`, and `pane_grid` state is keyed by `id` inside the
   process and is not shared between multiple `riced` instances.
-- `list_view` diffing is length-based; middle reorders and removals are not
-  detected.
+- `list_view` identity is `key` when set, otherwise value equality. With
+  recreated table items, set `key` (for example `"id"`) or middle
+  inserts/removals fall back to index matching and do not displace.
 - Generic transitions cannot fade a whole widget group. `svg` exposes its own
   `opacity`, and text color transitions include alpha; there is no group
   opacity.

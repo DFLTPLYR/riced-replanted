@@ -18,6 +18,11 @@ struct ScaleState {
     x_range: (f32, f32),
     leave_token: Option<Instant>,
     window: Option<window::Id>,
+    last_bounds: Option<Rectangle>,
+    shift: (f32, f32),
+    shift_from: (f32, f32),
+    shift_start: Instant,
+    shift_done: bool,
 }
 
 /// Scales content in or out. Layout is unchanged; only drawing is transformed.
@@ -27,16 +32,19 @@ pub(super) struct ScaleItem<'a> {
     duration: Duration,
     x_range: (f32, f32),
     leave_token: Option<Instant>,
+    displace: bool,
     window: Option<window::Id>,
 }
 
 impl<'a> ScaleItem<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         content: Element<'a, Message>,
         entering: bool,
         duration: Duration,
         x_range: (f32, f32),
         leave_token: Option<Instant>,
+        displace: bool,
         window: Option<window::Id>,
     ) -> Self {
         Self {
@@ -45,6 +53,7 @@ impl<'a> ScaleItem<'a> {
             duration,
             x_range,
             leave_token,
+            displace,
             window,
         }
     }
@@ -81,6 +90,11 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
             x_range: self.x_range,
             leave_token: self.leave_token,
             window: self.window,
+            last_bounds: None,
+            shift: (0.0, 0.0),
+            shift_from: (0.0, 0.0),
+            shift_start: Instant::now(),
+            shift_done: true,
         })
     }
 
@@ -111,6 +125,11 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
                 x_range: self.x_range,
                 leave_token: self.leave_token,
                 window: self.window,
+                last_bounds: None,
+                shift: (0.0, 0.0),
+                shift_from: (0.0, 0.0),
+                shift_start: Instant::now(),
+                shift_done: true,
             };
         }
     }
@@ -125,9 +144,28 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        self.content
+        let node = self
+            .content
             .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits)
+            .layout(&mut tree.children[0], renderer, limits);
+        let state = tree.state.downcast_mut::<ScaleState>();
+        let bounds = node.bounds();
+        if self.displace
+            && state.leave_token.is_none()
+            && let Some(previous) = state.last_bounds
+            && (previous.x != bounds.x || previous.y != bounds.y)
+        {
+            let shift = (
+                state.shift.0 + previous.x - bounds.x,
+                state.shift.1 + previous.y - bounds.y,
+            );
+            state.shift = shift;
+            state.shift_from = shift;
+            state.shift_start = Instant::now();
+            state.shift_done = false;
+        }
+        state.last_bounds = Some(bounds);
+        node
     }
 
     fn operate(
@@ -167,30 +205,46 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
             return;
         };
         let state = tree.state.downcast_mut::<ScaleState>();
-        if state.done {
-            return;
-        }
-        let elapsed = now.saturating_duration_since(state.start);
-        let duration = state.duration.as_secs_f32().max(f32::EPSILON);
-        let t = (elapsed.as_secs_f32() / duration).clamp(0.0, 1.0);
-        let eased = ease_out(t);
-        let progress = if state.entering { eased } else { 1.0 - eased };
-        state.scale = progress;
-        state.x = state.x_range.0 + (state.x_range.1 - state.x_range.0) * progress;
-        if t >= 1.0 {
-            state.done = true;
-            state.scale = if state.entering { 1.0 } else { 0.0 };
-            state.x = if state.entering {
-                state.x_range.1
+        let mut redraw = false;
+        if !state.done {
+            let elapsed = now.saturating_duration_since(state.start);
+            let duration = state.duration.as_secs_f32().max(f32::EPSILON);
+            let t = (elapsed.as_secs_f32() / duration).clamp(0.0, 1.0);
+            let eased = ease_out(t);
+            let progress = if state.entering { eased } else { 1.0 - eased };
+            state.scale = progress;
+            state.x = state.x_range.0 + (state.x_range.1 - state.x_range.0) * progress;
+            if t >= 1.0 {
+                state.done = true;
+                state.scale = if state.entering { 1.0 } else { 0.0 };
+                state.x = if state.entering {
+                    state.x_range.1
+                } else {
+                    state.x_range.0
+                };
+                if !state.entering
+                    && let Some(window) = state.window
+                {
+                    shell.publish(Message::RedrawWindow(window));
+                }
             } else {
-                state.x_range.0
-            };
-            if !state.entering
-                && let Some(window) = state.window
-            {
-                shell.publish(Message::RedrawWindow(window));
+                redraw = true;
             }
-        } else {
+        }
+        if !state.shift_done {
+            let elapsed = now.saturating_duration_since(state.shift_start);
+            let duration = state.duration.as_secs_f32().max(f32::EPSILON);
+            let t = (elapsed.as_secs_f32() / duration).clamp(0.0, 1.0);
+            let progress = 1.0 - ease_out(t);
+            state.shift = (state.shift_from.0 * progress, state.shift_from.1 * progress);
+            if t >= 1.0 {
+                state.shift = (0.0, 0.0);
+                state.shift_done = true;
+            } else {
+                redraw = true;
+            }
+        }
+        if redraw {
             shell.request_redraw();
         }
     }
@@ -231,7 +285,8 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         if state.scale <= 0.0 {
             return;
         }
-        if state.scale >= 0.999 {
+        let shifted = state.shift.0 != 0.0 || state.shift.1 != 0.0;
+        if state.scale >= 0.999 && !shifted {
             self.content.as_widget().draw(
                 &tree.children[0],
                 renderer,
@@ -245,9 +300,10 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         }
         let bounds = layout.bounds();
         let center = bounds.center();
-        let transformation = Transformation::translate(state.x + center.x, center.y)
-            * Transformation::scale(state.scale)
-            * Transformation::translate(-center.x, -center.y);
+        let transformation =
+            Transformation::translate(state.x + state.shift.0 + center.x, state.shift.1 + center.y)
+                * Transformation::scale(state.scale)
+                * Transformation::translate(-center.x, -center.y);
         renderer.with_transformation(transformation, |renderer| {
             self.content.as_widget().draw(
                 &tree.children[0],
