@@ -6,7 +6,8 @@ use std::{
     time::Duration,
 };
 
-use iced::{Element, Subscription, Task, Theme, theme, window};
+use iced::widget::operation;
+use iced::{Element, Size, Subscription, Task, Theme, theme, window};
 use iced_exwlshell::{
     Settings,
     actions::{ExwlShellCustomAction, ExwlShellCustomActionWithId},
@@ -21,12 +22,211 @@ use crate::{layers, modules, plugins, update, update::Layer, widgets, widgets::C
 #[derive(Debug, Clone)]
 pub enum Message {
     Lua(u64, Option<(String, u64)>, Value),
+    Widget(u64, Option<(String, u64)>, String, WidgetEvent),
+    Clipboard(u64, Option<String>),
+    Key(u64, KeyEvent),
+    Mouse(u64, MouseEvent),
+    Frame(u64),
+    Editor(u64, Option<(String, u64)>, EditorAction),
     Tick,
     CheckReload,
     PollPlugins,
     Reloaded,
     RedrawWindow(window::Id),
+    Resized(window::Id, Size),
+    Noop,
     Surface(ExwlShellCustomActionWithId),
+}
+
+/// Typed value carried by a widget event; converted to a Lua table on delivery.
+#[derive(Debug, Clone)]
+pub enum WidgetEvent {
+    Bool(bool),
+    Number(f32),
+    Text(String),
+    Point(f32, f32),
+    Size(f32, f32),
+    Pane(&'static str, usize),
+    Scroll {
+        x: f32,
+        y: f32,
+        relative_x: f32,
+        relative_y: f32,
+        bounds_width: f32,
+        bounds_height: f32,
+        content_width: f32,
+        content_height: f32,
+    },
+    None,
+}
+
+#[derive(Debug, Clone)]
+pub struct KeyEvent {
+    pub pressed: bool,
+    pub key: String,
+    pub text: Option<String>,
+    pub modifiers: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorAction {
+    pub id: String,
+    pub event: String,
+    pub input: bool,
+    pub action: iced::widget::text_editor::Action,
+}
+
+#[derive(Debug, Clone)]
+pub enum MouseEvent {
+    Press(String),
+    Release(String),
+    Move(f32, f32),
+    Scroll { x: f32, y: f32 },
+    Enter,
+    Leave,
+}
+
+fn key_payload(lua: &Lua, event: &KeyEvent) -> mlua::Result<Value> {
+    let payload = lua.create_table()?;
+    payload.set("type", "key")?;
+    payload.set("event", if event.pressed { "press" } else { "release" })?;
+    payload.set("key", event.key.as_str())?;
+    if let Some(text) = &event.text {
+        payload.set("text", text.as_str())?;
+    }
+    let table = lua.create_table()?;
+    let flags = iced::keyboard::Modifiers::from_bits_truncate(event.modifiers);
+    table.set("shift", flags.shift())?;
+    table.set("control", flags.control())?;
+    table.set("alt", flags.alt())?;
+    table.set("logo", flags.logo())?;
+    payload.set("modifiers", table)?;
+    Ok(Value::Table(payload))
+}
+
+fn mouse_payload(lua: &Lua, event: &MouseEvent) -> mlua::Result<Value> {
+    let payload = lua.create_table()?;
+    payload.set("type", "mouse")?;
+    match event {
+        MouseEvent::Press(button) => {
+            payload.set("event", "press")?;
+            payload.set("button", button.as_str())?;
+        }
+        MouseEvent::Release(button) => {
+            payload.set("event", "release")?;
+            payload.set("button", button.as_str())?;
+        }
+        MouseEvent::Move(x, y) => {
+            payload.set("event", "move")?;
+            payload.set("x", *x)?;
+            payload.set("y", *y)?;
+        }
+        MouseEvent::Scroll { x, y } => {
+            payload.set("event", "scroll")?;
+            payload.set("x", *x)?;
+            payload.set("y", *y)?;
+        }
+        MouseEvent::Enter => payload.set("event", "enter")?,
+        MouseEvent::Leave => payload.set("event", "leave")?,
+    }
+    Ok(Value::Table(payload))
+}
+
+fn frame_payload(lua: &Lua) -> mlua::Result<Value> {
+    let payload = lua.create_table()?;
+    payload.set("type", "frame")?;
+    Ok(Value::Table(payload))
+}
+
+fn editor_payload(
+    lua: &Lua,
+    component: &Option<(String, u64)>,
+    action: &EditorAction,
+    text: &str,
+) -> mlua::Result<Value> {
+    let payload = lua.create_table()?;
+    payload.set("event", action.event.as_str())?;
+    if let Some((id, _)) = component {
+        payload.set("widget", id.as_str())?;
+    }
+    if action.input {
+        payload.set("value", text)?;
+    } else {
+        payload.set("value", action_name(&action.action))?;
+        payload.set("text", text)?;
+    }
+    Ok(Value::Table(payload))
+}
+
+fn action_name(action: &iced::widget::text_editor::Action) -> &'static str {
+    match action {
+        iced::widget::text_editor::Action::Edit(_) => "edit",
+        iced::widget::text_editor::Action::Move(_) => "move",
+        iced::widget::text_editor::Action::Select(_) => "select",
+        iced::widget::text_editor::Action::SelectWord => "select_word",
+        iced::widget::text_editor::Action::SelectLine => "select_line",
+        iced::widget::text_editor::Action::SelectAll => "select_all",
+        iced::widget::text_editor::Action::Click(_) => "click",
+        iced::widget::text_editor::Action::Drag(_) => "drag",
+        iced::widget::text_editor::Action::Scroll { .. } => "scroll",
+    }
+}
+
+fn widget_event(
+    lua: &Lua,
+    component: &Option<(String, u64)>,
+    event: &str,
+    value: &WidgetEvent,
+) -> mlua::Result<Value> {
+    let payload = lua.create_table()?;
+    payload.set("event", event)?;
+    if let Some((id, _)) = component {
+        payload.set("widget", id.as_str())?;
+    }
+    match value {
+        WidgetEvent::Bool(value) => payload.set("value", *value)?,
+        WidgetEvent::Number(value) => payload.set("value", *value)?,
+        WidgetEvent::Text(value) => payload.set("value", value.as_str())?,
+        WidgetEvent::Point(x, y) => {
+            let point = lua.create_table()?;
+            point.set("x", *x)?;
+            point.set("y", *y)?;
+            payload.set("value", point)?;
+        }
+        WidgetEvent::Size(width, height) => {
+            let size = lua.create_table()?;
+            size.set("width", *width)?;
+            size.set("height", *height)?;
+            payload.set("value", size)?;
+        }
+        WidgetEvent::Pane(action, index) => {
+            payload.set("value", *action)?;
+            payload.set("pane", *index)?;
+        }
+        WidgetEvent::Scroll {
+            x,
+            y,
+            relative_x,
+            relative_y,
+            bounds_width,
+            bounds_height,
+            content_width,
+            content_height,
+        } => {
+            let viewport = lua.create_table()?;
+            viewport.set("x", *x)?;
+            viewport.set("y", *y)?;
+            viewport.set("relative_x", *relative_x)?;
+            viewport.set("relative_y", *relative_y)?;
+            viewport.set("bounds_width", *bounds_width)?;
+            viewport.set("bounds_height", *bounds_height)?;
+            viewport.set("content_width", *content_width)?;
+            viewport.set("content_height", *content_height)?;
+            payload.set("value", viewport)?;
+        }
+        WidgetEvent::None => {}
+    }
+    Ok(Value::Table(payload))
 }
 
 // What the 250 ms reload poll wants redrawn. Scope only spans one window per message,
@@ -41,6 +241,9 @@ enum Change {
 struct Mount {
     module: String,
     revision: u64,
+    window: window::Id,
+    props: Table,
+    table: Table,
 }
 
 impl TryFrom<Message> for ExwlShellCustomActionWithId {
@@ -73,7 +276,9 @@ pub struct App {
     pending: Vec<ExwlShellCustomActionWithId>,
     modules: RefCell<modules::Modules>,
     mounts: RefCell<HashMap<String, Mount>>,
+    seen: RefCell<HashSet<String>>,
     windows_of: RefCell<HashMap<String, Vec<window::Id>>>,
+    sizes: RefCell<HashMap<window::Id, Size>>,
     plugins: Rc<RefCell<plugins::Plugins>>,
 }
 
@@ -143,7 +348,9 @@ pub fn load_with_plugins(
         pending: Vec::new(),
         modules: RefCell::new(modules::Modules::default()),
         mounts: RefCell::new(HashMap::new()),
+        seen: RefCell::new(HashSet::new()),
         windows_of: RefCell::new(HashMap::new()),
+        sizes: RefCell::new(HashMap::new()),
         plugins,
     };
     for name in ["title", "subscription", "style", "redraw_scope"] {
@@ -174,35 +381,206 @@ impl App {
         Ok(Value::UserData(self.lua.create_userdata(Window(id))?))
     }
 
-    fn update(&mut self, message: Message) -> mlua::Result<()> {
-        let event = match message {
+    fn stale(&self, component: &Option<(String, u64)>) -> bool {
+        let Some((id, revision)) = component else {
+            return false;
+        };
+        // Events from a component whose module reloaded in the meantime are stale.
+        let current = self.mounts.borrow().get(id).cloned();
+        current.is_none_or(|mount| {
+            mount.revision != *revision
+                || self.modules.borrow().revision(&mount.module) != *revision
+        })
+    }
+
+    fn update(&mut self, message: Message) -> mlua::Result<Task<Message>> {
+        let (event, origin) = match message {
             Message::Lua(generation, component, value) if generation == self.generation => {
-                if let Some((id, revision)) = component {
-                    // Events from a component whose module reloaded in the meantime are stale.
-                    let current = self.mounts.borrow().get(&id).cloned();
-                    let stale = current.is_none_or(|mount| {
-                        mount.revision != revision
-                            || self.modules.borrow().revision(&mount.module) != revision
-                    });
-                    if stale {
-                        return Ok(());
-                    }
+                if self.stale(&component) {
+                    return Ok(Task::none());
                 }
-                value
+                (value, component.map(|(id, _)| id))
+            }
+            Message::Widget(generation, component, event, value)
+                if generation == self.generation =>
+            {
+                if self.stale(&component) {
+                    return Ok(Task::none());
+                }
+                (
+                    widget_event(&self.lua, &component, &event, &value)?,
+                    component.map(|(id, _)| id),
+                )
+            }
+            Message::Clipboard(generation, value) if generation == self.generation => {
+                let event = self.lua.create_table()?;
+                event.set("type", "clipboard")?;
+                if let Some(value) = value {
+                    event.set("value", value)?;
+                }
+                (Value::Table(event), None)
+            }
+            Message::Key(generation, event) if generation == self.generation => {
+                (key_payload(&self.lua, &event)?, None)
+            }
+            Message::Mouse(generation, event) if generation == self.generation => {
+                (mouse_payload(&self.lua, &event)?, None)
+            }
+            Message::Frame(generation) if generation == self.generation => {
+                (frame_payload(&self.lua)?, None)
+            }
+            Message::Editor(generation, component, action) if generation == self.generation => {
+                if self.stale(&component) {
+                    return Ok(Task::none());
+                }
+                let Some(text) = widgets::edit(generation, &action.id, action.action.clone())
+                else {
+                    return Ok(Task::none());
+                };
+                (
+                    editor_payload(&self.lua, &component, &action, &text)?,
+                    component.map(|(id, _)| id),
+                )
             }
             Message::Lua(..)
+            | Message::Widget(..)
+            | Message::Clipboard(..)
+            | Message::Key(..)
+            | Message::Mouse(..)
+            | Message::Frame(..)
+            | Message::Editor(..)
             | Message::CheckReload
             | Message::PollPlugins
             | Message::Reloaded
             | Message::RedrawWindow(_)
-            | Message::Surface(_) => return Ok(()),
+            | Message::Noop
+            | Message::Surface(_) => return Ok(Task::none()),
+            Message::Resized(id, size) => {
+                self.sizes.borrow_mut().insert(id, size);
+                return Ok(Task::none());
+            }
             Message::Tick => {
                 let event = self.lua.create_table()?;
                 event.set("type", "tick")?;
-                Value::Table(event)
+                (Value::Table(event), None)
             }
         };
-        self.update.call((self.state.clone(), event))
+        let value = self.update.call((self.state.clone(), event, origin))?;
+        self.tasks(value)
+    }
+
+    fn tasks(&self, value: Value) -> mlua::Result<Task<Message>> {
+        let Value::Table(table) = value else {
+            return match value {
+                Value::Nil => Ok(Task::none()),
+                _ => Err(mlua::Error::runtime(
+                    "update must return nil, a task, or a list of tasks",
+                )),
+            };
+        };
+        if table.get::<Option<String>>("type")?.is_some() {
+            return self.task(&table);
+        }
+        Ok(Task::batch(
+            table
+                .sequence_values::<Table>()
+                .map(|task| task.and_then(|task| self.task(&task)))
+                .collect::<mlua::Result<Vec<_>>>()?,
+        ))
+    }
+
+    fn task(&self, task: &Table) -> mlua::Result<Task<Message>> {
+        let kind: String = task.get("type")?;
+        match kind.as_str() {
+            "focus" => {
+                keys(task, &["type", "id"])?;
+                let id: String = task.get("id")?;
+                Ok(operation::focus(widget_id(&id)))
+            }
+            "scroll_to" => {
+                keys(task, &["type", "id", "x", "y"])?;
+                let id: String = task.get("id")?;
+                let x = task.get::<Option<f32>>("x")?.unwrap_or(0.0);
+                let y = task.get::<Option<f32>>("y")?.unwrap_or(0.0);
+                if !x.is_finite() || !y.is_finite() {
+                    return Err(mlua::Error::runtime("scroll_to x and y must be finite"));
+                }
+                Ok(operation::scroll_to(
+                    widget_id(&id),
+                    operation::AbsoluteOffset {
+                        x: Some(x),
+                        y: Some(y),
+                    },
+                ))
+            }
+            "clipboard_read" => {
+                keys(task, &["type"])?;
+                let generation = self.generation;
+                Ok(iced::clipboard::read().map(move |value| Message::Clipboard(generation, value)))
+            }
+            "clipboard_write" => {
+                keys(task, &["type", "content"])?;
+                let content: String = task.get("content")?;
+                Ok(iced::clipboard::write::<Message>(content))
+            }
+            "font" => {
+                keys(task, &["type", "path"])?;
+                let path: String = task.get("path")?;
+                let bytes = std::fs::read(&path).map_err(|error| {
+                    mlua::Error::runtime(format!("cannot read font {path}: {error}"))
+                })?;
+                Ok(iced::font::load(bytes).discard())
+            }
+            "window" => self.window_task(task),
+            "exit" => {
+                keys(task, &["type"])?;
+                Ok(iced::exit())
+            }
+            other => Err(mlua::Error::runtime(format!(
+                "unknown task {other:?}; use focus, scroll_to, clipboard_read, clipboard_write, font, window, or exit"
+            ))),
+        }
+    }
+
+    fn window_task(&self, task: &Table) -> mlua::Result<Task<Message>> {
+        keys(
+            task,
+            &[
+                "type", "action", "window", "width", "height", "x", "y", "mode",
+            ],
+        )?;
+        let id = task
+            .get::<Value>("window")?
+            .as_userdata()
+            .ok_or_else(|| mlua::Error::runtime("window task needs a props.window"))?
+            .borrow::<Window>()?
+            .0;
+        match task.get::<String>("action")?.as_str() {
+            "resize" => {
+                let width: f32 = task.get("width")?;
+                let height: f32 = task.get("height")?;
+                if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+                    return Err(mlua::Error::runtime(
+                        "window resize needs positive width and height",
+                    ));
+                }
+                Ok(iced::window::resize(id, Size::new(width, height)))
+            }
+            "move" => {
+                let x: f32 = task.get("x")?;
+                let y: f32 = task.get("y")?;
+                if !x.is_finite() || !y.is_finite() {
+                    return Err(mlua::Error::runtime("window move needs finite x and y"));
+                }
+                Ok(iced::window::move_to(id, iced::Point::new(x, y)))
+            }
+            "close" => Ok(iced::window::close(id)),
+            "fullscreen" => Ok(iced::window::set_mode(id, window::Mode::Fullscreen)),
+            "windowed" => Ok(iced::window::set_mode(id, window::Mode::Windowed)),
+            other => Err(mlua::Error::runtime(format!(
+                "unknown window action {other:?}; use resize, move, close, fullscreen, or windowed"
+            ))),
+        }
     }
 
     fn poll_plugins(&mut self) -> mlua::Result<bool> {
@@ -223,6 +601,10 @@ impl App {
     fn view_node(&self, id: window::Id) -> mlua::Result<Table> {
         let props = self.lua.create_table()?;
         props.set("window", self.window(id)?)?;
+        if let Some(size) = self.sizes.borrow().get(&id) {
+            props.set("width", size.width)?;
+            props.set("height", size.height)?;
+        }
         let node = self.view.call((self.state.clone(), props))?;
         self.modules.borrow_mut().watch_all(&self.lua)?;
         Ok(node)
@@ -294,16 +676,9 @@ impl App {
             mlua::Error::runtime(format!("module {module} must define a view function"))
         })?;
         let revision = self.modules.borrow().revision(&module);
-        let child: Table = view.call((table, props, self.window(window)?))?;
-        self.mounts.borrow_mut().insert(
-            id.clone(),
-            Mount {
-                module: module.clone(),
-                revision,
-            },
-        );
+        let child: Table = view.call((table.clone(), props.clone(), self.window(window)?))?;
         let mut windows_of = self.windows_of.borrow_mut();
-        let owners = windows_of.entry(module).or_default();
+        let owners = windows_of.entry(module.clone()).or_default();
         if !owners.contains(&window) {
             owners.push(window);
         }
@@ -311,6 +686,29 @@ impl App {
         path.push(id.clone());
         let child = self.expand(child, window, path, ids)?;
         path.pop();
+        // The discovery pass renders with a throwaway window id; only tracked windows
+        // get mounts and lifecycle signals.
+        if self.windows.borrow().contains(&window) {
+            let first = self
+                .mounts
+                .borrow()
+                .get(&id)
+                .is_none_or(|mount| mount.window != window);
+            self.mounts.borrow_mut().insert(
+                id.clone(),
+                Mount {
+                    module,
+                    revision,
+                    window,
+                    props: props.clone(),
+                    table: table.clone(),
+                },
+            );
+            self.seen.borrow_mut().insert(id.clone());
+            if first && let Some(hook) = table.get::<Option<Function>>("on_visible")? {
+                hook.call::<()>((table, props, self.window(window)?))?;
+            }
+        }
         child.set("__component_id", id)?;
         child.set("__component_revision", revision)?;
         Ok(child)
@@ -389,6 +787,12 @@ impl App {
     }
 
     fn view(&self, id: window::Id) -> mlua::Result<Element<'static, Message>> {
+        // Registered before rendering so component mount/unmount signals skip the
+        // surface-discovery pass, which renders with a throwaway window id.
+        if !self.windows.borrow().contains(&id) {
+            self.windows.borrow_mut().push(id);
+        }
+        self.seen.borrow_mut().clear();
         let mut node = self.view_node(id)?;
         if !self.layers.is_empty() {
             let nodes = layers::nodes(node)?;
@@ -432,12 +836,34 @@ impl App {
         let mut path = Vec::new();
         let mut ids = HashSet::new();
         let node = self.expand(node, id, &mut path, &mut ids)?;
-        let element = widgets::element(node, &Ctx::new(self.generation))?;
-        let mut windows = self.windows.borrow_mut();
-        if !windows.contains(&id) {
-            windows.push(id);
-        }
+        self.destroy_unmounted(id)?;
+        let element = widgets::element(
+            node,
+            &Ctx::new(self.generation)
+                .with_lua(self.lua.clone())
+                .with_window(id),
+        )?;
         Ok(element)
+    }
+
+    // Components expanded in this render are in `seen`; the rest of this window's mounts
+    // disappeared from the tree.
+    fn destroy_unmounted(&self, window: window::Id) -> mlua::Result<()> {
+        let seen = std::mem::take(&mut *self.seen.borrow_mut());
+        let destroyed: Vec<(String, Mount)> = self
+            .mounts
+            .borrow()
+            .iter()
+            .filter(|(id, mount)| mount.window == window && !seen.contains(*id))
+            .map(|(id, mount)| (id.clone(), mount.clone()))
+            .collect();
+        for (id, mount) in destroyed {
+            self.mounts.borrow_mut().remove(&id);
+            if let Some(hook) = mount.table.get::<Option<Function>>("on_destroyed")? {
+                hook.call::<()>((mount.table, mount.props, self.window(window)?))?;
+            }
+        }
+        Ok(())
     }
 
     fn theme(&self, id: window::Id) -> mlua::Result<Theme> {
@@ -502,20 +928,67 @@ impl App {
     }
 
     fn subscription(&self) -> mlua::Result<Subscription<Message>> {
-        match self.call("subscription", Value::Boolean(true))? {
-            Value::Nil => Ok(Subscription::none()),
-            Value::Table(table) => {
-                let ms: u64 = table.get("every")?;
-                if !(1..=86_400_000).contains(&ms) {
-                    return Err(mlua::Error::runtime(
-                        "timer interval must be from 1 to 86400000 ms",
-                    ));
-                }
-                Ok(iced::time::every(Duration::from_millis(ms)).map(|_| Message::Tick))
+        let value = self.call("subscription", Value::Boolean(true))?;
+        let descriptors = match value {
+            Value::Nil => Vec::new(),
+            Value::Table(table) if table.get::<Option<f64>>("every")?.is_some() => vec![table],
+            Value::Table(table) if table.get::<Option<String>>("type")?.is_some() => vec![table],
+            Value::Table(list) => list
+                .sequence_values::<Table>()
+                .collect::<mlua::Result<Vec<_>>>()?,
+            _ => {
+                return Err(mlua::Error::runtime(
+                    "subscription must return a subscription, a list, or nil",
+                ));
             }
-            _ => Err(mlua::Error::runtime(
-                "subscription must return iced.every(ms) or nil",
-            )),
+        };
+        let mut subscriptions = Vec::new();
+        for descriptor in descriptors {
+            subscriptions.push(self.subscription_item(&descriptor)?);
+        }
+        subscriptions.push(window::events().filter_map(|(id, event)| match event {
+            window::Event::Opened { size, .. } | window::Event::Resized(size) => {
+                Some(Message::Resized(id, size))
+            }
+            _ => None,
+        }));
+        Ok(Subscription::batch(subscriptions))
+    }
+
+    fn subscription_item(&self, descriptor: &Table) -> mlua::Result<Subscription<Message>> {
+        if let Some(ms) = descriptor.get::<Option<f64>>("every")? {
+            keys(descriptor, &["every"])?;
+            if !(1.0..=86_400_000.0).contains(&ms) || ms.fract() != 0.0 {
+                return Err(mlua::Error::runtime(
+                    "timer interval must be a whole number from 1 to 86400000 ms",
+                ));
+            }
+            return Ok(iced::time::every(Duration::from_millis(ms as u64)).map(|_| Message::Tick));
+        }
+        let generation = self.generation;
+        match descriptor.get::<String>("type")?.as_str() {
+            "frames" => {
+                keys(descriptor, &["type"])?;
+                Ok(window::frames().with(generation).map(frame_message))
+            }
+            "key" => {
+                keys(descriptor, &["type", "pressed"])?;
+                let pressed = descriptor.get::<Option<bool>>("pressed")?;
+                Ok(iced::event::listen()
+                    .filter_map(keyboard_event)
+                    .with((generation, pressed))
+                    .filter_map(key_message))
+            }
+            "mouse" => {
+                keys(descriptor, &["type"])?;
+                Ok(iced::event::listen()
+                    .filter_map(mouse_event)
+                    .with(generation)
+                    .map(mouse_message))
+            }
+            other => Err(mlua::Error::runtime(format!(
+                "unknown subscription {other:?}; use every, frames, key, or mouse"
+            ))),
         }
     }
 
@@ -523,10 +996,45 @@ impl App {
         let event = match message {
             Message::CheckReload | Message::PollPlugins => return Ok(Scope::None),
             Message::Reloaded => return Ok(Scope::All),
-            Message::Surface(_) => return Ok(Scope::None),
+            Message::Noop | Message::Surface(_) => return Ok(Scope::None),
             Message::RedrawWindow(id) => return Ok(Scope::Window(*id)),
+            Message::Resized(id, _) => return Ok(Scope::Window(*id)),
+            Message::Key(generation, event) if *generation == self.generation => {
+                key_payload(&self.lua, event)?
+            }
+            Message::Mouse(generation, event) if *generation == self.generation => {
+                mouse_payload(&self.lua, event)?
+            }
+            Message::Frame(generation) if *generation == self.generation => {
+                frame_payload(&self.lua)?
+            }
+            Message::Editor(generation, component, action) if *generation == self.generation => {
+                if self.stale(component) {
+                    return Ok(Scope::None);
+                }
+                let text = widgets::editor_text(*generation, &action.id).unwrap_or_default();
+                editor_payload(&self.lua, component, action, &text)?
+            }
+            Message::Key(..) | Message::Mouse(..) | Message::Frame(..) | Message::Editor(..) => {
+                return Ok(Scope::None);
+            }
+            Message::Clipboard(generation, value) if *generation == self.generation => {
+                let event = self.lua.create_table()?;
+                event.set("type", "clipboard")?;
+                if let Some(value) = value {
+                    event.set("value", value.as_str())?;
+                }
+                Value::Table(event)
+            }
+            Message::Clipboard(..) => return Ok(Scope::None),
             Message::Lua(generation, _, value) if *generation == self.generation => value.clone(),
             Message::Lua(..) => return Ok(Scope::None),
+            Message::Widget(generation, component, event, value)
+                if *generation == self.generation =>
+            {
+                widget_event(&self.lua, component, event, value)?
+            }
+            Message::Widget(..) => return Ok(Scope::None),
             Message::Tick => {
                 let event = self.lua.create_table()?;
                 event.set("type", "tick")?;
@@ -736,7 +1244,7 @@ impl App {
                         Task::none()
                     };
                 } else {
-                    checked(app.update(message));
+                    return checked(app.update(message));
                 }
                 Task::none()
             },
@@ -770,6 +1278,94 @@ pub(crate) fn keys(table: &Table, allowed: &[&str]) -> mlua::Result<()> {
         }
     }
     Ok(())
+}
+
+fn widget_id(id: &str) -> iced::widget::Id {
+    iced::widget::Id::new(widgets::intern(id))
+}
+
+fn key_name(key: iced::keyboard::Key) -> String {
+    match key {
+        iced::keyboard::Key::Named(named) => format!("{named:?}"),
+        iced::keyboard::Key::Character(character) => character.to_string(),
+        iced::keyboard::Key::Unidentified => "Unidentified".to_owned(),
+    }
+}
+
+fn button_name(button: iced::mouse::Button) -> &'static str {
+    match button {
+        iced::mouse::Button::Left => "left",
+        iced::mouse::Button::Right => "right",
+        iced::mouse::Button::Middle => "middle",
+        iced::mouse::Button::Back => "back",
+        iced::mouse::Button::Forward => "forward",
+        iced::mouse::Button::Other(_) => "other",
+    }
+}
+
+fn frame_message((generation, _): (u64, iced::time::Instant)) -> Message {
+    Message::Frame(generation)
+}
+
+fn keyboard_event(event: iced::Event) -> Option<KeyEvent> {
+    let iced::Event::Keyboard(event) = event else {
+        return None;
+    };
+    match event {
+        iced::keyboard::Event::KeyPressed {
+            key,
+            text,
+            modifiers,
+            ..
+        } => Some(KeyEvent {
+            pressed: true,
+            key: key_name(key),
+            text: text.map(|text| text.to_string()),
+            modifiers: modifiers.bits(),
+        }),
+        iced::keyboard::Event::KeyReleased { key, modifiers, .. } => Some(KeyEvent {
+            pressed: false,
+            key: key_name(key),
+            text: None,
+            modifiers: modifiers.bits(),
+        }),
+        iced::keyboard::Event::ModifiersChanged(_) => None,
+    }
+}
+
+fn key_message(((generation, pressed), event): ((u64, Option<bool>), KeyEvent)) -> Option<Message> {
+    if pressed.is_some_and(|pressed| pressed != event.pressed) {
+        return None;
+    }
+    Some(Message::Key(generation, event))
+}
+
+fn mouse_event(event: iced::Event) -> Option<MouseEvent> {
+    let iced::Event::Mouse(event) = event else {
+        return None;
+    };
+    Some(match event {
+        iced::mouse::Event::CursorEntered => MouseEvent::Enter,
+        iced::mouse::Event::CursorLeft => MouseEvent::Leave,
+        iced::mouse::Event::CursorMoved { position } => MouseEvent::Move(position.x, position.y),
+        iced::mouse::Event::ButtonPressed(button) => {
+            MouseEvent::Press(button_name(button).to_owned())
+        }
+        iced::mouse::Event::ButtonReleased(button) => {
+            MouseEvent::Release(button_name(button).to_owned())
+        }
+        iced::mouse::Event::WheelScrolled { delta } => {
+            let (x, y) = match delta {
+                iced::mouse::ScrollDelta::Lines { x, y } => (x, y),
+                iced::mouse::ScrollDelta::Pixels { x, y } => (x, y),
+            };
+            MouseEvent::Scroll { x, y }
+        }
+    })
+}
+
+fn mouse_message((generation, event): (u64, MouseEvent)) -> Message {
+    Message::Mouse(generation, event)
 }
 
 #[cfg(test)]
@@ -818,7 +1414,7 @@ mod tests {
         let mut app = load(RELOAD_SHELL, &file.0).unwrap();
         let id = window::Id::unique();
         app.view(id).unwrap();
-        app.update(Message::Tick).unwrap();
+        let _ = app.update(Message::Tick).unwrap();
         assert!(matches!(app.check_reload().unwrap(), Change::None));
         assert_eq!(app.state.get::<u32>("count").unwrap(), 1);
 
@@ -846,7 +1442,7 @@ mod tests {
         let mut app = load(RELOAD_SHELL, &file.0).unwrap();
         let id = window::Id::unique();
         app.view(id).unwrap();
-        app.update(Message::Tick).unwrap();
+        let _ = app.update(Message::Tick).unwrap();
 
         for source in [
             "not valid Lua".to_owned(),
@@ -926,11 +1522,33 @@ mod tests {
         app.reload(&RELOAD_SHELL.replace("before", "after"))
             .unwrap();
         assert_eq!(app.redraw(&event).unwrap(), Scope::None);
-        app.update(event).unwrap();
+        let _ = app.update(event).unwrap();
         assert_eq!(app.state.get::<u32>("count").unwrap(), 0);
-        app.update(Message::Lua(app.generation, None, Value::Nil))
+        let _ = app
+            .update(Message::Lua(app.generation, None, Value::Nil))
             .unwrap();
         assert_eq!(app.state.get::<u32>("count").unwrap(), 1);
+    }
+
+    #[test]
+    fn custom_widget_definition_renders() {
+        let app = load(
+            r#"
+            iced.define("greeting", function()
+                local widget = {}
+                function widget:view(props)
+                    return iced.text(props.text)
+                end
+                return widget
+            end)
+            return riced.daemon({}, 'test', function() end, function()
+                return iced.greeting({ text = "hello" })
+            end):run()
+        "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        app.view(window::Id::unique()).unwrap();
     }
 
     #[test]
@@ -973,7 +1591,7 @@ mod tests {
         for layer in &app.layers {
             app.view(layer.window).unwrap();
         }
-        app.update(Message::Tick).unwrap();
+        let _ = app.update(Message::Tick).unwrap();
         app.view(app.layers[1].window).unwrap();
         assert_eq!(app.state.get::<u32>("count").unwrap(), 1);
         let id = app.layers[0].window;
@@ -1129,6 +1747,107 @@ return m",
     }
 
     #[test]
+    fn update_receives_the_originating_component() {
+        let shell = r#"
+            local app = { origin = 'none' }
+            function app:update(event, component) self.origin = component or 'none' end
+            function app:view() return iced.component('left', 'left') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let left = "local m = {}
+function m:view() return iced.text('left') end
+return m";
+        let profile = Profile::new(&[("shell.lua", shell), ("left.lua", left)]);
+        let mut app = load(shell, &profile.shell()).unwrap();
+        let id = window::Id::unique();
+        app.view(id).unwrap();
+
+        let click = Value::String(app.lua.create_string("click").unwrap());
+        let _ = app
+            .update(Message::Lua(
+                app.generation,
+                Some(("left".into(), 0)),
+                click,
+            ))
+            .unwrap();
+        assert_eq!(app.state.get::<String>("origin").unwrap(), "left");
+
+        let _ = app.update(Message::Tick).unwrap();
+        assert_eq!(app.state.get::<String>("origin").unwrap(), "none");
+    }
+
+    #[test]
+    fn widget_events_reach_update_with_typed_values() {
+        let shell = r#"
+            local app = {}
+            function app:update(event) seen = event end
+            function app:view() return iced.text('x') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let mut app = load(shell, Path::new("shell.lua")).unwrap();
+        let _ = app
+            .update(Message::Widget(
+                app.generation,
+                None,
+                "input".into(),
+                WidgetEvent::Text("abc".into()),
+            ))
+            .unwrap();
+        let seen: Table = app.lua.globals().get("seen").unwrap();
+        assert_eq!(seen.get::<String>("event").unwrap(), "input");
+        assert_eq!(seen.get::<String>("value").unwrap(), "abc");
+
+        let _ = app
+            .update(Message::Widget(
+                app.generation,
+                None,
+                "toggle".into(),
+                WidgetEvent::Bool(true),
+            ))
+            .unwrap();
+        let seen: Table = app.lua.globals().get("seen").unwrap();
+        assert!(seen.get::<bool>("value").unwrap());
+    }
+
+    #[test]
+    fn component_lifecycle_signals_fire_once_per_mount() {
+        let shell = r#"
+            show = true
+            local app = {}
+            function app:update(event) end
+            function app:view()
+                if not show then return iced.text('empty') end
+                return iced.component('left', 'left')
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let left = r#"
+            local m = {}
+            function m:view() return iced.text('left') end
+            function m:on_visible(props, window)
+                visible = (visible or 0) + 1
+            end
+            function m:on_destroyed(props, window)
+                destroyed = (destroyed or 0) + 1
+            end
+            return m
+        "#;
+        let profile = Profile::new(&[("shell.lua", shell), ("left.lua", left)]);
+        let app = load(shell, &profile.shell()).unwrap();
+        let id = window::Id::unique();
+
+        app.view(id).unwrap();
+        app.view(id).unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("visible").unwrap(), 1);
+        assert!(app.mounts.borrow().contains_key("left"));
+
+        app.lua.globals().set("show", false).unwrap();
+        app.view(id).unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("destroyed").unwrap(), 1);
+        assert!(app.mounts.borrow().is_empty());
+    }
+
+    #[test]
     fn rejects_duplicate_and_cyclic_components() {
         for view in [
             "iced.column({iced.component('same', 'left'), iced.component('same', 'right')})",
@@ -1196,14 +1915,15 @@ return m",
         app.check_reload().unwrap();
         app.view(id).unwrap();
 
-        app.update(old).unwrap();
+        let _ = app.update(old).unwrap();
         assert_eq!(app.state.get::<u32>("count").unwrap(), 0);
-        app.update(Message::Lua(
-            app.generation,
-            Some(("left".into(), 1)),
-            Value::String(app.lua.create_string("click").unwrap()),
-        ))
-        .unwrap();
+        let _ = app
+            .update(Message::Lua(
+                app.generation,
+                Some(("left".into(), 1)),
+                Value::String(app.lua.create_string("click").unwrap()),
+            ))
+            .unwrap();
         assert_eq!(app.state.get::<u32>("count").unwrap(), 1);
     }
 
@@ -1285,7 +2005,7 @@ return m",
         "#, Path::new("shell.lua")).unwrap();
         let id = window::Id::unique();
         app.view(id).unwrap();
-        app.update(Message::Tick).unwrap();
+        let _ = app.update(Message::Tick).unwrap();
         assert_eq!(app.state.get::<u32>("count").unwrap(), 1);
         assert_eq!(app.redraw(&Message::Tick).unwrap(), Scope::Window(id));
     }
@@ -1324,6 +2044,35 @@ return m",
             app.theme(window::Id::unique()).unwrap().palette().primary,
             iced::Color::from_rgb8(0xab, 0xcd, 0xef)
         );
+    }
+
+    #[test]
+    fn view_receives_surface_size_after_resize() {
+        let shell = r#"
+            local app = {}
+            function app:view(props)
+                seen_width = props.width
+                seen_height = props.height
+                return iced.text('x')
+            end
+            return riced.daemon(app, 'test', function() end, app.view):run()
+        "#;
+        let mut app = load(shell, Path::new("shell.lua")).unwrap();
+        let id = window::Id::unique();
+        app.view(id).unwrap();
+        assert!(
+            app.lua
+                .globals()
+                .get::<Option<f32>>("seen_width")
+                .unwrap()
+                .is_none()
+        );
+        let _ = app
+            .update(Message::Resized(id, Size::new(800.0, 60.0)))
+            .unwrap();
+        app.view(id).unwrap();
+        assert_eq!(app.lua.globals().get::<f32>("seen_width").unwrap(), 800.0);
+        assert_eq!(app.lua.globals().get::<f32>("seen_height").unwrap(), 60.0);
     }
 
     #[test]
@@ -1458,5 +2207,120 @@ return m",
         )
         .unwrap();
         app.view(window::Id::unique()).unwrap();
+    }
+
+    #[test]
+    fn update_tasks_are_built_and_clipboard_results_return() {
+        let mut app = load(
+            r#"
+            local app = { result = nil }
+            function app:update(event)
+                if type(event) == 'table' and event.type == 'clipboard' then
+                    self.result = event.value
+                    return nil
+                end
+                return {
+                    { type = 'clipboard_write', content = 'hello' },
+                    { type = 'focus', id = 'search' },
+                }
+            end
+            return riced.daemon(app, 'test', app.update, function() return iced.text('x') end):run()
+        "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        let task = app.update(Message::Tick).unwrap();
+        assert!(task.units() > 0);
+        let _ = app
+            .update(Message::Clipboard(app.generation, Some("copied".into())))
+            .unwrap();
+        assert_eq!(app.state.get::<String>("result").unwrap(), "copied");
+    }
+
+    #[test]
+    fn invalid_tasks_are_rejected() {
+        let mut app = load(
+            r#"
+            return riced.daemon({}, 'test', function()
+                return { type = 'bogus' }
+            end, function() return iced.text('x') end):run()
+        "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        assert!(app.update(Message::Tick).is_err());
+    }
+
+    #[test]
+    fn text_editor_actions_update_content_and_reach_update() {
+        let mut app = load(
+            r#"
+            local app = { got = nil }
+            function app:update(event)
+                if type(event) == 'table' then self.got = event.value end
+            end
+            function app:view()
+                return iced.text_editor(nil, { id = 'editor', value = self.text or '', on_input = 'changed' })
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        app.view(window::Id::unique()).unwrap();
+        let action =
+            iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert('x'));
+        let _ = app
+            .update(Message::Editor(
+                app.generation,
+                None,
+                EditorAction {
+                    id: "editor".into(),
+                    event: "changed".into(),
+                    input: true,
+                    action,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            widgets::editor_text(app.generation, "editor").as_deref(),
+            Some("x")
+        );
+        assert_eq!(app.state.get::<String>("got").unwrap(), "x");
+    }
+
+    #[test]
+    fn subscription_lists_build_and_validate() {
+        let app = load(
+            r#"
+            local app = {}
+            function app:subscription()
+                return {
+                    iced.every(500),
+                    iced.frames(),
+                    iced.on_key(true),
+                    iced.on_key(false),
+                    iced.on_mouse(),
+                }
+            end
+            return riced.daemon(app, 'test', function() end, function() return iced.text('x') end)
+                :subscription(app.subscription):run()
+        "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        let _ = app.subscription().unwrap();
+
+        let app = load(
+            r#"
+            local app = {}
+            function app:subscription() return { type = 'bogus' } end
+            return riced.daemon(app, 'test', function() end, function() return iced.text('x') end)
+                :subscription(app.subscription):run()
+        "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        assert!(app.subscription().is_err());
     }
 }
