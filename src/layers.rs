@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn helpers_produce_the_existing_layer_settings() {
         let lua = Lua::new();
-        lua.load(include_str!("api.lua")).exec().unwrap();
+        crate::lua::load(&lua).unwrap();
         let helpers = lua
             .load(
                 r#"{

@@ -1,4 +1,6 @@
+mod file;
 mod layers;
+mod lua;
 mod modules;
 mod plugins;
 mod runtime;

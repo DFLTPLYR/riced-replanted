@@ -100,9 +100,8 @@ pub fn load_with_plugins(
     plugins: Rc<RefCell<plugins::Plugins>>,
 ) -> mlua::Result<App> {
     let lua = Lua::new();
-    lua.load(include_str!("api.lua"))
-        .set_name("riced API")
-        .exec()?;
+    crate::lua::load(&lua)?;
+    crate::file::install(&lua, path.parent().unwrap_or(Path::new(".")))?;
     lua.load(
         r##"
         config = { theme = {

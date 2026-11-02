@@ -308,6 +308,9 @@ impl Plugins {
         };
         proxy.set("name", name)?;
         proxy.set("alive", handle.alive)?;
+        if let Some(meta) = lua.globals().get::<Option<Table>>("__riced_plugin_meta")? {
+            proxy.set_metatable(Some(meta))?;
+        }
         let store = match proxy.get::<Option<Table>>("store")? {
             Some(store) => store,
             None => {
@@ -773,7 +776,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(16);
         let mut plugins = Plugins::test(rx);
         let lua = Lua::new();
-        lua.load(include_str!("api.lua")).exec().unwrap();
+        crate::lua::load(&lua).unwrap();
         plugins.install(&lua).unwrap();
         (tx, plugins, lua)
     }
@@ -820,6 +823,12 @@ mod tests {
                 .get::<Table>("store")
                 .unwrap()
                 .get::<u32>("value")
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            lua.load("return riced.plugin('demo').value")
+                .eval::<u32>()
                 .unwrap(),
             2
         );
@@ -952,7 +961,7 @@ mod tests {
         plugins.clear_pending();
 
         let next = Lua::new();
-        next.load(include_str!("api.lua")).exec().unwrap();
+        crate::lua::load(&next).unwrap();
         plugins.install(&next).unwrap();
 
         let proxy: Table = next
@@ -983,7 +992,7 @@ mod tests {
         let (incoming, _stop) = listen(&socket).unwrap();
         let mut plugins = Plugins::test(incoming);
         let lua = Lua::new();
-        lua.load(include_str!("api.lua")).exec().unwrap();
+        crate::lua::load(&lua).unwrap();
         plugins.install(&lua).unwrap();
 
         let mut stream = UnixStream::connect(&socket).unwrap();
