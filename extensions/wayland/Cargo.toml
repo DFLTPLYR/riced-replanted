@@ -1,0 +1,15 @@
+[package]
+name = "riced-extension-wayland"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "riced-wayland"
+path = "src/main.rs"
+
+[dependencies]
+riced-extension-sdk = { path = "../../crates/riced-extension-sdk", features = ["process"] }
+serde_json = "1"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", default-features = false, features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }

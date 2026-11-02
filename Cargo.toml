@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/riced-extension-sdk", "extensions/system"]
+members = [".", "crates/riced-extension-sdk", "extensions/system", "extensions/wayland", "extensions/dbus"]
 resolver = "3"
 
 [package]
@@ -27,9 +27,12 @@ iced = { version = "0.14.0", features = [
   "image",
   "svg",
   "canvas",
+  "markdown",
+  "qr_code",
   "wayland",
 ] }
 iced_runtime = "0.14.0"
+iced_anim = { version = "0.3.1", features = ["derive"] }
 iced_exwlshell = "0.20.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-log = "0.2"
@@ -37,3 +40,4 @@ iced_wayland_subscriber = "0.20.1"
 wayland-client = "0.31.15"
 riced-extension-sdk = { path = "crates/riced-extension-sdk", default-features = false }
 serde_json = "1"
+toml = "0.8"

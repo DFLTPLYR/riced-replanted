@@ -47,3 +47,13 @@ uninstall:
 extension-system:
     {{nix}} cargo build --release -p riced-extension-system
     install -Dm755 target/release/riced-system "{{ home_directory() }}/.config/riced/test/extensions/system/riced-system"
+
+# Build the generic Wayland extension and install it into the test profile
+extension-wayland:
+    {{nix}} cargo build --release -p riced-extension-wayland
+    install -Dm755 target/release/riced-wayland "{{ home_directory() }}/.config/riced/test/extensions/wayland/riced-wayland"
+
+# Build the D-Bus tray/notification extension and install it into the test profile
+extension-dbus:
+    {{nix}} cargo build --release -p riced-extension-dbus
+    install -Dm755 target/release/riced-dbus "{{ home_directory() }}/.config/riced/test/extensions/dbus/riced-dbus"
