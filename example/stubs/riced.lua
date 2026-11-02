@@ -2,7 +2,7 @@
 
 -- Editor definitions for the globals riced injects into a profile. Loaded by
 -- lua-language-server through .luarc.json; never executed at runtime.
--- Keep in sync with src/lua/ and the README when the Lua API changes.
+-- Keep in sync with src/lua/, src/file.rs, and API.md when the Lua API changes.
 
 ---@class riced.Theme
 ---@field background string
@@ -165,7 +165,7 @@ config = {}
 ---@field spacing? number
 ---@field size? number
 ---@field color? string
----@field on_press? string|iced.Event
+---@field on_press? any
 ---@field content_fit? "contain"|"cover"|"fill"|"none"|"scale_down"
 ---@field transition? boolean|iced.Transition|iced.ListTransition
 ---@field line_height? number|{ pixels: number }
@@ -214,16 +214,16 @@ config = {}
 ---@field on_release? string
 ---@field on_scroll? string
 ---@field on_show? string
----@field on_hide? string
+---@field on_hide? any
 ---@field on_resize? string
----@field on_enter? string
----@field on_exit? string
+---@field on_enter? any
+---@field on_exit? any
 ---@field on_move? string
----@field on_double_click? string
----@field on_right_press? string
----@field on_right_release? string
----@field on_middle_press? string
----@field on_middle_release? string
+---@field on_double_click? any
+---@field on_right_press? any
+---@field on_right_release? any
+---@field on_middle_press? any
+---@field on_middle_release? any
 ---@field on_action? string
 ---@field on_click? string
 ---@field on_drag? string
@@ -245,7 +245,7 @@ config = {}
 ---@field layer? "background"|"bottom"|"top"|"overlay"
 ---@field anchor? ("top"|"bottom"|"left"|"right")[]
 ---@field exclusive_zone? integer
----@field margin? integer[]|{ top: integer, right: integer, bottom: integer, left: integer }
+---@field margin? integer[]
 ---@field keyboard_interactivity? "none"|"on_demand"|"exclusive"
 ---@field output_option? "active"|"last_output"|string|integer
 ---@field events_transparent? boolean
