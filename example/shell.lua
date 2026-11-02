@@ -4,9 +4,14 @@ local app = { count = 0 }
 function app:update(event)
     if event == "increment" then
         self.count = self.count + 1
+    elseif type(event) == "table" and event.type == "workspace" then
+        riced.plugin("wayland").activate_workspace(event.id)
     end
 end
 
+-- Optional generic Wayland UI (requires the wayland extension):
+-- local wayland = require("components.wayland")
+-- return wayland.view()
 function app:view(props)
     return background.view(self.count)
 end
