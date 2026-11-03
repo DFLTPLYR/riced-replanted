@@ -117,6 +117,7 @@ as `shell.lua`.
 | Topic | Reference |
 | --- | --- |
 | Daemon builder and callbacks | [`riced.daemon`](API.md#riceddaemon) |
+| IPC commands | [`riced.ipc`](API.md#ricedipc) |
 | Theme and window style | [`config` and `theme`](API.md#config-and-theme) |
 | JSON/TOML files with save callbacks | [`riced.file`](API.md#ricedfile) |
 | Extension stores, methods, events | [Plugins and extensions](API.md#plugins-and-extensions) |
@@ -126,6 +127,7 @@ as `shell.lua`.
 | Animations | [Property transitions](API.md#property-transitions) |
 | Reusable widgets and watched components | [Custom widgets](API.md#custom-widgets), [Components](API.md#components) |
 | Layer surfaces and click-through regions | [`iced.layer`](API.md#icedlayercontent-settings), [`iced.region`](API.md#icedregioncontent) |
+| Native windows | [`iced.window`](API.md#native-windows) |
 | Known limits | [Known limits](API.md#known-limits) |
 
 `list_view`, `table`, `markdown`, `canvas`, `pane_grid`, and the remaining

@@ -15,6 +15,7 @@ stub when this document changes.
 - [riced API](#riced-api)
   - [`riced.daemon`](#riceddaemon)
   - [Daemon callbacks](#daemon-callbacks)
+  - [`riced.ipc`](#ricedipc)
   - [`config` and `theme`](#config-and-theme)
   - [`riced.file`](#ricedfile)
   - [Plugins and extensions](#plugins-and-extensions)
@@ -30,6 +31,7 @@ stub when this document changes.
   - [Custom widgets](#custom-widgets)
   - [Components](#components)
   - [Layer surfaces](#layer-surfaces)
+  - [Native windows](#native-windows)
   - [Input regions](#input-regions)
 - [Known limits](#known-limits)
 
@@ -131,7 +133,7 @@ Every callback except `update` and `view` is optional.
 | Callback       | Signature                                | Return                                               |
 | -------------- | ---------------------------------------- | ---------------------------------------------------- |
 | `update`       | `(self, event, component)`               | `nil`, a task, or a list of tasks                    |
-| `view`         | `(self, props)`                          | element, `iced.layer`, or a nonempty list of layers  |
+| `view`         | `(self, props)`                          | element, `iced.layer`/`iced.window`, or a nonempty list of surfaces |
 | `title`        | `(self, window)`                         | string or `nil`                                      |
 | `subscription` | `(self, active)`                         | subscription, list of subscriptions, or `nil`        |
 | `theme`        | `(self, window)`                         | palette table or `nil`                               |
@@ -168,6 +170,41 @@ redraw only that window.
 `start_mode = "active"` is the usual choice for visible widget-only views.
 `"background"` starts without a surface. Layer views created with `iced.layer`
 get their own surfaces independently. `"all_screens"` is also accepted.
+
+### `riced.ipc`
+
+Register commands that can be sent to the running daemon:
+
+```lua
+riced.ipc({
+    settings = function(self, args)
+        if #args ~= 0 then
+            error("usage: riced ipc settings")
+        end
+        self.settings_open = not self.settings_open
+    end,
+    add = function(self, args)
+        return self:add_bar(args)
+    end,
+})
+```
+
+```sh
+riced ipc settings
+riced ipc add --anchor top --output DP-1
+```
+
+Handlers receive the daemon's state table as `self` and the command-line
+arguments as a 1-based Lua array, including flags. They run on the daemon's Lua
+thread. A returned task or list of tasks behaves like an `update` return value;
+windows redraw after the handler finishes. Handler errors and unknown commands
+are printed on the daemon's stderr and do not stop it. Registering a name again
+replaces the previous handler, so editing the module that registers handlers
+keeps working. An empty command name is an error.
+
+The CLI only queues the request, so success means it was queued, not that a
+daemon handled it. Commands share one queue per user, so with multiple `riced`
+processes the request goes to whichever process polls first.
 
 ### `config` and `theme`
 
@@ -423,7 +460,7 @@ Every constructor also accepts these common props:
 | ------------ | --------------------------- | ----------------------------------------------------- |
 | `width`      | [length](#lengths)          | Layout width                                          |
 | `height`     | [length](#lengths)          | Layout height                                         |
-| `padding`    | non-negative number         | Uniform padding around the widget                     |
+| `padding`    | number or side table        | Padding around the widget; `{ top, right, bottom, left }` |
 | `transition` | `true`, table, or `false`   | Animate supported property changes; see [transitions](#property-transitions) |
 
 Widget-specific props are listed below. `transition` on `list_view` means item
@@ -947,6 +984,20 @@ Shared fields:
 | `border`     | `{ color?, width?, radius? }`; width/radius non-negative |
 | `shadow`     | `{ color?, offset? = { x, y }, blur? }`; blur non-negative |
 
+`radius` is a uniform number or a table with `top_left`, `top_right`,
+`bottom_right`, and `bottom_left`. Omitted corners are zero:
+
+```lua
+border = {
+    color = "#404040",
+    width = 1,
+    radius = { top_left = 8, top_right = 8 },
+}
+```
+
+The same radius forms are accepted by `rule.style.radius` and pane-grid
+highlight borders.
+
 Widget style support:
 
 | Widget                                                     | Fields                                                                          | State overrides                            |
@@ -988,11 +1039,17 @@ iced.Output                -- active, last_output
 iced.Blur                  -- none, full
 
 iced.Size(width, height)   -- { width = width, height = height }
+
+iced.opacity("#89b4fa", 50) -- "#89b4fa80"
 ```
 
 `iced.Length.fill_portion(n)` requires an integer from 1 to 65535. `iced.Size`
 requires both axes. Weighted fill portions are for widget layout, not
 layer-surface dimensions.
+
+`iced.opacity(color, percent)` returns a `#RRGGBBAA` color with alpha set from
+`percent` (0 is transparent, 100 is opaque). The input may be `#RRGGBB` or
+`#RRGGBBAA`; an existing alpha channel is replaced.
 
 ### Tasks
 
@@ -1163,6 +1220,47 @@ end
 `view` also runs once for surface discovery, so keep it free of side effects.
 `props.window` identifies the surface currently being rendered, not every layer
 in the list.
+
+### Native windows
+
+`iced.window` declares a normal XDG toplevel in `app:view`, alone or mixed with
+layer surfaces:
+
+```lua
+function app:view()
+    if not self.settings_open then return iced.text("closed") end
+    return iced.window({
+        id = "settings",
+        title = "Settings",
+        width = 800,
+        height = 600,
+        content = iced.text("settings"),
+    })
+end
+```
+
+| Key                       | Values                        | Default |
+| ------------------------- | ----------------------------- | ------- |
+| `id`                      | nonempty string               | position-based |
+| `title`                   | string without NUL            | `"Riced"` |
+| `width`, `height`         | integer in 1..32768           | 960, 720 |
+| `client_side_decorations` | boolean                       | false   |
+| `content`                 | iced element                  | required |
+
+Returning the window declares it and opens it; omitting it closes it. Window
+ids share a namespace with layer ids. Changing `width`, `height`, or
+`client_side_decorations` recreates the window; title changes reuse it.
+
+When the compositor closes a window, `update` receives:
+
+```lua
+{ type = "window_closed", id = "settings" }
+```
+
+Set your visibility state to false there. If the view keeps declaring the same
+window after it was closed, it stays closed until the declaration is removed
+and added again. Surface changes apply after IPC commands and reloads, or on
+the next 250 ms reload check when a render sees a different surface list.
 
 ### Input regions
 

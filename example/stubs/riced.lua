@@ -53,10 +53,22 @@ config = {}
 ---@field style? "normal"|"italic"|"oblique"
 ---@field stretch? string
 
+---@class iced.Padding
+---@field top? number
+---@field right? number
+---@field bottom? number
+---@field left? number
+
+---@class iced.Radius
+---@field top_left? number
+---@field top_right? number
+---@field bottom_right? number
+---@field bottom_left? number
+
 ---@class iced.Border
 ---@field color? string
 ---@field width? number
----@field radius? number
+---@field radius? number|iced.Radius
 
 ---@class iced.Shadow
 ---@field color? string
@@ -88,7 +100,7 @@ config = {}
 
 ---@class iced.RuleStyle
 ---@field color? string
----@field radius? number
+---@field radius? number|iced.Radius
 ---@field snap? boolean
 
 ---@class iced.ProgressStyle
@@ -162,7 +174,7 @@ config = {}
 ---@class iced.Props
 ---@field width? string|number|{ fill_portion: integer }
 ---@field height? string|number|{ fill_portion: integer }
----@field padding? number
+---@field padding? number|iced.Padding
 ---@field spacing? number
 ---@field size? number
 ---@field color? string
@@ -254,6 +266,14 @@ config = {}
 ---@field namespace? string
 ---@field blur_option? "none"|"full"|{ x: integer, y: integer, width: integer, height: integer }[]
 
+---@class iced.WindowSettings
+---@field id? string
+---@field title? string
+---@field width? integer
+---@field height? integer
+---@field client_side_decorations? boolean
+---@field content iced.Element
+
 ---@class iced.LayerValues
 ---@field background "background"
 ---@field bottom "bottom"
@@ -326,6 +346,11 @@ iced.Blur = { none = "none", full = "full" }
 ---@param height string|integer
 ---@return { width: string|integer, height: string|integer }
 function iced.Size(width, height) end
+
+---@param color string
+---@param percent number
+---@return string
+function iced.opacity(color, percent) end
 
 ---@param content string|number
 ---@param props? iced.Props
@@ -507,6 +532,10 @@ function iced.region(content, props) end
 ---@return iced.Element
 function iced.layer(content, settings) end
 
+---@param settings iced.WindowSettings
+---@return iced.Element
+function iced.window(settings) end
+
 ---@param name string
 ---@param factory fun(): table
 function iced.define(name, factory) end
@@ -601,6 +630,9 @@ function Daemon:settings(value) end
 
 ---@return riced.Daemon
 function Daemon:run() end
+
+---@param handlers table<string, fun(self: table, args: string[])>
+function riced.ipc(handlers) end
 
 ---@class riced.Extension
 ---@field name string
