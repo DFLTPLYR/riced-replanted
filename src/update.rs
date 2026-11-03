@@ -1,7 +1,9 @@
 use iced::window;
 use iced_exwlshell::{
-    actions::{ExwlShellCustomAction as Action, ExwlShellCustomActionWithId},
-    reexport::NewLayerShellSettings,
+    actions::{
+        ExwlShellCustomAction as Action, ExwlShellCustomActionWithId, IcedXdgWindowSettings,
+    },
+    reexport::{NewLayerShellSettings, PixelSize},
 };
 
 #[derive(Clone)]
@@ -9,6 +11,16 @@ pub struct Layer {
     pub id: String,
     pub window: window::Id,
     pub settings: NewLayerShellSettings,
+}
+
+#[derive(Clone)]
+pub struct Window {
+    pub id: String,
+    pub window: window::Id,
+    pub title: String,
+    pub size: PixelSize,
+    pub client_side_decorations: bool,
+    pub closed: bool,
 }
 
 pub fn reconcile(previous: &[Layer], next: &mut [Layer]) -> Vec<ExwlShellCustomActionWithId> {
@@ -90,6 +102,68 @@ pub fn reconcile(previous: &[Layer], next: &mut [Layer]) -> Vec<ExwlShellCustomA
     actions
 }
 
+pub fn reconcile_windows(
+    previous: &[Window],
+    next: &mut [Window],
+) -> Vec<ExwlShellCustomActionWithId> {
+    let mut actions = Vec::new();
+    let mut used = Vec::new();
+    let next_ids = next
+        .iter()
+        .map(|window| window.id.clone())
+        .collect::<Vec<_>>();
+    for (index, window) in next.iter_mut().enumerate() {
+        let available = |old: &&Window| !next_ids.contains(&old.id) && !used.contains(&old.window);
+        let old = previous
+            .iter()
+            .find(|old| old.id == window.id)
+            .or_else(|| previous.get(index).filter(available))
+            .or_else(|| previous.iter().find(available));
+        let Some(old) = old else {
+            actions.push(open_window(window));
+            continue;
+        };
+        used.push(old.window);
+        window.closed = old.closed;
+        if old.closed {
+            window.window = old.window;
+        } else if old.size != window.size
+            || old.client_side_decorations != window.client_side_decorations
+        {
+            actions.push(ExwlShellCustomActionWithId::new(
+                Some(old.window),
+                Action::RemoveWindow,
+            ));
+            window.window = window::Id::unique();
+            actions.push(open_window(window));
+        } else {
+            window.window = old.window;
+        }
+    }
+    for old in previous {
+        if !used.contains(&old.window) {
+            actions.push(ExwlShellCustomActionWithId::new(
+                Some(old.window),
+                Action::RemoveWindow,
+            ));
+        }
+    }
+    actions
+}
+
+fn open_window(window: &Window) -> ExwlShellCustomActionWithId {
+    ExwlShellCustomActionWithId::new(
+        None,
+        Action::NewBaseWindow {
+            settings: IcedXdgWindowSettings {
+                size: Some(window.size),
+                client_side_decorations: window.client_side_decorations,
+            },
+            id: window.window,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +238,46 @@ mod tests {
             );
             assert_ne!(next[0].window, old.window);
         }
+    }
+
+    fn window(id: &str) -> Window {
+        Window {
+            id: id.into(),
+            window: window::Id::unique(),
+            title: "Riced".into(),
+            size: PixelSize::px(640, 480),
+            client_side_decorations: false,
+            closed: false,
+        }
+    }
+
+    #[test]
+    fn reconciles_native_windows() {
+        let old = window("settings");
+        let mut next = vec![window("settings")];
+        assert!(reconcile_windows(std::slice::from_ref(&old), &mut next).is_empty());
+        assert_eq!(next[0].window, old.window);
+
+        next[0].size = PixelSize::px(800, 600);
+        let actions = reconcile_windows(std::slice::from_ref(&old), &mut next);
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0].1, Action::RemoveWindow));
+        assert!(matches!(actions[1].1, Action::NewBaseWindow { id, .. } if id == next[0].window));
+        assert_ne!(next[0].window, old.window);
+
+        let removed = reconcile_windows(&next, &mut []);
+        assert!(matches!(removed[0].1, Action::RemoveWindow));
+    }
+
+    #[test]
+    fn closed_windows_do_not_reopen_until_removed() {
+        let mut old = window("settings");
+        old.closed = true;
+        let mut next = vec![window("settings")];
+        next[0].size = PixelSize::px(800, 600);
+        assert!(reconcile_windows(std::slice::from_ref(&old), &mut next).is_empty());
+        assert_eq!(next[0].window, old.window);
+        assert!(next[0].closed);
     }
 
     #[test]

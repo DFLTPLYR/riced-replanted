@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
@@ -10,7 +10,7 @@ use iced::widget::operation;
 use iced::{Element, Size, Subscription, Task, Theme, theme, window};
 use iced_exwlshell::{
     Settings,
-    actions::{ExwlShellCustomAction, ExwlShellCustomActionWithId},
+    actions::{ExwlShellCustomAction, ExwlShellCustomActionWithId, IcedXdgWindowSettings},
     redraw::Scope,
     reexport::KeyboardInteractivity,
     settings::StartMode,
@@ -34,6 +34,7 @@ pub enum Message {
     Reloaded,
     RedrawWindow(window::Id),
     Resized(window::Id, Size),
+    WindowClosed(window::Id),
     Noop,
     Surface(ExwlShellCustomActionWithId),
 }
@@ -273,6 +274,8 @@ pub struct App {
     generation: u64,
     windows: RefCell<Vec<window::Id>>,
     layers: Vec<Layer>,
+    toplevels: Vec<update::Window>,
+    surfaces_dirty: Cell<bool>,
     pending: Vec<ExwlShellCustomActionWithId>,
     modules: RefCell<modules::Modules>,
     mounts: RefCell<HashMap<String, Mount>>,
@@ -345,6 +348,8 @@ pub fn load_with_plugins(
         generation: 0,
         windows: RefCell::new(Vec::new()),
         layers: Vec::new(),
+        toplevels: Vec::new(),
+        surfaces_dirty: Cell::new(false),
         pending: Vec::new(),
         modules: RefCell::new(modules::Modules::default()),
         mounts: RefCell::new(HashMap::new()),
@@ -394,6 +399,9 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> mlua::Result<Task<Message>> {
+        if let Message::WindowClosed(id) = message {
+            return self.window_closed(id);
+        }
         let (event, origin) = match message {
             Message::Lua(generation, component, value) if generation == self.generation => {
                 if self.stale(&component) {
@@ -453,6 +461,7 @@ impl App {
             | Message::PollPlugins
             | Message::Reloaded
             | Message::RedrawWindow(_)
+            | Message::WindowClosed(_)
             | Message::Noop
             | Message::Surface(_) => return Ok(Task::none()),
             Message::Resized(id, size) => {
@@ -598,6 +607,37 @@ impl App {
         Ok(changed || fired)
     }
 
+    fn window_closed(&mut self, id: window::Id) -> mlua::Result<Task<Message>> {
+        let Some(index) = self
+            .toplevels
+            .iter()
+            .position(|toplevel| toplevel.window == id)
+        else {
+            return Ok(Task::none());
+        };
+        self.toplevels[index].closed = true;
+        let event = self.lua.create_table()?;
+        event.set("type", "window_closed")?;
+        event.set("id", self.toplevels[index].id.as_str())?;
+        let task = match self.update.call::<Value>((self.state.clone(), event)) {
+            Ok(value) => match self.tasks(value) {
+                Ok(task) => task,
+                Err(error) => {
+                    eprintln!("riced: window close handler returned an invalid task: {error}");
+                    Task::none()
+                }
+            },
+            Err(error) => {
+                eprintln!("riced: window close handler failed: {error}");
+                Task::none()
+            }
+        };
+        if let Err(error) = self.reconcile_layers() {
+            eprintln!("riced: window close changed surfaces but the view is invalid: {error}");
+        }
+        Ok(task.chain(self.surface_tasks()))
+    }
+
     fn view_node(&self, id: window::Id) -> mlua::Result<Table> {
         let props = self.lua.create_table()?;
         props.set("window", self.window(id)?)?;
@@ -717,65 +757,108 @@ impl App {
     fn prepare_layers(&mut self) -> mlua::Result<()> {
         let node = self.view_node(window::Id::unique())?;
         let mut layers = Vec::new();
+        let mut toplevels = Vec::new();
         let mut ids = HashSet::new();
         for (index, node) in layers::nodes(node)?.into_iter().enumerate() {
             let settings = node.get("settings")?;
             let id = layers::id(&settings, index)?;
             if !ids.insert(id.clone()) {
-                return Err(mlua::Error::runtime(format!("duplicate layer id: {id}")));
+                return Err(mlua::Error::runtime(format!("duplicate surface id: {id}")));
             }
+            let kind: String = node.get("kind")?;
             if node.get::<Option<Table>>("content")?.is_none() {
                 return Err(mlua::Error::runtime(
-                    "layer content must be an iced element",
+                    "surface content must be an iced element",
                 ));
             }
-            layers.push(Layer {
-                id,
-                window: window::Id::unique(),
-                settings: layers::settings(settings)?,
-            });
+            if kind == "window" {
+                let window = layers::window(settings)?;
+                toplevels.push(update::Window {
+                    id,
+                    window: window::Id::unique(),
+                    title: window.title,
+                    size: window.size,
+                    client_side_decorations: window.client_side_decorations,
+                    closed: false,
+                });
+            } else {
+                layers.push(Layer {
+                    id,
+                    window: window::Id::unique(),
+                    settings: layers::settings(settings)?,
+                });
+            }
         }
         self.layers = layers;
+        self.toplevels = toplevels;
         Ok(())
     }
 
     fn layer_tasks(&self) -> Task<Message> {
-        Task::batch(self.layers.iter().map(|layer| {
+        let mut tasks = self
+            .layers
+            .iter()
+            .map(|layer| {
+                Task::done(Message::Surface(ExwlShellCustomActionWithId::new(
+                    None,
+                    ExwlShellCustomAction::NewLayerShell {
+                        id: layer.window,
+                        settings: layer.settings.clone(),
+                    },
+                )))
+            })
+            .collect::<Vec<_>>();
+        tasks.extend(self.toplevels.iter().map(|window| {
             Task::done(Message::Surface(ExwlShellCustomActionWithId::new(
                 None,
-                ExwlShellCustomAction::NewLayerShell {
-                    id: layer.window,
-                    settings: layer.settings.clone(),
+                ExwlShellCustomAction::NewBaseWindow {
+                    settings: IcedXdgWindowSettings {
+                        size: Some(window.size),
+                        client_side_decorations: window.client_side_decorations,
+                    },
+                    id: window.window,
                 },
             )))
-        }))
+        }));
+        Task::batch(tasks)
     }
 
     fn reconcile_layers(&mut self) -> mlua::Result<()> {
         let previous = self.layers.clone();
+        let previous_toplevels = self.toplevels.clone();
         self.prepare_layers()?;
         if !previous.is_empty() && self.layers.is_empty() {
             self.layers = previous;
+            self.toplevels = previous_toplevels.clone();
             return Err(mlua::Error::runtime(
                 "cannot replace layer views with a widget-only view during reload",
             ));
         }
         self.pending
             .extend(update::reconcile(&previous, &mut self.layers));
-        if !previous.is_empty() {
-            self.windows
-                .borrow_mut()
-                .retain(|id| self.layers.iter().any(|layer| layer.window == *id));
+        self.pending.extend(update::reconcile_windows(
+            &previous_toplevels,
+            &mut self.toplevels,
+        ));
+        if !previous.is_empty() || !previous_toplevels.is_empty() {
+            self.windows.borrow_mut().retain(|id| {
+                self.layers.iter().any(|layer| layer.window == *id)
+                    || self.toplevels.iter().any(|window| window.window == *id)
+            });
         }
         Ok(())
     }
 
-    fn reload_tasks(&mut self, change: Change) -> Task<Message> {
-        let surfaces = std::mem::take(&mut self.pending)
+    fn surface_tasks(&mut self) -> Task<Message> {
+        std::mem::take(&mut self.pending)
             .into_iter()
             .fold(Task::none(), |task, action| {
                 task.chain(Task::done(Message::Surface(action)))
-            });
+            })
+    }
+
+    fn reload_tasks(&mut self, change: Change) -> Task<Message> {
+        let surfaces = self.surface_tasks();
         surfaces.chain(match change {
             Change::All => Task::done(Message::Reloaded),
             Change::Windows(ids) => Task::batch(
@@ -794,44 +877,56 @@ impl App {
         }
         self.seen.borrow_mut().clear();
         let mut node = self.view_node(id)?;
-        if !self.layers.is_empty() {
+        if !self.layers.is_empty() || !self.toplevels.is_empty() {
             let nodes = layers::nodes(node)?;
-            if nodes.len() != self.layers.len() {
-                return Err(mlua::Error::runtime(
-                    "layer count changed; restart riced to apply it",
-                ));
+            if nodes.len() != self.layers.len() + self.toplevels.len() {
+                self.surfaces_dirty.set(true);
             }
             let mut by_id = HashMap::new();
             for (index, node) in nodes.into_iter().enumerate() {
                 let settings = node.get("settings")?;
                 let id = layers::id(&settings, index)?;
-                let layer = self
-                    .layers
-                    .iter()
-                    .find(|layer| layer.id == id)
-                    .ok_or_else(|| {
-                        mlua::Error::runtime("layer ids changed; restart riced to apply them")
-                    })?;
-                if layers::settings(settings)? != layer.settings {
-                    return Err(mlua::Error::runtime(
-                        "layer settings changed; restart riced to apply them",
-                    ));
+                if node.get::<String>("kind")? == "window" {
+                    let window = layers::window(settings)?;
+                    match self.toplevels.iter().find(|toplevel| toplevel.id == id) {
+                        Some(toplevel)
+                            if window.size == toplevel.size
+                                && window.client_side_decorations
+                                    == toplevel.client_side_decorations => {}
+                        _ => self.surfaces_dirty.set(true),
+                    }
+                } else if let Some(layer) = self.layers.iter().find(|layer| layer.id == id) {
+                    if layers::settings(settings)? != layer.settings {
+                        self.surfaces_dirty.set(true);
+                    }
+                } else {
+                    self.surfaces_dirty.set(true);
                 }
                 if by_id.insert(id, node).is_some() {
-                    return Err(mlua::Error::runtime("duplicate layer id"));
+                    return Err(mlua::Error::runtime("duplicate surface id"));
                 }
             }
-            let layer = self.layers.iter().find(|layer| layer.window == id);
+            let surface = self
+                .layers
+                .iter()
+                .find(|layer| layer.window == id)
+                .map(|layer| layer.id.as_str())
+                .or_else(|| {
+                    self.toplevels
+                        .iter()
+                        .find(|toplevel| toplevel.window == id)
+                        .map(|toplevel| toplevel.id.as_str())
+                });
             // A replaced surface can receive a final render before its close action runs.
-            let Some(layer) = layer else {
+            let Some(surface) = surface else {
+                self.surfaces_dirty.set(true);
                 return Ok(iced::widget::Space::new().into());
             };
-            node = by_id
-                .remove(&layer.id)
-                .ok_or_else(|| {
-                    mlua::Error::runtime("layer ids changed; restart riced to apply them")
-                })?
-                .get("content")?;
+            let Some(surface_node) = by_id.remove(surface) else {
+                self.surfaces_dirty.set(true);
+                return Ok(iced::widget::Space::new().into());
+            };
+            node = surface_node.get("content")?;
         }
         let mut path = Vec::new();
         let mut ids = HashSet::new();
@@ -950,6 +1045,7 @@ impl App {
             window::Event::Opened { size, .. } | window::Event::Resized(size) => {
                 Some(Message::Resized(id, size))
             }
+            window::Event::Closed => Some(Message::WindowClosed(id)),
             _ => None,
         }));
         Ok(Subscription::batch(subscriptions))
@@ -999,6 +1095,7 @@ impl App {
             Message::Noop | Message::Surface(_) => return Ok(Scope::None),
             Message::RedrawWindow(id) => return Ok(Scope::Window(*id)),
             Message::Resized(id, _) => return Ok(Scope::Window(*id)),
+            Message::WindowClosed(_) => return Ok(Scope::All),
             Message::Key(generation, event) if *generation == self.generation => {
                 key_payload(&self.lua, event)?
             }
@@ -1103,9 +1200,13 @@ impl App {
         }
         candidate.generation = self.generation + 1;
         candidate.layers = self.layers.clone();
+        candidate.toplevels = self.toplevels.clone();
         candidate.reconcile_layers()?;
         for layer in &candidate.layers {
             candidate.view(layer.window)?;
+        }
+        for toplevel in &candidate.toplevels {
+            candidate.view(toplevel.window)?;
         }
         for &id in self.windows.borrow().iter() {
             candidate.view(id)?;
@@ -1155,6 +1256,7 @@ impl App {
             return Ok(Change::None);
         }
         let previous_layers = self.layers.clone();
+        let previous_toplevels = self.toplevels.clone();
         let previous_mounts = self.mounts.borrow().clone();
         let previous_owners = self.windows_of.borrow().clone();
         let previous_windows = self.windows.borrow().clone();
@@ -1188,6 +1290,10 @@ impl App {
             for layer in &self.layers {
                 self.view(layer.window)?;
             }
+            for toplevel in &self.toplevels {
+                self.view(toplevel.window)?;
+                affected.push(toplevel.window);
+            }
             for &id in &affected {
                 self.view(id)?;
             }
@@ -1196,6 +1302,7 @@ impl App {
         if let Err(error) = result {
             self.modules.borrow_mut().restore(&self.lua, snapshot)?;
             self.layers = previous_layers;
+            self.toplevels = previous_toplevels;
             *self.mounts.borrow_mut() = previous_mounts;
             *self.windows_of.borrow_mut() = previous_owners;
             *self.windows.borrow_mut() = previous_windows;
@@ -1209,6 +1316,9 @@ impl App {
     }
 
     fn title(&self, id: window::Id) -> mlua::Result<Option<String>> {
+        if let Some(toplevel) = self.toplevels.iter().find(|window| window.window == id) {
+            return Ok(Some(toplevel.title.clone()));
+        }
         match self.call("title", self.window(id)?)? {
             Value::Nil => Ok(None),
             Value::String(s) => Ok(Some(s.to_str()?.to_owned())),
@@ -1219,7 +1329,7 @@ impl App {
     pub fn run(mut self) -> iced_exwlshell::Result {
         checked(self.prepare_layers());
         let mut settings = checked(self.settings());
-        if !self.layers.is_empty() {
+        if !self.layers.is_empty() || !self.toplevels.is_empty() {
             settings.layer_settings.start_mode = StartMode::Background;
         }
         let namespace = self.namespace.clone();
@@ -1231,22 +1341,34 @@ impl App {
             |app: &mut Rc<RefCell<App>>, message| {
                 let mut app = app.borrow_mut();
                 if matches!(message, Message::CheckReload) {
-                    match app.check_reload() {
-                        Ok(change) => return app.reload_tasks(change),
+                    let reload = match app.check_reload() {
+                        Ok(change) => app.reload_tasks(change),
                         Err(error) => {
-                            eprintln!("riced: reload rejected; keeping current app: {error}")
+                            eprintln!("riced: reload rejected; keeping current app: {error}");
+                            Task::none()
                         }
-                    }
-                } else if matches!(message, Message::PollPlugins) {
+                    };
+                    let surfaces = if app.surfaces_dirty.replace(false) {
+                        match app.reconcile_layers() {
+                            Ok(()) => app.surface_tasks(),
+                            Err(error) => {
+                                eprintln!("riced: surface change rejected: {error}");
+                                Task::none()
+                            }
+                        }
+                    } else {
+                        Task::none()
+                    };
+                    return reload.chain(surfaces);
+                }
+                if matches!(message, Message::PollPlugins) {
                     return if checked(app.poll_plugins()) {
                         Task::done(Message::Reloaded)
                     } else {
                         Task::none()
                     };
-                } else {
-                    return checked(app.update(message));
                 }
-                Task::none()
+                checked(app.update(message))
             },
             App::render,
         )
@@ -1469,6 +1591,7 @@ mod tests {
         assert_eq!(app.title(id).unwrap().as_deref(), Some("fixed"));
     }
 
+
     #[test]
     fn atomic_save_and_temporary_missing_file_recover() {
         let file = TestShell::new();
@@ -1606,6 +1729,45 @@ mod tests {
         assert!(
             matches!(converted.1, ExwlShellCustomAction::NewLayerShell {id: actual, ..} if actual == id)
         );
+    }
+
+    #[test]
+    fn windows_open_render_and_close() {
+        let source = r#"
+            local app = { open = true }
+            function app:update(event)
+                if type(event) == 'table' and event.type == 'window_closed' then
+                    self.open = false
+                end
+            end
+            function app:view()
+                if not self.open then return iced.text('closed') end
+                return iced.window({
+                    id = 'settings', title = 'Settings', width = 640, height = 480,
+                    content = iced.text('settings'),
+                })
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let mut app = load(source, Path::new("shell.lua")).unwrap();
+        app.prepare_layers().unwrap();
+        assert_eq!(app.toplevels.len(), 1);
+        assert_eq!(app.toplevels[0].id, "settings");
+        assert_eq!(app.toplevels[0].title, "Settings");
+        assert_eq!(app.toplevels[0].size.to_set(), (640, 480));
+        let id = app.toplevels[0].window;
+        app.view(id).unwrap();
+        assert_eq!(app.title(id).unwrap().as_deref(), Some("Settings"));
+
+        app.reload(&source.replace("'Settings'", "'Preferences'"))
+            .unwrap();
+        assert_eq!(app.toplevels[0].window, id);
+        assert_eq!(app.title(id).unwrap().as_deref(), Some("Preferences"));
+
+        let _ = app.update(Message::WindowClosed(id)).unwrap();
+        assert!(app.toplevels.is_empty());
+        assert!(!app.state.get::<bool>("open").unwrap());
+        assert_eq!(app.redraw(&Message::WindowClosed(id)).unwrap(), Scope::All);
     }
 
     #[test]
@@ -1987,7 +2149,7 @@ return m";
             app.prepare_layers()
                 .unwrap_err()
                 .to_string()
-                .contains("duplicate layer id")
+                .contains("duplicate surface id")
         );
     }
 

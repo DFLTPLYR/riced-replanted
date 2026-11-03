@@ -1,6 +1,6 @@
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, BlurRegion, Extent, KeyboardInteractivity, Layer, LayerSize,
-    NewLayerShellSettings, OutputOption,
+    NewLayerShellSettings, OutputOption, PixelSize,
 };
 use mlua::{Table, Value};
 
@@ -24,7 +24,7 @@ fn sequence(table: &Table) -> mlua::Result<()> {
 
 pub fn nodes(node: Table) -> mlua::Result<Vec<Table>> {
     match node.get::<Option<String>>("kind")?.as_deref() {
-        Some("layer") => Ok(vec![node]),
+        Some("layer" | "window") => Ok(vec![node]),
         Some(_) => Ok(Vec::new()),
         None => {
             sequence(&node)?;
@@ -32,17 +32,70 @@ pub fn nodes(node: Table) -> mlua::Result<Vec<Table>> {
                 .sequence_values::<Table>()
                 .collect::<mlua::Result<Vec<_>>>()?;
             if nodes.is_empty()
-                || nodes
-                    .iter()
-                    .any(|node| !matches!(node.get::<String>("kind").as_deref(), Ok("layer")))
+                || nodes.iter().any(|node| {
+                    !matches!(
+                        node.get::<String>("kind").as_deref(),
+                        Ok("layer" | "window")
+                    )
+                })
             {
                 return Err(mlua::Error::runtime(
-                    "view must return an iced element, iced.layer, or a nonempty list of layers",
+                    "view must return an iced element, iced.layer, iced.window, or a nonempty list of surfaces",
                 ));
             }
             Ok(nodes)
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct WindowSettings {
+    pub title: String,
+    pub size: PixelSize,
+    pub client_side_decorations: bool,
+}
+
+fn window_dimension(value: Value, name: &str, default: u32) -> mlua::Result<u32> {
+    match value {
+        Value::Nil => Ok(default),
+        Value::Integer(n) if (1..=32768).contains(&n) => Ok(n as u32),
+        _ => Err(mlua::Error::runtime(format!(
+            "window {name} must be an integer in 1..32768"
+        ))),
+    }
+}
+
+pub fn window(table: Table) -> mlua::Result<WindowSettings> {
+    keys(
+        &table,
+        &["id", "title", "width", "height", "client_side_decorations"],
+    )?;
+    let title = table
+        .get::<Option<String>>("title")?
+        .unwrap_or_else(|| "Riced".into());
+    if title.len() > 4096 || title.contains('\0') {
+        return Err(mlua::Error::runtime(
+            "window title must be at most 4096 bytes and contain no NUL",
+        ));
+    }
+    let width = window_dimension(table.get("width")?, "width", 960)?;
+    let height = window_dimension(table.get("height")?, "height", 720)?;
+    let size = PixelSize::try_px(width, height)
+        .ok_or_else(|| mlua::Error::runtime("window size must be nonzero"))?;
+    let client_side_decorations = match table.get::<Value>("client_side_decorations")? {
+        Value::Nil => false,
+        Value::Boolean(value) => value,
+        _ => {
+            return Err(mlua::Error::runtime(
+                "window client_side_decorations must be a boolean",
+            ));
+        }
+    };
+    Ok(WindowSettings {
+        title,
+        size,
+        client_side_decorations,
+    })
 }
 
 fn extent(value: Value) -> mlua::Result<Extent> {
@@ -330,6 +383,63 @@ mod tests {
                 (output, keyboard, blur)
             );
         }
+    }
+
+    #[test]
+    fn parses_window_settings() {
+        let lua = Lua::new();
+        let table = lua
+            .load(
+                "{id='settings', title='Settings', width=640, height=480, client_side_decorations=true}",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(
+            window(table).unwrap(),
+            WindowSettings {
+                title: "Settings".into(),
+                size: PixelSize::px(640, 480),
+                client_side_decorations: true,
+            }
+        );
+        assert_eq!(
+            window(lua.create_table().unwrap()).unwrap(),
+            WindowSettings {
+                title: "Riced".into(),
+                size: PixelSize::px(960, 720),
+                client_side_decorations: false,
+            }
+        );
+
+        for source in [
+            "{width=0}",
+            "{height=32769}",
+            "{width=1.5}",
+            "{title='a\\0b'}",
+            "{title='x', typo=true}",
+            "{client_side_decorations='yes'}",
+        ] {
+            assert!(
+                window(lua.load(source).eval().unwrap()).is_err(),
+                "accepted {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn nodes_accept_mixed_layers_and_windows() {
+        let lua = Lua::new();
+        crate::lua::load(&lua).unwrap();
+        let node = lua
+            .load(
+                "return {iced.layer(iced.text('panel'), {id='panel'}), iced.window({id='settings', content=iced.text('settings')})}",
+            )
+            .eval()
+            .unwrap();
+        let nodes = nodes(node).unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].get::<String>("kind").unwrap(), "layer");
+        assert_eq!(nodes[1].get::<String>("kind").unwrap(), "window");
     }
 
     #[test]

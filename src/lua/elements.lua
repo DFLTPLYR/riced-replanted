@@ -56,6 +56,18 @@ function iced.layer(content, settings)
 	return { kind = "layer", content = content, settings = settings or {} }
 end
 
+function iced.window(settings)
+	assert(type(settings) == "table", "window settings must be a table")
+	assert(type(settings.content) == "table", "window content must be an iced element")
+	local node = { kind = "window", content = settings.content, settings = {} }
+	for key, value in pairs(settings) do
+		if key ~= "content" then
+			node.settings[key] = value
+		end
+	end
+	return node
+end
+
 -- Custom widgets: define a named constructor once, then use iced.name(props).
 -- The factory returns a table with a view (or render) method, or an element.
 function iced.define(name, factory)
