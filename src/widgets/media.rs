@@ -91,7 +91,7 @@ pub(super) fn rule(node: &Table) -> mlua::Result<Element<'static, Message>> {
                 style.color = color;
             }
             if let Some(radius) = patch.radius {
-                style.radius = radius.into();
+                style.radius = radius;
             }
             if let Some(snap) = patch.snap {
                 style.snap = snap;

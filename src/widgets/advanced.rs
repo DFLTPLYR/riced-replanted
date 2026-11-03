@@ -511,10 +511,6 @@ pub(super) fn table(
     if let Some(width) = layout.width {
         table = table.width(width);
     }
-    let padding = number(node, "padding", 0.0)?;
-    if padding > 0.0 {
-        table = table.padding(padding);
-    }
     if let Some(spacing) = node.get::<Option<f32>>("spacing")? {
         if !spacing.is_finite() || spacing < 0.0 {
             return Err(mlua::Error::runtime(
@@ -613,8 +609,9 @@ fn pane_highlight(table: &Table) -> mlua::Result<widget::pane_grid::Highlight> {
         if let Some(width) = value.get::<Option<f32>>("width")? {
             highlight.border.width = width;
         }
-        if let Some(radius) = value.get::<Option<f32>>("radius")? {
-            highlight.border.radius = radius.into();
+        match value.get::<Value>("radius")? {
+            Value::Nil => {}
+            radius => highlight.border.radius = super::style::radius_value(radius)?,
         }
     }
     Ok(highlight)

@@ -15,7 +15,7 @@ mod text;
 use std::time::Duration;
 
 use iced::widget::Space;
-use iced::{Color, Element, Length, widget};
+use iced::{Color, Element, Length, Padding, widget};
 use iced_anim::animated::Mode;
 use iced_anim::spring::Motion as SpringMotion;
 use iced_anim::transition::Easing;
@@ -93,6 +93,25 @@ fn number(table: &Table, key: &str, default: f32) -> mlua::Result<f32> {
     Ok(value)
 }
 
+fn padding_value(table: &Table, key: &str) -> mlua::Result<Padding> {
+    match table.get::<Value>(key)? {
+        Value::Nil => Ok(Padding::default()),
+        Value::Integer(_) | Value::Number(_) => Ok(Padding::new(number(table, key, 0.0)?)),
+        Value::Table(sides) => {
+            crate::runtime::keys(&sides, &["top", "right", "bottom", "left"])?;
+            Ok(Padding {
+                top: number(&sides, "top", 0.0)?,
+                right: number(&sides, "right", 0.0)?,
+                bottom: number(&sides, "bottom", 0.0)?,
+                left: number(&sides, "left", 0.0)?,
+            })
+        }
+        _ => Err(mlua::Error::runtime(
+            "padding must be a non-negative number or {top, right, bottom, left}",
+        )),
+    }
+}
+
 fn max_pixels(table: &Table, key: &str) -> mlua::Result<Option<f32>> {
     let value = table.get::<Option<f32>>(key)?;
     if let Some(value) = value
@@ -134,7 +153,10 @@ impl Motion {
         Ok(Self {
             width: pixels(table.get::<Value>("width")?).unwrap_or(0.0),
             height: pixels(table.get::<Value>("height")?).unwrap_or(0.0),
-            padding: number(table, "padding", 0.0)?,
+            padding: match table.get::<Value>("padding")? {
+                Value::Table(_) => 0.0,
+                _ => number(table, "padding", 0.0)?,
+            },
             spacing: number(table, "spacing", 0.0)?,
             size: number(table, "size", 16.0)?,
             color,
@@ -212,6 +234,10 @@ impl Transition {
                 }
                 duration = Some(Duration::from_millis(ms as u64));
             }
+        }
+        if matches!(node.get::<Value>("padding")?, Value::Table(_)) {
+            // Per-side padding is static; scalar transitions keep animating.
+            props.retain(|prop| prop != "padding");
         }
         let mode = match (spring, easing) {
             (Some(_), Some(_)) => {
@@ -338,7 +364,7 @@ pub fn element(node: Table, ctx: &Ctx) -> mlua::Result<Element<'static, Message>
 pub(super) struct Layout {
     pub(super) width: Option<Length>,
     pub(super) height: Option<Length>,
-    pub(super) padding: f32,
+    pub(super) padding: Padding,
 }
 
 fn build(
@@ -512,8 +538,8 @@ fn build(
         width: axis(node, "width", transition.and_then(|t| t.value("width")))?,
         height: axis(node, "height", transition.and_then(|t| t.value("height")))?,
         padding: match transition.and_then(|t| t.value("padding")) {
-            Some(padding) => padding,
-            None => number(node, "padding", 0.0)?,
+            Some(padding) => Padding::new(padding),
+            None => padding_value(node, "padding")?,
         },
     };
     let element = match kind.as_str() {
@@ -573,7 +599,9 @@ fn finish(
     let needs_width = !sized_width && layout.width.is_some_and(|width| width != Length::Shrink);
     let needs_height =
         !sized_height && layout.height.is_some_and(|height| height != Length::Shrink);
-    if kind == "container" || (layout.padding == 0.0 && !needs_width && !needs_height) {
+    if kind == "container"
+        || (layout.padding == Padding::default() && !needs_width && !needs_height)
+    {
         return element;
     }
     let mut wrapper = widget::container(element);
@@ -583,7 +611,7 @@ fn finish(
     if needs_height && let Some(height) = layout.height {
         wrapper = wrapper.height(height);
     }
-    if layout.padding > 0.0 {
+    if layout.padding != Padding::default() {
         wrapper = wrapper.padding(layout.padding);
     }
     wrapper.into()
@@ -695,6 +723,37 @@ mod tests {
             "{kind='text',content='x',transition={duration=0}}",
             "{kind='text',content='x',transition={bogus=true}}",
             "{kind='text',content='x',transition='yes'}",
+        ] {
+            assert!(
+                element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_err(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn padding_and_radius_accept_per_side_tables() {
+        let lua = mlua::Lua::new();
+        for source in [
+            "{kind='container',content={kind='text',content='x'},padding={left=1,right=2,top=3,bottom=4}}",
+            "{kind='container',content={kind='text',content='x'},padding={left=1}}",
+            "{kind='container',content={kind='text',content='x'},padding={left=1},transition=true}",
+            "{kind='rule',style={radius={top_left=1,top_right=2,bottom_right=3,bottom_left=4}}}",
+            "{kind='progress_bar',value=0.5,style={border={radius={top_left=1}}}}",
+            "{kind='container',content={kind='text',content='x'},style={border={radius={top_left=1}}}}",
+        ] {
+            assert!(
+                element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_ok(),
+                "{source}"
+            );
+        }
+        for source in [
+            "{kind='container',content={kind='text',content='x'},padding={left=-1}}",
+            "{kind='container',content={kind='text',content='x'},padding={left=1,typo=2}}",
+            "{kind='container',content={kind='text',content='x'},padding='4'}",
+            "{kind='rule',style={radius={top_left=-1}}}",
+            "{kind='rule',style={radius={top_left=1,typo=2}}}",
+            "{kind='rule',style={radius='4'}}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_err(),

@@ -1,5 +1,6 @@
+use iced::border::Radius;
 use iced::{Border, Color, Shadow, Vector};
-use mlua::Table;
+use mlua::{Table, Value};
 
 use crate::runtime::keys;
 
@@ -76,7 +77,7 @@ pub(super) fn validate(style: &Table, fields: &[&str], states: &[&str]) -> mlua:
 #[derive(Clone, Copy, Default)]
 pub(super) struct RulePatch {
     pub(super) color: Option<Color>,
-    pub(super) radius: Option<f32>,
+    pub(super) radius: Option<Radius>,
     pub(super) snap: Option<bool>,
 }
 
@@ -86,13 +87,9 @@ pub(super) fn rule_patch(table: &Table) -> mlua::Result<RulePatch> {
     if let Some(value) = table.get::<Option<String>>("color")? {
         patch.color = Some(color(&value)?);
     }
-    if let Some(radius) = table.get::<Option<f32>>("radius")? {
-        if !radius.is_finite() || radius < 0.0 {
-            return Err(mlua::Error::runtime(
-                "rule radius must be finite and non-negative",
-            ));
-        }
-        patch.radius = Some(radius);
+    match table.get::<Value>("radius")? {
+        Value::Nil => {}
+        radius => patch.radius = Some(radius_value(radius)?),
     }
     patch.snap = table.get::<Option<bool>>("snap")?;
     Ok(patch)
@@ -138,6 +135,39 @@ pub(super) fn qr_patch(table: &Table) -> mlua::Result<QrPatch> {
     Ok(patch)
 }
 
+pub(super) fn radius_value(value: Value) -> mlua::Result<Radius> {
+    let side = |table: &Table, key: &str| -> mlua::Result<f32> {
+        let value = table.get::<Option<f32>>(key)?.unwrap_or(0.0);
+        if !value.is_finite() || value < 0.0 {
+            return Err(mlua::Error::runtime(format!(
+                "radius {key} must be finite and non-negative"
+            )));
+        }
+        Ok(value)
+    };
+    match value {
+        Value::Integer(n) if n >= 0 => Ok(Radius::from(n as f32)),
+        Value::Number(n) if n.is_finite() && n >= 0.0 && n <= f32::MAX as f64 => {
+            Ok(Radius::from(n as f32))
+        }
+        Value::Table(table) => {
+            keys(
+                &table,
+                &["top_left", "top_right", "bottom_right", "bottom_left"],
+            )?;
+            Ok(Radius {
+                top_left: side(&table, "top_left")?,
+                top_right: side(&table, "top_right")?,
+                bottom_right: side(&table, "bottom_right")?,
+                bottom_left: side(&table, "bottom_left")?,
+            })
+        }
+        _ => Err(mlua::Error::runtime(
+            "radius must be a finite non-negative number or {top_left, top_right, bottom_right, bottom_left}",
+        )),
+    }
+}
+
 fn border_value(table: &Table) -> mlua::Result<Border> {
     crate::runtime::keys(table, &["color", "width", "radius"])?;
     let mut border = Border::default();
@@ -152,13 +182,9 @@ fn border_value(table: &Table) -> mlua::Result<Border> {
         }
         border.width = width;
     }
-    if let Some(radius) = table.get::<Option<f32>>("radius")? {
-        if !radius.is_finite() || radius < 0.0 {
-            return Err(mlua::Error::runtime(
-                "border radius must be finite and non-negative",
-            ));
-        }
-        border.radius = radius.into();
+    match table.get::<Value>("radius")? {
+        Value::Nil => {}
+        radius => border.radius = radius_value(radius)?,
     }
     Ok(border)
 }
