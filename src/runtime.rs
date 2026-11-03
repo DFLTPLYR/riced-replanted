@@ -607,6 +607,23 @@ impl App {
         Ok(changed || fired)
     }
 
+    fn poll_ipc(&mut self) -> mlua::Result<Task<Message>> {
+        let mut tasks = Vec::new();
+        let mut handled = false;
+        while let Some(command) = crate::ipc::take() {
+            handled = true;
+            tasks.push(self.run_ipc(&command.command, &command.args)?);
+        }
+        if handled {
+            if let Err(error) = self.reconcile_layers() {
+                eprintln!("riced: IPC changed surfaces but the view is invalid: {error}");
+            } else {
+                tasks.push(self.surface_tasks());
+            }
+        }
+        Ok(Task::batch(tasks))
+    }
+
     fn window_closed(&mut self, id: window::Id) -> mlua::Result<Task<Message>> {
         let Some(index) = self
             .toplevels
@@ -636,6 +653,28 @@ impl App {
             eprintln!("riced: window close changed surfaces but the view is invalid: {error}");
         }
         Ok(task.chain(self.surface_tasks()))
+    }
+
+    fn run_ipc(&mut self, command: &str, args: &[String]) -> mlua::Result<Task<Message>> {
+        let handlers: Table = self.lua.named_registry_value("riced.ipc_handlers")?;
+        let Some(handler) = handlers.get::<Option<Function>>(command)? else {
+            eprintln!("riced: no IPC handler for {command:?}");
+            return Ok(Task::none());
+        };
+        let args = self.lua.to_value(args)?;
+        match handler.call::<Value>((self.state.clone(), args)) {
+            Ok(value) => match self.tasks(value) {
+                Ok(task) => Ok(task.chain(Task::done(Message::Reloaded))),
+                Err(error) => {
+                    eprintln!("riced: IPC {command:?} returned an invalid task: {error}");
+                    Ok(Task::none())
+                }
+            },
+            Err(error) => {
+                eprintln!("riced: IPC {command:?} failed: {error}");
+                Ok(Task::none())
+            }
+        }
     }
 
     fn view_node(&self, id: window::Id) -> mlua::Result<Table> {
@@ -1261,6 +1300,8 @@ impl App {
         let previous_owners = self.windows_of.borrow().clone();
         let previous_windows = self.windows.borrow().clone();
         let pending_count = self.pending.len();
+        let handlers: Table = self.lua.named_registry_value("riced.ipc_handlers")?;
+        let previous_handlers = copy_table(&self.lua, &handlers)?;
         let mut affected = Vec::new();
         {
             let windows_of = self.windows_of.borrow();
@@ -1301,6 +1342,11 @@ impl App {
         })();
         if let Err(error) = result {
             self.modules.borrow_mut().restore(&self.lua, snapshot)?;
+            handlers.clear()?;
+            for pair in previous_handlers.pairs::<Value, Value>() {
+                let (name, handler) = pair?;
+                handlers.raw_set(name, handler)?;
+            }
             self.layers = previous_layers;
             self.toplevels = previous_toplevels;
             *self.mounts.borrow_mut() = previous_mounts;
@@ -1359,7 +1405,11 @@ impl App {
                     } else {
                         Task::none()
                     };
-                    return reload.chain(surfaces);
+                    let ipc = app.poll_ipc().unwrap_or_else(|error| {
+                        eprintln!("riced: IPC poll failed: {error}");
+                        Task::none()
+                    });
+                    return reload.chain(surfaces).chain(ipc);
                 }
                 if matches!(message, Message::PollPlugins) {
                     return if checked(app.poll_plugins()) {
@@ -1390,6 +1440,15 @@ impl App {
     fn render(app: &Rc<RefCell<App>>, id: window::Id) -> Element<'_, Message> {
         checked(app.borrow().view(id))
     }
+}
+
+fn copy_table(lua: &Lua, source: &Table) -> mlua::Result<Table> {
+    let copy = lua.create_table()?;
+    for pair in source.clone().pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        copy.raw_set(key, value)?;
+    }
+    Ok(copy)
 }
 
 pub(crate) fn keys(table: &Table, allowed: &[&str]) -> mlua::Result<()> {
@@ -1591,6 +1650,121 @@ mod tests {
         assert_eq!(app.title(id).unwrap().as_deref(), Some("fixed"));
     }
 
+    #[test]
+    fn ipc_handlers_receive_state_and_arguments() {
+        let mut app = load(
+            r#"
+            local app = { hits = 0 }
+            function app:update() end
+            function app:view() return iced.text('ipc') end
+            riced.ipc({
+                add = function(self, args)
+                    self.hits = self.hits + 1
+                    self.args = args
+                end,
+                zero = function(self, args) self.zero = #args end,
+            })
+            return riced.daemon(app, 'test', app.update, app.view):run()
+            "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+
+        let _ = app
+            .run_ipc("add", &["--anchor".into(), "top bar".into(), "".into()])
+            .unwrap();
+        assert_eq!(app.state.get::<u32>("hits").unwrap(), 1);
+        let args: Table = app.state.get("args").unwrap();
+        assert_eq!(args.get::<String>(1).unwrap(), "--anchor");
+        assert_eq!(args.get::<String>(2).unwrap(), "top bar");
+        assert_eq!(args.get::<String>(3).unwrap(), "");
+
+        let _ = app.run_ipc("zero", &[]).unwrap();
+        assert_eq!(app.state.get::<u32>("zero").unwrap(), 0);
+
+        let _ = app.run_ipc("unknown", &[]).unwrap();
+        assert_eq!(app.state.get::<u32>("hits").unwrap(), 1);
+    }
+
+    #[test]
+    fn ipc_reregistration_replaces_the_handler() {
+        let mut app = load(
+            r#"
+            local app = { hits = 0 }
+            function app:update() end
+            function app:view() return iced.text('ipc') end
+            riced.ipc({ add = function(self) self.hits = self.hits + 1 end })
+            riced.ipc({ add = function(self) self.hits = self.hits + 10 end })
+            return riced.daemon(app, 'test', app.update, app.view):run()
+            "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+
+        let _ = app.run_ipc("add", &[]).unwrap();
+        assert_eq!(app.state.get::<u32>("hits").unwrap(), 10);
+    }
+
+    #[test]
+    fn ipc_rejects_an_empty_command_name() {
+        let error = match load(
+            r#"
+            local app = { }
+            function app:update() end
+            function app:view() return iced.text('ipc') end
+            riced.ipc({ [""] = function() end })
+            return riced.daemon(app, 'test', app.update, app.view):run()
+            "#,
+            Path::new("shell.lua"),
+        ) {
+            Ok(_) => panic!("empty IPC command was accepted"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn failed_module_reload_restores_ipc_handlers() {
+        let profile = Profile::new(&[
+            (
+                "shell.lua",
+                r#"
+                local state = require('state')
+                local app = { hits = 0 }
+                function app:update() end
+                function app:view() return iced.text('ipc') end
+                return riced.daemon(app, 'test', app.update, app.view):run()
+                "#,
+            ),
+            (
+                "state.lua",
+                "riced.ipc({ add = function(self) self.hits = self.hits + 1 end })\nreturn {}",
+            ),
+        ]);
+        let mut app = load(
+            r#"
+            local state = require('state')
+            local app = { hits = 0 }
+            function app:update() end
+            function app:view() return iced.text('ipc') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+            "#,
+            &profile.shell(),
+        )
+        .unwrap();
+        let _ = app.run_ipc("add", &[]).unwrap();
+        assert_eq!(app.state.get::<u32>("hits").unwrap(), 1);
+
+        profile.write(
+            "state.lua",
+            "riced.ipc({ add = function(self) self.hits = self.hits + 10 end })\nerror('broken')",
+        );
+        assert!(app.check_reload().is_err());
+
+        let _ = app.run_ipc("add", &[]).unwrap();
+        assert_eq!(app.state.get::<u32>("hits").unwrap(), 2);
+    }
 
     #[test]
     fn atomic_save_and_temporary_missing_file_recover() {

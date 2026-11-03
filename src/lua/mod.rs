@@ -14,6 +14,24 @@ pub fn load(lua: &mlua::Lua) -> mlua::Result<()> {
             .set_name(format!("riced API: {name}"))
             .exec()?;
     }
+    let handlers = lua.create_table()?;
+    lua.set_named_registry_value("riced.ipc_handlers", handlers.clone())?;
+    let riced: mlua::Table = lua.globals().get("riced")?;
+    riced.set(
+        "ipc",
+        lua.create_function(move |lua, handlers: mlua::Table| {
+            let registered: mlua::Table = lua.named_registry_value("riced.ipc_handlers")?;
+            for pair in handlers.pairs::<String, mlua::Function>() {
+                let (name, handler) = pair?;
+                if name.is_empty() {
+                    return Err(mlua::Error::runtime("IPC command name must not be empty"));
+                }
+                // Replacement keeps handlers working when their module reloads.
+                registered.set(name, handler)?;
+            }
+            Ok(())
+        })?,
+    )?;
     Ok(())
 }
 
