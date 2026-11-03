@@ -16,3 +16,41 @@ pub fn load(lua: &mlua::Lua) -> mlua::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opacity_sets_the_alpha_channel() {
+        let lua = mlua::Lua::new();
+        load(&lua).unwrap();
+        for (source, expected) in [
+            ("iced.opacity('#112233', 100)", "#112233ff"),
+            ("iced.opacity('#112233', 50)", "#11223380"),
+            ("iced.opacity('#112233', 0)", "#11223300"),
+            ("iced.opacity('#112233AA', 50)", "#11223380"),
+        ] {
+            assert_eq!(
+                lua.load(format!("return {source}"))
+                    .eval::<String>()
+                    .unwrap(),
+                expected
+            );
+        }
+        for source in [
+            "iced.opacity('red', 50)",
+            "iced.opacity('#11223', 50)",
+            "iced.opacity('#112233', -1)",
+            "iced.opacity('#112233', 101)",
+            "iced.opacity('#112233', '50')",
+        ] {
+            assert!(
+                lua.load(format!("return {source}"))
+                    .eval::<String>()
+                    .is_err(),
+                "{source}"
+            );
+        }
+    }
+}

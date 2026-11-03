@@ -20,3 +20,15 @@ function iced.Length.fill_portion(portion)
 	)
 	return { fill_portion = portion }
 end
+
+function iced.opacity(color, percent)
+	assert(type(color) == "string", "opacity color must be a string")
+	assert(
+		type(percent) == "number" and percent >= 0 and percent <= 100,
+		"opacity must be a number from 0 to 100"
+	)
+	local hex = color:match("^(#%x%x%x%x%x%x)%x%x$") or color:match("^(#%x%x%x%x%x%x)$")
+	assert(hex, "opacity color must be #RRGGBB or #RRGGBBAA")
+	local alpha = math.floor(percent * 255 / 100 + 0.5)
+	return string.format("%s%02x", hex, alpha)
+end
