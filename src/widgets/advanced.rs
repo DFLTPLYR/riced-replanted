@@ -315,6 +315,8 @@ pub(super) fn list_view(
                 None,
                 true,
                 ctx.window(),
+                previous.tokens[index],
+                None,
             )
             .into();
             keyed.push((previous.tokens[index], child));
@@ -333,6 +335,8 @@ pub(super) fn list_view(
             Some(leaving.at),
             false,
             ctx.window(),
+            leaving.token,
+            leaving.bounds,
         )
         .into();
         keyed.push((leaving.token, child));

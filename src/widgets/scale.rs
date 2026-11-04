@@ -37,6 +37,8 @@ pub(super) struct ScaleItem<'a> {
     leave_token: Option<Instant>,
     displace: bool,
     window: Option<window::Id>,
+    token: u64,
+    leaving_bounds: Option<Rectangle>,
 }
 
 impl<'a> ScaleItem<'a> {
@@ -50,6 +52,8 @@ impl<'a> ScaleItem<'a> {
         leave_token: Option<Instant>,
         displace: bool,
         window: Option<window::Id>,
+        token: u64,
+        leaving_bounds: Option<Rectangle>,
     ) -> Self {
         Self {
             content,
@@ -60,6 +64,8 @@ impl<'a> ScaleItem<'a> {
             leave_token,
             displace,
             window,
+            token,
+            leaving_bounds,
         }
     }
 }
@@ -101,7 +107,7 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
             y_range: self.y_range,
             leave_token: self.leave_token,
             window: self.window,
-            last_bounds: None,
+            last_bounds: self.leaving_bounds,
             shift: (0.0, 0.0),
             shift_from: (0.0, 0.0),
             shift_start: Instant::now(),
@@ -142,7 +148,7 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
                 y_range: self.y_range,
                 leave_token: self.leave_token,
                 window: self.window,
-                last_bounds: None,
+                last_bounds: self.leaving_bounds,
                 shift: (0.0, 0.0),
                 shift_from: (0.0, 0.0),
                 shift_start: Instant::now(),
@@ -161,28 +167,9 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        let node = self
-            .content
+        self.content
             .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits);
-        let state = tree.state.downcast_mut::<ScaleState>();
-        let bounds = node.bounds();
-        if self.displace
-            && state.leave_token.is_none()
-            && let Some(previous) = state.last_bounds
-            && (previous.x != bounds.x || previous.y != bounds.y)
-        {
-            let shift = (
-                state.shift.0 + previous.x - bounds.x,
-                state.shift.1 + previous.y - bounds.y,
-            );
-            state.shift = shift;
-            state.shift_from = shift;
-            state.shift_start = Instant::now();
-            state.shift_done = false;
-        }
-        state.last_bounds = Some(bounds);
-        node
+            .layout(&mut tree.children[0], renderer, limits)
     }
 
     fn operate(
@@ -222,6 +209,26 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
             return;
         };
         let state = tree.state.downcast_mut::<ScaleState>();
+        if self.leave_token.is_none() {
+            // Absolute bounds come from `layout.bounds()`, not the item's own layout node,
+            // which is always relative to its parent.
+            let bounds = layout.bounds();
+            if self.displace
+                && let Some(previous) = state.last_bounds
+                && (previous.x != bounds.x || previous.y != bounds.y)
+            {
+                let shift = (
+                    state.shift.0 + previous.x - bounds.x,
+                    state.shift.1 + previous.y - bounds.y,
+                );
+                state.shift = shift;
+                state.shift_from = shift;
+                state.shift_start = *now;
+                state.shift_done = false;
+            }
+            state.last_bounds = Some(bounds);
+            crate::widgets::state::set_list_bounds(self.window, self.token, bounds);
+        }
         let mut redraw = false;
         if !state.done {
             let elapsed = now.saturating_duration_since(state.start);
@@ -308,7 +315,15 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         if state.scale <= 0.0 {
             return;
         }
-        let shifted = state.shift.0 != 0.0 || state.shift.1 != 0.0;
+        let bounds = layout.bounds();
+        // Only leaving items draw in their old slot; current items can have stale
+        // bounds from an earlier layout pass when a redraw skips layout.
+        let delta = match self.leave_token.and(state.last_bounds) {
+            Some(anchor) => Vector::new(anchor.x - bounds.x, anchor.y - bounds.y),
+            None => Vector::ZERO,
+        };
+        let shifted =
+            state.shift.0 != 0.0 || state.shift.1 != 0.0 || delta.x != 0.0 || delta.y != 0.0;
         if state.scale >= 0.999 && !shifted {
             self.content.as_widget().draw(
                 &tree.children[0],
@@ -321,11 +336,10 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
             );
             return;
         }
-        let bounds = layout.bounds();
         let center = bounds.center();
         let transformation = Transformation::translate(
-            state.x + state.shift.0 + center.x,
-            state.y + state.shift.1 + center.y,
+            delta.x + state.x + state.shift.0 + center.x,
+            delta.y + state.y + state.shift.1 + center.y,
         ) * Transformation::scale(state.scale)
             * Transformation::translate(-center.x, -center.y);
         renderer.with_transformation(transformation, |renderer| {
@@ -373,6 +387,8 @@ mod tests {
             (0.0, 0.0),
             leaving.then(Instant::now),
             true,
+            None,
+            0,
             None,
         )
         .into();

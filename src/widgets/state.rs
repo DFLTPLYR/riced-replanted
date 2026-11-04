@@ -7,7 +7,7 @@
 //! if profiles churn through ids or options`.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
     time::{Duration, Instant},
@@ -29,23 +29,46 @@ thread_local! {
     static MARKDOWN: RefCell<HashMap<String, Rc<Vec<iced::widget::markdown::Item>>>> =
         RefCell::new(HashMap::new());
     static LISTS: RefCell<HashMap<ListKey, ListEntry>> = RefCell::new(HashMap::new());
+    static LIST_BOUNDS: RefCell<HashMap<(Option<iced::window::Id>, u64), iced::Rectangle>> =
+        RefCell::new(HashMap::new());
+    static NEXT_LIST_TOKEN: Cell<u64> = const { Cell::new(0) };
 }
 
 pub(crate) fn forget_window(generation: u64, window: iced::window::Id) {
     LISTS.with_borrow_mut(|lists| {
         lists.retain(|(owner, id, _), _| *owner != generation || *id != Some(window))
     });
+    LIST_BOUNDS.with_borrow_mut(|bounds| {
+        bounds.retain(|(id, _), _| *id != Some(window));
+    });
 }
 
 pub(crate) fn forget_generation(generation: u64) {
     LISTS.with_borrow_mut(|lists| lists.retain(|(owner, _, _), _| *owner != generation));
+    LIST_BOUNDS.with_borrow_mut(HashMap::clear);
+}
+
+pub(super) fn set_list_bounds(
+    window: Option<iced::window::Id>,
+    token: u64,
+    bounds: iced::Rectangle,
+) {
+    LIST_BOUNDS.with_borrow_mut(|bounds_map| {
+        bounds_map.insert((window, token), bounds);
+    });
+}
+
+pub(super) fn take_list_bounds(
+    window: Option<iced::window::Id>,
+    token: u64,
+) -> Option<iced::Rectangle> {
+    LIST_BOUNDS.with_borrow_mut(|bounds| bounds.remove(&(window, token)))
 }
 
 #[derive(Default)]
 struct ListEntry {
     items: Vec<(Value, Value, u64)>,
     leaving: Vec<ListLeaving>,
-    next_token: u64,
 }
 
 #[derive(Clone)]
@@ -54,6 +77,7 @@ pub(super) struct ListLeaving {
     pub(super) index: usize,
     pub(super) token: u64,
     pub(super) at: Instant,
+    pub(super) bounds: Option<iced::Rectangle>,
 }
 
 pub(super) struct ListState {
@@ -201,8 +225,11 @@ pub(super) fn list(
                     (token, Some(old_index))
                 }
                 None => {
-                    let token = entry.next_token;
-                    entry.next_token += 1;
+                    let token = NEXT_LIST_TOKEN.with(|next| {
+                        let token = next.get();
+                        next.set(token + 1);
+                        token
+                    });
                     added.push((index, item.clone()));
                     (token, None)
                 }
@@ -227,6 +254,7 @@ pub(super) fn list(
                     index,
                     token: *token,
                     at: Instant::now(),
+                    bounds: take_list_bounds(window, *token),
                 });
             }
         }
@@ -292,6 +320,39 @@ pub(super) fn read_panes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_items_keep_their_last_bounds() {
+        let lua = mlua::Lua::new();
+        let item = Value::Table(lua.create_table().unwrap());
+        let bounds = iced::Rectangle {
+            x: 4.0,
+            y: 20.0,
+            width: 320.0,
+            height: 80.0,
+        };
+        let first = list(
+            77,
+            None,
+            "bounds",
+            vec![item.clone()],
+            &[item],
+            true,
+            Duration::from_millis(100),
+        );
+        set_list_bounds(None, first.tokens[0], bounds);
+        let removed = list(
+            77,
+            None,
+            "bounds",
+            Vec::new(),
+            &[],
+            true,
+            Duration::from_millis(100),
+        );
+        assert_eq!(removed.leaving.len(), 1);
+        assert_eq!(removed.leaving[0].bounds, Some(bounds));
+    }
 
     #[test]
     fn recreated_table_items_can_grow() {
