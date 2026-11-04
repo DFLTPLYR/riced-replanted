@@ -15,11 +15,13 @@ thread_local! {
 pub(crate) fn root(
     content: Element<'static, Message>,
     window: window::Id,
+    events_transparent: bool,
 ) -> Element<'static, Message> {
     Region {
         content,
         window: Some(window),
         root: true,
+        events_transparent,
     }
     .into()
 }
@@ -30,8 +32,14 @@ struct RegionState {
 }
 
 impl RegionState {
-    fn changed(&mut self, mut bounds: Vec<Rectangle>, surface: Rectangle) -> bool {
-        if bounds.is_empty() {
+    // A click-through surface keeps an empty input region when no widget provides one.
+    fn changed(
+        &mut self,
+        mut bounds: Vec<Rectangle>,
+        surface: Rectangle,
+        events_transparent: bool,
+    ) -> bool {
+        if bounds.is_empty() && !events_transparent {
             bounds.push(surface);
         }
         if self.last == bounds {
@@ -47,6 +55,7 @@ pub(super) struct Region<'a> {
     content: Element<'a, Message>,
     window: Option<window::Id>,
     root: bool,
+    events_transparent: bool,
 }
 
 impl<'a> Region<'a> {
@@ -55,6 +64,7 @@ impl<'a> Region<'a> {
             content,
             window,
             root: false,
+            events_transparent: false,
         }
     }
 }
@@ -146,7 +156,7 @@ impl Widget<Message, Theme, iced::Renderer> for Region<'_> {
         };
         let bounds = BOUNDS.with_borrow_mut(std::mem::take);
         let state = tree.state.downcast_mut::<RegionState>();
-        if !state.changed(bounds, *viewport) {
+        if !state.changed(bounds, *viewport, self.events_transparent) {
             return;
         }
         let bounds = state.last.clone();
@@ -230,12 +240,23 @@ mod tests {
         let mut state = RegionState::default();
         let surface = Rectangle::with_size(Size::new(100.0, 50.0));
         let region = Rectangle::with_size(Size::new(10.0, 10.0));
-        assert!(state.changed(vec![region], surface));
-        assert!(!state.changed(vec![region], surface));
-        assert!(state.changed(Vec::new(), surface));
+        assert!(state.changed(vec![region], surface, false));
+        assert!(!state.changed(vec![region], surface, false));
+        assert!(state.changed(Vec::new(), surface, false));
         assert_eq!(state.last, [surface]);
         let resized = Rectangle::with_size(Size::new(200.0, 100.0));
-        assert!(state.changed(Vec::new(), resized));
+        assert!(state.changed(Vec::new(), resized, false));
         assert_eq!(state.last, [resized]);
+    }
+
+    #[test]
+    fn transparent_surfaces_keep_an_empty_region() {
+        let mut state = RegionState::default();
+        let surface = Rectangle::with_size(Size::new(100.0, 50.0));
+        let region = Rectangle::with_size(Size::new(10.0, 10.0));
+        assert!(!state.changed(Vec::new(), surface, true));
+        assert!(state.changed(vec![region], surface, true));
+        assert!(state.changed(Vec::new(), surface, true));
+        assert!(state.last.is_empty());
     }
 }

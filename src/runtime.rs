@@ -1128,6 +1128,10 @@ impl App {
         {
             return Ok(iced::widget::Space::new().into());
         }
+        let events_transparent = self
+            .layers
+            .iter()
+            .any(|layer| layer.window == id && layer.settings.events_transparent);
         // Registered before rendering so component mount/unmount signals skip the
         // surface-discovery pass, which renders with a throwaway window id.
         if !self.windows.borrow().contains(&id) {
@@ -1181,6 +1185,7 @@ impl App {
                 return Ok(widgets::with_input_regions(
                     iced::widget::Space::new().into(),
                     id,
+                    events_transparent,
                 ));
             };
             let Some(surface_node) = by_id.remove(surface) else {
@@ -1188,6 +1193,7 @@ impl App {
                 return Ok(widgets::with_input_regions(
                     iced::widget::Space::new().into(),
                     id,
+                    events_transparent,
                 ));
             };
             node = surface_node.get("content")?;
@@ -1202,7 +1208,7 @@ impl App {
                 .with_lua(self.lua.clone())
                 .with_window(id),
         )?;
-        Ok(widgets::with_input_regions(element, id))
+        Ok(widgets::with_input_regions(element, id, events_transparent))
     }
 
     fn theme(&self, id: window::Id) -> mlua::Result<Theme> {
