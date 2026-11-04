@@ -2,7 +2,10 @@
 
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use mlua::{
@@ -141,6 +144,8 @@ impl File {
     }
 }
 
+static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
 fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -151,13 +156,41 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("data");
-    let temporary = path.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
-    fs::write(&temporary, contents)?;
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
+    let mode = match fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = path.with_file_name(format!(
+        ".{name}.tmp-{}-{suffix}-{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    // create_new refuses to follow a symlink planted at the temporary path.
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    Ok(())
+    let mut file = options.open(&temporary)?;
+    let result = (|| {
+        file.write_all(contents.as_bytes())?;
+        if let Some(mode) = mode {
+            file.set_permissions(mode)?;
+        }
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// Installs `riced.file` onto the `riced` table. Relative paths are resolved
@@ -208,7 +241,8 @@ pub fn install(lua: &Lua, base: &Path) -> mlua::Result<()> {
             error,
         };
         let userdata: AnyUserData = lua.create_userdata(file)?;
-        if let Some(error) = userdata.borrow::<File>().unwrap().error.clone() {
+        let error = userdata.borrow::<File>()?.error.clone();
+        if let Some(error) = error {
             if let Some(callback) = on_error {
                 callback.call::<()>((userdata.clone(), error))?;
             }
@@ -226,6 +260,17 @@ pub fn install(lua: &Lua, base: &Path) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_callback_can_repair_file() {
+        let (lua, dir) = setup("repair");
+        fs::write(dir.join("data.json"), "invalid").unwrap();
+        lua.load("riced.file({path='data.json', onError=function(file) assert(file:write({fixed=true})) end})")
+            .exec().unwrap();
+        let saved: Json =
+            serde_json::from_str(&fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
+        assert_eq!(saved["fixed"], true);
+    }
 
     fn temp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("riced-file-{}-{name}", std::process::id()))
@@ -322,6 +367,43 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dir.join("nested/missing.json")).unwrap(),
             "{}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_does_not_follow_the_old_predictable_temporary_symlink() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let (_, dir) = setup("symlink");
+        let victim = dir.join("victim");
+        fs::write(&victim, "untouched").unwrap();
+        let temporary = dir.join(format!(".data.json.tmp-{}", std::process::id()));
+        symlink(&victim, &temporary).unwrap();
+        let path = dir.join("data.json");
+        write_atomic(&path, "private").unwrap();
+        assert_eq!(fs::read_to_string(victim).unwrap(), "untouched");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "private");
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_keeps_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (lua, dir) = setup("mode");
+        let path = dir.join("data.json");
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        lua.load(r#"riced.file({path="data.json"}):write({value=1})"#)
+            .exec()
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
         );
     }
 
