@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufReader, Write},
     os::unix::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
@@ -14,10 +14,11 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Table, Value, Variadic};
+use riced_extension_sdk::log;
 use riced_extension_sdk::protocol::{MAX_LINE, MethodSpec, ToHost, ToPlugin, VERSION};
 use serde_json::Value as Json;
 
@@ -26,7 +27,7 @@ const QUEUE: usize = 16;
 const POLL_MAX: usize = 256;
 const SCAN_EVERY: Duration = Duration::from_secs(1);
 const RESTART_DELAY: Duration = Duration::from_secs(1);
-const FAILURE_LIMIT: u32 = 5;
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(32);
 
 type Pending = Arc<Mutex<HashMap<u64, RegistryKey>>>;
 
@@ -43,6 +44,7 @@ struct Handle {
     pending: Pending,
     next: Arc<AtomicU64>,
     requested: Arc<Mutex<HashSet<String>>>,
+    pending_subscriptions: Arc<Mutex<HashSet<String>>>,
 }
 
 enum Incoming {
@@ -130,6 +132,15 @@ impl Plugins {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_event(event: Json) -> Self {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Incoming::Event { conn: 1, event }).unwrap();
+        let mut plugins = Self::test(rx);
+        plugins.conns.insert(1, "demo".into());
+        plugins
+    }
+
+    #[cfg(test)]
     fn test(incoming: Receiver<Incoming>) -> Self {
         Self {
             socket: None,
@@ -154,10 +165,14 @@ impl Plugins {
         Ok(())
     }
 
-    /// Drops callbacks that belong to a Lua state that is about to be replaced.
-    pub fn clear_pending(&mut self) {
+    /// Discards callbacks from rejected or replaced Lua states.
+    pub fn retain_pending(&mut self, lua: &Lua) {
         for handle in self.handles.values_mut() {
-            handle.pending.lock().unwrap().clear();
+            handle
+                .pending
+                .lock()
+                .unwrap()
+                .retain(|_, key| lua.owns_registry_value(key));
         }
     }
 
@@ -210,6 +225,7 @@ impl Plugins {
                             pending: Arc::new(Mutex::new(HashMap::new())),
                             next: Arc::new(AtomicU64::new(1)),
                             requested: Arc::new(Mutex::new(HashSet::new())),
+                            pending_subscriptions: Arc::new(Mutex::new(HashSet::new())),
                         },
                     );
                     self.install_one(lua, &name)?;
@@ -289,6 +305,19 @@ impl Plugins {
                 }
             }
         }
+        for handle in self.handles.values().filter(|handle| handle.alive) {
+            let mut pending = handle.pending_subscriptions.lock().unwrap();
+            if !pending.is_empty()
+                && send(
+                    &handle.writer,
+                    &ToPlugin::Subscribe {
+                        fields: pending.iter().cloned().collect(),
+                    },
+                )
+            {
+                pending.clear();
+            }
+        }
         Ok((changed, events))
     }
 
@@ -324,6 +353,7 @@ impl Plugins {
         // Reading a missing store field subscribes to it; extensions only compute what
         // something actually asks for. The metatable survives store refills.
         let requested = Arc::clone(&handle.requested);
+        let pending = Arc::clone(&handle.pending_subscriptions);
         let writer = handle.writer.clone();
         let index = lua.create_function(move |_, (_store, key): (Table, Value)| {
             let Value::String(key) = key else {
@@ -333,9 +363,16 @@ impl Plugins {
             if key.is_empty() || key.starts_with("__") {
                 return Ok(Value::Nil);
             }
-            let added = requested.lock().unwrap().insert(key.clone());
-            if added {
-                send(&writer, &ToPlugin::Subscribe { fields: vec![key] });
+            let mut requested = requested.lock().unwrap();
+            if requested.insert(key.clone())
+                && !send(
+                    &writer,
+                    &ToPlugin::Subscribe {
+                        fields: vec![key.clone()],
+                    },
+                )
+            {
+                pending.lock().unwrap().insert(key);
             }
             Ok(Value::Nil)
         })?;
@@ -403,7 +440,25 @@ fn call(
         Some(Value::Function(_)) => values.pop(),
         _ => None,
     };
+    let args = values
+        .iter()
+        .cloned()
+        .map(|value| lua.from_value::<Json>(value))
+        .collect::<mlua::Result<Vec<_>>>()?;
     let id = next.fetch_add(1, Ordering::Relaxed);
+    let message = ToPlugin::Call {
+        id,
+        method: method.to_owned(),
+        args,
+    };
+    let mut line =
+        serde_json::to_vec(&message).map_err(|error| mlua::Error::runtime(error.to_string()))?;
+    line.push(b'\n');
+    if line.len() > MAX_LINE {
+        return Err(mlua::Error::runtime(
+            "plugin call exceeds the 256 KiB line limit",
+        ));
+    }
     if let Some(callback) = callback {
         let mut pending = pending.lock().unwrap();
         if pending.len() >= PENDING_MAX {
@@ -413,24 +468,15 @@ fn call(
         }
         pending.insert(id, lua.create_registry_value(callback)?);
     }
-    let args = values
-        .iter()
-        .cloned()
-        .map(|value| lua.from_value::<Json>(value))
-        .collect::<mlua::Result<Vec<_>>>()?;
-    let message = ToPlugin::Call {
-        id,
-        method: method.to_owned(),
-        args,
-    };
-    let mut line =
-        serde_json::to_vec(&message).map_err(|error| mlua::Error::runtime(error.to_string()))?;
-    line.push(b'\n');
     match writer.try_send(line) {
-        Ok(()) | Err(TrySendError::Disconnected(_)) => Ok(()),
-        Err(TrySendError::Full(_)) => {
+        Ok(()) => Ok(()),
+        Err(error) => {
             pending.lock().unwrap().remove(&id);
-            Err(mlua::Error::runtime(format!("plugin {plugin} is busy")))
+            let reason = match error {
+                TrySendError::Full(_) => "busy",
+                TrySendError::Disconnected(_) => "disconnected",
+            };
+            Err(mlua::Error::runtime(format!("plugin {plugin} is {reason}")))
         }
     }
 }
@@ -449,16 +495,16 @@ fn fill(lua: &Lua, table: &Table, json: &Json) -> mlua::Result<()> {
     Ok(())
 }
 
-fn send(writer: &SyncSender<Vec<u8>>, message: &ToPlugin) {
+fn send(writer: &SyncSender<Vec<u8>>, message: &ToPlugin) -> bool {
     let Ok(mut line) = serde_json::to_vec(message) else {
-        return;
+        return false;
     };
     line.push(b'\n');
-    let _ = writer.try_send(line);
+    writer.try_send(line).is_ok()
 }
 
 fn reject(writer: &SyncSender<Vec<u8>>, error: &str) {
-    send(
+    let _ = send(
         writer,
         &ToPlugin::Error {
             error: error.to_owned(),
@@ -543,17 +589,15 @@ fn read_conn(stream: UnixStream, id: u64, tx: SyncSender<Incoming>, stop: Arc<At
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        line.clear();
-        match reader.read_until(b'\n', &mut line) {
+        match riced_extension_sdk::protocol::read_line(&mut reader, &mut line) {
             Ok(0) => break,
-            Ok(_) if line.len() > MAX_LINE => break,
             Ok(_) => {}
             Err(_) => break,
         }
         let message = match serde_json::from_slice::<ToHost>(&line) {
             Ok(message) => message,
             Err(error) => {
-                eprintln!("riced: bad extension message: {error}");
+                log::warn!(target: "extension.decode", "bad extension message: {error}");
                 continue;
             }
         };
@@ -614,6 +658,16 @@ struct ChildEntry {
     failures: u32,
     started: Instant,
     restart_at: Option<Instant>,
+    fingerprint: Option<(SystemTime, u64)>,
+}
+
+fn fingerprint(path: &Path) -> Option<(SystemTime, u64)> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
+fn restart_delay(failures: u32) -> Duration {
+    (RESTART_DELAY * (1 << failures.min(5))).min(MAX_RESTART_DELAY)
 }
 
 impl Supervisor {
@@ -640,16 +694,24 @@ impl Supervisor {
                 removed.push(path.clone());
                 continue;
             }
+            let current = fingerprint(path);
+            if current != entry.fingerprint {
+                entry.fingerprint = current;
+                entry.failures = 0;
+                if entry.child.is_none() {
+                    entry.restart_at = Some(now);
+                }
+            }
             let exited = match entry.child.as_mut() {
                 Some(child) => match child.try_wait() {
                     Ok(Some(status)) => {
-                        eprintln!("riced: extension {} exited ({status})", path.display());
+                        log::warn!(target: "extension.exited", "extension {} exited ({status})", path.display());
                         entry.child = None;
                         true
                     }
                     Ok(None) => false,
                     Err(error) => {
-                        eprintln!("riced: cannot poll extension {}: {error}", path.display());
+                        log::error!(target: "extension.poll", "cannot poll extension {}: {error}", path.display());
                         entry.child = None;
                         true
                     }
@@ -658,19 +720,11 @@ impl Supervisor {
             };
             if exited {
                 entry.failures = if entry.started.elapsed() < RESTART_DELAY * 2 {
-                    entry.failures + 1
+                    entry.failures.saturating_add(1)
                 } else {
                     0
                 };
-                if entry.failures < FAILURE_LIMIT {
-                    entry.restart_at = Some(now + RESTART_DELAY);
-                } else {
-                    entry.restart_at = None;
-                    eprintln!(
-                        "riced: extension {} keeps crashing; giving up",
-                        path.display()
-                    );
-                }
+                entry.restart_at = Some(now + restart_delay(entry.failures));
             }
             if entry.child.is_none() && entry.restart_at.is_some_and(|at| now >= at) {
                 restart.push(path.clone());
@@ -696,6 +750,7 @@ impl Supervisor {
                         failures: 0,
                         started: now,
                         restart_at: None,
+                        fingerprint: fingerprint(&path),
                     },
                 );
                 self.spawn(&path);
@@ -714,15 +769,15 @@ impl Supervisor {
             .spawn();
         match result {
             Ok(child) => {
-                eprintln!("riced: started extension {}", path.display());
+                log::info!(target: "extension.started", "started extension {}", path.display());
                 entry.child = Some(child);
                 entry.started = Instant::now();
                 entry.restart_at = None;
             }
             Err(error) => {
-                entry.failures += 1;
-                entry.restart_at = Some(Instant::now() + RESTART_DELAY);
-                eprintln!("riced: cannot start extension {}: {error}", path.display());
+                entry.failures = entry.failures.saturating_add(1);
+                entry.restart_at = Some(Instant::now() + restart_delay(entry.failures));
+                log::error!(target: "extension.start", "cannot start extension {}: {error}", path.display());
             }
         }
     }
@@ -766,6 +821,42 @@ fn executable(path: &Path) -> bool {
     fs::metadata(path)
         .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+pub(crate) fn audit_ready() -> (std::rc::Rc<std::cell::RefCell<Plugins>>, impl FnOnce()) {
+    let (tx, rx) = mpsc::sync_channel(16);
+    let (writer, calls) = mpsc::sync_channel(16);
+    tx.send(Incoming::Register {
+        conn: 1,
+        v: VERSION,
+        name: "demo".into(),
+        methods: HashMap::from([("query".into(), MethodSpec::default())]),
+        writer,
+    })
+    .unwrap();
+    let mut plugins = Plugins::test(rx);
+    let lua = Lua::new();
+    crate::lua::load(&lua).unwrap();
+    plugins.install(&lua).unwrap();
+    plugins.poll(&lua).unwrap();
+    (
+        std::rc::Rc::new(std::cell::RefCell::new(plugins)),
+        move || {
+            let line = calls.recv_timeout(Duration::from_secs(1)).unwrap();
+            let ToPlugin::Call { id, .. } = serde_json::from_slice(&line).unwrap() else {
+                panic!("expected plugin call");
+            };
+            tx.send(Incoming::Result {
+                conn: 1,
+                id,
+                ok: true,
+                result: Json::Null,
+                error: None,
+            })
+            .unwrap();
+        },
+    )
 }
 
 #[cfg(test)]
@@ -876,6 +967,76 @@ mod tests {
     }
 
     #[test]
+    fn full_queue_retries_a_store_subscription() {
+        let (tx, mut plugins, lua) = setup();
+        let calls = register(&tx, &["noop"]);
+        plugins.poll(&lua).unwrap();
+
+        for _ in 0..QUEUE {
+            lua.load("riced.plugins('demo').noop()").exec().unwrap();
+        }
+        lua.load("return riced.plugins('demo').store.cpu")
+            .exec()
+            .unwrap();
+        assert!(
+            plugins
+                .handles
+                .get("demo")
+                .unwrap()
+                .requested
+                .lock()
+                .unwrap()
+                .contains("cpu")
+        );
+
+        for _ in 0..QUEUE {
+            calls.try_recv().unwrap();
+        }
+        plugins.poll(&lua).unwrap();
+        let line = calls.recv_timeout(Duration::from_secs(1)).unwrap();
+        match serde_json::from_slice::<ToPlugin>(&line).unwrap() {
+            ToPlugin::Subscribe { fields } => assert_eq!(fields, ["cpu"]),
+            _ => panic!("expected subscribe"),
+        }
+    }
+
+    #[test]
+    fn disconnected_calls_report_failure() {
+        let (tx, mut plugins, lua) = setup();
+        let calls = register(&tx, &["query"]);
+        plugins.poll(&lua).unwrap();
+        tx.send(Incoming::Closed { conn: 1 }).unwrap();
+        plugins.poll(&lua).unwrap();
+        drop(calls);
+        assert!(
+            lua.load("riced.plugins('demo').query(function() end)")
+                .exec()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn failed_argument_conversion_releases_the_callback_slot() {
+        let (tx, mut plugins, lua) = setup();
+        let _calls = register(&tx, &["query"]);
+        plugins.poll(&lua).unwrap();
+        assert!(
+            lua.load("riced.plugins('demo').query(function() end, function() end)")
+                .exec()
+                .is_err()
+        );
+        assert!(plugins.handles["demo"].pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn restarts_with_capped_backoff() {
+        assert_eq!(restart_delay(0), Duration::from_secs(1));
+        assert_eq!(restart_delay(1), Duration::from_secs(2));
+        assert_eq!(restart_delay(5), MAX_RESTART_DELAY);
+        assert_eq!(restart_delay(99), MAX_RESTART_DELAY);
+    }
+
+    #[test]
     fn result_invokes_the_lua_callback() {
         let (tx, mut plugins, lua) = setup();
         let _calls = register(&tx, &["query"]);
@@ -958,10 +1119,10 @@ mod tests {
         })
         .unwrap();
         plugins.poll(&lua).unwrap();
-        plugins.clear_pending();
 
         let next = Lua::new();
         crate::lua::load(&next).unwrap();
+        plugins.retain_pending(&next);
         plugins.install(&next).unwrap();
 
         let proxy: Table = next
