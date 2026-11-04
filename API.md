@@ -685,7 +685,12 @@ Props: `on_show`, `on_hide`, and `on_resize`.
 #### `iced.scrollable(content, props)`
 
 Props: `direction` (`"vertical"` default, `"horizontal"`, or `"both"`), `id`,
-`on_scroll`, `auto_scroll` (boolean), `spacing`, and `style`.
+`on_scroll`, `auto_scroll` (boolean), `scrollbar_hidden` (boolean, default false),
+`spacing`, and `style`.
+
+`scrollbar_hidden = true` uses Iced's native zero-width scrollbar for each enabled
+axis. Wheel/touch scrolling stays enabled. Unlike transparent scrollbar colors,
+this removes the scrollbar's width. Leave `spacing` at zero to avoid an extra gap.
 
 `on_scroll` sends:
 

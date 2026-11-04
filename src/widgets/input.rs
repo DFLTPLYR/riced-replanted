@@ -519,26 +519,25 @@ pub(super) fn scrollable(
     if let Some(height) = layout.height {
         scrollable = scrollable.height(height);
     }
-    if let Some(direction) = node.get::<Option<String>>("direction")? {
-        let direction = match direction.as_str() {
-            "vertical" => {
-                widget::scrollable::Direction::Vertical(widget::scrollable::Scrollbar::default())
-            }
-            "horizontal" => {
-                widget::scrollable::Direction::Horizontal(widget::scrollable::Scrollbar::default())
-            }
-            "both" => widget::scrollable::Direction::Both {
-                vertical: widget::scrollable::Scrollbar::default(),
-                horizontal: widget::scrollable::Scrollbar::default(),
-            },
-            other => {
-                return Err(mlua::Error::runtime(format!(
-                    "unknown scroll direction {other:?}; use vertical, horizontal, or both"
-                )));
-            }
-        };
-        scrollable = scrollable.direction(direction);
-    }
+    let scrollbar = match node.get::<Value>("scrollbar_hidden")? {
+        Value::Nil | Value::Boolean(false) => widget::scrollable::Scrollbar::default(),
+        Value::Boolean(true) => widget::scrollable::Scrollbar::hidden(),
+        _ => return Err(mlua::Error::runtime("scrollbar_hidden must be a boolean")),
+    };
+    let direction = match node.get::<Option<String>>("direction")?.as_deref() {
+        None | Some("vertical") => widget::scrollable::Direction::Vertical(scrollbar),
+        Some("horizontal") => widget::scrollable::Direction::Horizontal(scrollbar),
+        Some("both") => widget::scrollable::Direction::Both {
+            vertical: scrollbar,
+            horizontal: scrollbar,
+        },
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "unknown scroll direction {other:?}; use vertical, horizontal, or both"
+            )));
+        }
+    };
+    scrollable = scrollable.direction(direction);
     scrollable = scrollable.spacing(number(node, "spacing", 0.0)?);
     if let Some(auto_scroll) = node.get::<Option<bool>>("auto_scroll")? {
         scrollable = scrollable.auto_scroll(auto_scroll);

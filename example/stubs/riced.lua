@@ -211,6 +211,7 @@ config = {}
 ---@field max_width? number
 ---@field max_height? number
 ---@field direction? "horizontal"|"vertical"|"both"
+---@field scrollbar_hidden? boolean Hide scrollbars with zero width; wheel/touch scrolling stays enabled.
 ---@field thickness? number
 ---@field value? number|boolean|string
 ---@field girth? number
