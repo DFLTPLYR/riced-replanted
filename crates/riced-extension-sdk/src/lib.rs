@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufReader, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
@@ -11,11 +11,37 @@ use std::{
 
 use serde_json::Value;
 
+pub mod logging;
 pub mod protocol;
 
+pub use log;
 pub use protocol::{MethodSpec, ToHost, ToPlugin, VERSION};
 
 pub type Handler = Box<dyn Fn(&Value) -> Result<Value, String> + Send + Sync>;
+
+/// Keeps complete array entries within a JSON byte budget, including escaping.
+/// Oversized entries are omitted; identifiers and action keys are never rewritten.
+pub fn bounded_array(items: impl IntoIterator<Item = Value>, budget: usize) -> Vec<Value> {
+    let mut remaining = budget.saturating_sub(2);
+    let mut omitted = false;
+    let items = items
+        .into_iter()
+        .filter(|item| {
+            let bytes = item.to_string().len() + 1;
+            if bytes > remaining {
+                omitted = true;
+                false
+            } else {
+                remaining -= bytes;
+                true
+            }
+        })
+        .collect();
+    if omitted {
+        log::warn!(target: "extension.snapshot", "snapshot array exceeded its byte budget; entries omitted");
+    }
+    items
+}
 
 pub struct Plugin {
     name: String,
@@ -109,7 +135,7 @@ impl Context {
             Ok(line) => {
                 let _ = self.tx.send(line);
             }
-            Err(error) => eprintln!("riced extension: {error}"),
+            Err(error) => log::error!(target: "extension.encode", "{error}"),
         }
     }
 }
@@ -118,6 +144,7 @@ pub fn serve_at<F>(plugin: Plugin, socket: &Path, run: F) -> io::Result<()>
 where
     F: FnOnce(Context),
 {
+    let _ = logging::init();
     if plugin.name.is_empty()
         || plugin.name.len() > 32
         || !plugin
@@ -202,20 +229,18 @@ fn read_calls(
 ) {
     let mut line = Vec::new();
     loop {
-        line.clear();
-        match reader.read_until(b'\n', &mut line) {
+        match protocol::read_line(&mut reader, &mut line) {
             Ok(0) => break,
-            Ok(_) if line.len() > protocol::MAX_LINE => {
-                eprintln!("riced extension: message over {} bytes", protocol::MAX_LINE);
+            Ok(_) => {}
+            Err(error) => {
+                log::error!(target: "extension.protocol", "{error}");
                 break;
             }
-            Ok(_) => {}
-            Err(_) => break,
         }
         let message = match serde_json::from_slice::<ToPlugin>(&line) {
             Ok(message) => message,
             Err(error) => {
-                eprintln!("riced extension: {error}");
+                log::warn!(target: "extension.decode", "{error}");
                 continue;
             }
         };
@@ -245,14 +270,14 @@ fn read_calls(
                             break;
                         }
                     }
-                    Err(error) => eprintln!("riced extension: {error}"),
+                    Err(error) => log::error!(target: "extension.encode", "{error}"),
                 }
             }
             ToPlugin::Subscribe { fields } => {
                 requested.lock().unwrap().extend(fields);
             }
             ToPlugin::Error { error } => {
-                eprintln!("riced extension: {error}");
+                log::error!(target: "extension.rejected", "{error}");
                 std::process::exit(1);
             }
         }
@@ -272,4 +297,34 @@ fn encode(message: &ToHost) -> io::Result<Vec<u8>> {
     }
     line.push(b'\n');
     Ok(line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn snapshot_budget_counts_escaping_and_keeps_identifiers_intact() {
+        let large = json!({"id": "keep-me", "body": "\0🦀".repeat(100_000)});
+        let small = json!({"id": "small", "body": "updated"});
+        let items = bounded_array([large, small.clone()], 1024);
+        assert_eq!(items, [small]);
+        assert!(
+            encode(&ToHost::State {
+                store: json!({"items": items})
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn snapshot_budget_caps_many_entries() {
+        let items = bounded_array(
+            (0..1000).map(|id| json!({"id": id, "text": "\0".repeat(1000)})),
+            32 * 1024,
+        );
+        assert!(!items.is_empty());
+        assert!(serde_json::to_vec(&items).unwrap().len() <= 32 * 1024);
+    }
 }
