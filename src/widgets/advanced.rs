@@ -255,7 +255,15 @@ pub(super) fn list_view(
     };
     let displaced = transition.as_ref().and_then(|t| t.displaced.clone());
 
-    let previous = state::list(ctx.generation, &id, items.clone(), &keys, animate, duration);
+    let previous = state::list(
+        ctx.generation,
+        ctx.window(),
+        &id,
+        items.clone(),
+        &keys,
+        animate,
+        duration,
+    );
     if let Some(callback) = &added {
         for (index, item) in &previous.added {
             callback.call::<()>((*index, item.clone()))?;
@@ -522,6 +530,7 @@ pub(super) fn table(
     Ok(table.into())
 }
 
+#[allow(deprecated)] // Component safely owns the data borrowed by Iced's markdown view.
 pub(super) fn markdown(node: &Table, ctx: &Ctx) -> mlua::Result<Element<'static, Message>> {
     let content = node.get::<String>("content")?;
     let items = state::markdown(&content);
@@ -553,7 +562,7 @@ pub(super) fn markdown(node: &Table, ctx: &Ctx) -> mlua::Result<Element<'static,
     let component = ctx.component.clone();
     let event = node.get::<Option<String>>("on_link_click")?;
     Ok(
-        markdown_widget::view(items, settings).map(move |uri| match &event {
+        widget::component(Markdown { items, settings }).map(move |uri| match &event {
             Some(event) => Message::Widget(
                 generation,
                 component.clone(),
@@ -563,6 +572,26 @@ pub(super) fn markdown(node: &Table, ctx: &Ctx) -> mlua::Result<Element<'static,
             None => Message::Noop,
         }),
     )
+}
+
+struct Markdown {
+    items: std::rc::Rc<Vec<markdown_widget::Item>>,
+    settings: markdown_widget::Settings,
+}
+
+// Iced's component owns the data borrowed by its view; no encapsulated mutable state.
+#[allow(deprecated)]
+impl widget::Component<markdown_widget::Uri> for Markdown {
+    type State = ();
+    type Event = markdown_widget::Uri;
+
+    fn update(&mut self, _: &mut (), event: Self::Event) -> Option<Self::Event> {
+        Some(event)
+    }
+
+    fn view(&self, _: &()) -> Element<'_, Self::Event> {
+        markdown_widget::view(self.items.iter(), self.settings)
+    }
 }
 
 pub(super) fn responsive(

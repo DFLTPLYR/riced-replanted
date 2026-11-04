@@ -3,12 +3,14 @@ use std::{
     path::PathBuf,
 };
 
-use mlua::{Function, Lua, Table, Value};
+use mlua::{FromLua, Function, Lua, Table, Value};
+use riced_extension_sdk::log;
 
 #[derive(Clone)]
 pub struct Loaded {
     path: PathBuf,
     source: String,
+    warned: bool,
 }
 
 #[derive(Clone, Default)]
@@ -97,13 +99,33 @@ impl Modules {
             }
         }
         let loaded = loaded_table(lua)?;
+        let exports = replacements
+            .iter()
+            .map(|(_, old, new)| (new.to_pointer(), old.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut seen = snapshot
+            .package
+            .values()
+            .map(Value::to_pointer)
+            .collect::<HashSet<_>>();
+        seen.insert(lua.globals().to_pointer());
         for (name, old, new) in replacements {
             old.clear()?;
             for pair in new.pairs::<Value, Value>() {
                 let (key, value) = pair?;
-                old.raw_set(key, value)?;
+                old.raw_set(
+                    rebind_exports(lua, key, &exports, &mut seen)?,
+                    rebind_exports(lua, value, &exports, &mut seen)?,
+                )?;
             }
-            old.set_metatable(new.metatable())?;
+            let meta = new
+                .metatable()
+                .map(|table| {
+                    rebind_exports(lua, Value::Table(table), &exports, &mut seen)
+                        .and_then(|value| Table::from_lua(value, lua))
+                })
+                .transpose()?;
+            old.set_metatable(meta)?;
             loaded.set(name.as_str(), old)?;
         }
         self.watch_all(lua)
@@ -154,6 +176,7 @@ impl Modules {
             Loaded {
                 path: path.into(),
                 source,
+                warned: false,
             },
         );
         Ok(())
@@ -164,12 +187,20 @@ impl Modules {
     pub fn poll(&mut self, lua: &Lua) -> mlua::Result<Vec<String>> {
         let mut changed = Vec::new();
         for (name, loaded) in &mut self.loaded {
-            let source = std::fs::read_to_string(&loaded.path).map_err(|error| {
-                mlua::Error::runtime(format!("cannot read {}: {error}", loaded.path.display()))
-            })?;
-            if source != loaded.source {
-                loaded.source = source;
-                changed.push(name.clone());
+            match std::fs::read_to_string(&loaded.path) {
+                Ok(source) => {
+                    loaded.warned = false;
+                    if source != loaded.source {
+                        loaded.source = source;
+                        changed.push(name.clone());
+                    }
+                }
+                Err(error) => {
+                    if !loaded.warned {
+                        loaded.warned = true;
+                        log::warn!(target: "module.watch", "cannot watch {}: {error}", loaded.path.display());
+                    }
+                }
             }
         }
         if changed.is_empty() {
@@ -254,6 +285,69 @@ impl Modules {
         lua.globals().set("__riced_dependencies", deps)?;
         Ok(())
     }
+}
+
+// Lua functions capture their module's new export table; point those references
+// at the canonical table retained by callers, without exposing the debug library.
+fn rebind_exports(
+    lua: &Lua,
+    value: Value,
+    exports: &HashMap<*const std::ffi::c_void, Table>,
+    seen: &mut HashSet<*const std::ffi::c_void>,
+) -> mlua::Result<Value> {
+    if let Some(table) = exports.get(&value.to_pointer()) {
+        return Ok(Value::Table(table.clone()));
+    }
+    if !matches!(value, Value::Table(_) | Value::Function(_)) || !seen.insert(value.to_pointer()) {
+        return Ok(value);
+    }
+    match &value {
+        Value::Table(table) => {
+            let pairs = table
+                .pairs::<Value, Value>()
+                .collect::<mlua::Result<Vec<_>>>()?;
+            for (key, value) in pairs {
+                let new_key = rebind_exports(lua, key.clone(), exports, seen)?;
+                let value = rebind_exports(lua, value, exports, seen)?;
+                if key != new_key {
+                    table.raw_set(key, Value::Nil)?;
+                }
+                table.raw_set(new_key, value)?;
+            }
+            if let Some(meta) = table.metatable() {
+                let meta = rebind_exports(lua, Value::Table(meta), exports, seen)?;
+                table.set_metatable(Some(Table::from_lua(meta, lua)?))?;
+            }
+        }
+        Value::Function(function) if function.info().what != "C" => {
+            for index in 1..=i32::from(function.info().num_upvalues) {
+                // exec_raw locks/restores the stack; index is a valid Lua upvalue.
+                let (name, captured): (String, Value) = unsafe {
+                    lua.exec_raw(function, |state| {
+                        let name = mlua::ffi::lua_getupvalue(state, 1, index);
+                        mlua::ffi::lua_pushstring(state, name);
+                        mlua::ffi::lua_remove(state, 1);
+                        mlua::ffi::lua_insert(state, 1);
+                    })?
+                };
+                if name == "_ENV" {
+                    continue;
+                }
+                let replacement = rebind_exports(lua, captured.clone(), exports, seen)?;
+                if replacement != captured {
+                    // Both arguments belong to this Lua; setupvalue consumes the value.
+                    unsafe {
+                        lua.exec_raw::<()>((function, replacement), |state| {
+                            mlua::ffi::lua_setupvalue(state, 1, index);
+                            mlua::ffi::lua_pop(state, 1);
+                        })?;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -343,6 +437,36 @@ mod tests {
     }
 
     #[test]
+    fn reload_rebinds_self_references_to_the_retained_export_table() {
+        let profile = Profile::new(&[(
+            "component.lua",
+            "local m = {}; function m.self() return m end; return m",
+        )]);
+        let lua = profile.lua();
+        let mut modules = Modules::default();
+        let old = modules.require(&lua, "component").unwrap();
+        let snapshot = modules.snapshot(&lua).unwrap();
+        profile.write(
+            "component.lua",
+            "local m = {}; function m.self() return m end; function m.marker() return 'new' end; return m",
+        );
+        let changed = modules.poll(&lua).unwrap();
+        modules.refresh(&lua, &changed, &snapshot).unwrap();
+
+        let new = modules.require(&lua, "component").unwrap();
+        assert_eq!(old.to_pointer(), new.to_pointer());
+        let captured: Table = new.get::<Function>("self").unwrap().call(()).unwrap();
+        assert_eq!(captured.to_pointer(), old.to_pointer());
+        assert_eq!(
+            new.get::<Function>("marker")
+                .unwrap()
+                .call::<String>(())
+                .unwrap(),
+            "new"
+        );
+    }
+
+    #[test]
     fn snapshot_restores_modules_after_a_failed_reload() {
         let profile = Profile::new(&[("component.lua", "return {v = 1}")]);
         let lua = profile.lua();
@@ -359,6 +483,22 @@ mod tests {
         assert_eq!(modules.revision("component"), 0);
         let component: Table = modules.require(&lua, "component").unwrap();
         assert_eq!(component.get::<u32>("v").unwrap(), 1);
+        assert!(modules.poll(&lua).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_missing_module_does_not_hide_another_edit() {
+        let profile = Profile::new(&[("a.lua", "return {}"), ("b.lua", "return {}")]);
+        let lua = profile.lua();
+        let mut modules = Modules::default();
+        modules.require(&lua, "a").unwrap();
+        modules.require(&lua, "b").unwrap();
+
+        profile.write("a.lua", "return {changed = true}");
+        std::fs::remove_file(profile.0.join("b.lua")).unwrap();
+        assert_eq!(modules.poll(&lua).unwrap(), ["a"]);
+
+        profile.write("b.lua", "return {}");
         assert!(modules.poll(&lua).unwrap().is_empty());
     }
 

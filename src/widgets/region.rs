@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use iced::advanced::layout;
 use iced::advanced::widget::{Operation, Tree, tree};
 use iced::advanced::{Clipboard, Layout, Shell, Widget, mouse, overlay, renderer};
@@ -6,20 +8,54 @@ use iced_exwlshell::actions::{ActionCallback, ExwlShellCustomAction, ExwlShellCu
 
 use crate::runtime::Message;
 
+thread_local! {
+    static BOUNDS: RefCell<Vec<Rectangle>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn root(
+    content: Element<'static, Message>,
+    window: window::Id,
+) -> Element<'static, Message> {
+    Region {
+        content,
+        window: Some(window),
+        root: true,
+    }
+    .into()
+}
+
 #[derive(Debug, Default)]
 struct RegionState {
-    last: Option<Rectangle>,
+    last: Vec<Rectangle>,
+}
+
+impl RegionState {
+    fn changed(&mut self, mut bounds: Vec<Rectangle>, surface: Rectangle) -> bool {
+        if bounds.is_empty() {
+            bounds.push(surface);
+        }
+        if self.last == bounds {
+            return false;
+        }
+        self.last = bounds;
+        true
+    }
 }
 
 /// Wraps content and publishes its layout bounds as the window input region.
 pub(super) struct Region<'a> {
     content: Element<'a, Message>,
     window: Option<window::Id>,
+    root: bool,
 }
 
 impl<'a> Region<'a> {
     pub(super) fn new(content: Element<'a, Message>, window: Option<window::Id>) -> Self {
-        Self { content, window }
+        Self {
+            content,
+            window,
+            root: false,
+        }
     }
 }
 
@@ -84,6 +120,10 @@ impl Widget<Message, Theme, iced::Renderer> for Region<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        let redraw = matches!(event, Event::Window(window::Event::RedrawRequested(_)));
+        if self.root && redraw {
+            BOUNDS.with_borrow_mut(Vec::clear);
+        }
         self.content.as_widget_mut().update(
             &mut tree.children[0],
             event,
@@ -94,27 +134,33 @@ impl Widget<Message, Theme, iced::Renderer> for Region<'_> {
             shell,
             viewport,
         );
-        let Event::Window(window::Event::RedrawRequested(_)) = event else {
+        if !redraw {
             return;
-        };
+        }
+        if !self.root {
+            BOUNDS.with_borrow_mut(|bounds| bounds.push(layout.bounds()));
+            return;
+        }
         let Some(window) = self.window else {
             return;
         };
-        let bounds = layout.bounds();
+        let bounds = BOUNDS.with_borrow_mut(std::mem::take);
         let state = tree.state.downcast_mut::<RegionState>();
-        if state.last == Some(bounds) {
+        if !state.changed(bounds, *viewport) {
             return;
         }
-        state.last = Some(bounds);
-        let (x, y) = (bounds.x.round() as i32, bounds.y.round() as i32);
-        let (width, height) = (bounds.width.round() as i32, bounds.height.round() as i32);
-        if width <= 0 || height <= 0 {
-            return;
-        }
+        let bounds = state.last.clone();
         shell.publish(Message::Surface(ExwlShellCustomActionWithId::new(
             Some(window),
             ExwlShellCustomAction::SetInputRegion(ActionCallback::new(move |region| {
-                region.add(x, y, width, height);
+                for bounds in &bounds {
+                    let (x, y) = (bounds.x.round() as i32, bounds.y.round() as i32);
+                    let (width, height) =
+                        (bounds.width.round() as i32, bounds.height.round() as i32);
+                    if width > 0 && height > 0 {
+                        region.add(x, y, width, height);
+                    }
+                }
             })),
         )));
     }
@@ -172,5 +218,24 @@ impl Widget<Message, Theme, iced::Renderer> for Region<'_> {
             viewport,
             translation,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removal_restores_full_bounds_and_follows_resizes() {
+        let mut state = RegionState::default();
+        let surface = Rectangle::with_size(Size::new(100.0, 50.0));
+        let region = Rectangle::with_size(Size::new(10.0, 10.0));
+        assert!(state.changed(vec![region], surface));
+        assert!(!state.changed(vec![region], surface));
+        assert!(state.changed(Vec::new(), surface));
+        assert_eq!(state.last, [surface]);
+        let resized = Rectangle::with_size(Size::new(200.0, 100.0));
+        assert!(state.changed(Vec::new(), resized));
+        assert_eq!(state.last, [resized]);
     }
 }

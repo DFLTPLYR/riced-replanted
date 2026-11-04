@@ -24,6 +24,9 @@ use mlua::{Table, Value};
 
 use crate::runtime::Message;
 
+pub(crate) use region::root as with_input_regions;
+pub(crate) use state::{forget_generation, forget_window};
+
 pub fn color(value: &str) -> mlua::Result<Color> {
     if !value.is_ascii() {
         return Err(mlua::Error::runtime("colors must be ASCII hex strings"));
@@ -287,7 +290,7 @@ impl Transition {
 #[derive(Clone)]
 pub struct Ctx {
     pub generation: u64,
-    pub component: Option<(String, u64)>,
+    pub component: Option<(String, u64, Option<iced::window::Id>)>,
     lua: Option<mlua::Lua>,
     window: Option<iced::window::Id>,
 }
@@ -329,7 +332,7 @@ pub fn element(node: Table, ctx: &Ctx) -> mlua::Result<Element<'static, Message>
         Some(id) => {
             tagged = Ctx {
                 generation: ctx.generation,
-                component: Some((id, node.get::<u64>("__component_revision")?)),
+                component: Some((id, node.get::<u64>("__component_revision")?, ctx.window)),
                 lua: ctx.lua.clone(),
                 window: ctx.window,
             };

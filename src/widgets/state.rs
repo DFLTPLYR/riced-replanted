@@ -9,6 +9,7 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -16,6 +17,7 @@ use iced::widget::{combo_box, pane_grid, text_editor};
 use mlua::Value;
 
 type PaneState = &'static RefCell<pane_grid::State<usize>>;
+type ListKey = (u64, Option<iced::window::Id>, String);
 
 thread_local! {
     static EDITORS: RefCell<HashMap<(u64, String), &'static RefCell<text_editor::Content>>> =
@@ -24,9 +26,19 @@ thread_local! {
         RefCell::new(HashMap::new());
     static PANES: RefCell<HashMap<(u64, String, u8, usize), PaneState>> =
         RefCell::new(HashMap::new());
-    static MARKDOWN: RefCell<std::collections::HashMap<String, &'static [iced::widget::markdown::Item]>> =
-        RefCell::new(std::collections::HashMap::new());
-    static LISTS: RefCell<HashMap<(u64, String), ListEntry>> = RefCell::new(HashMap::new());
+    static MARKDOWN: RefCell<HashMap<String, Rc<Vec<iced::widget::markdown::Item>>>> =
+        RefCell::new(HashMap::new());
+    static LISTS: RefCell<HashMap<ListKey, ListEntry>> = RefCell::new(HashMap::new());
+}
+
+pub(crate) fn forget_window(generation: u64, window: iced::window::Id) {
+    LISTS.with_borrow_mut(|lists| {
+        lists.retain(|(owner, id, _), _| *owner != generation || *id != Some(window))
+    });
+}
+
+pub(crate) fn forget_generation(generation: u64) {
+    LISTS.with_borrow_mut(|lists| lists.retain(|(owner, _, _), _| *owner != generation));
 }
 
 #[derive(Default)]
@@ -122,17 +134,18 @@ pub(super) fn combo(
     })
 }
 
-/// Parsed markdown is stable for a given source string, so a profile that
-/// re-renders identical text does not re-parse or leak.
-pub(super) fn markdown(content: &str) -> &'static [iced::widget::markdown::Item] {
+/// A small parse cache; live widgets retain their own references across eviction.
+pub(super) fn markdown(content: &str) -> Rc<Vec<iced::widget::markdown::Item>> {
     MARKDOWN.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some(items) = cache.get(content) {
-            return *items;
+            return Rc::clone(items);
         }
-        let items: Vec<_> = iced::widget::markdown::parse(content).collect();
-        let items: &'static [_] = Box::leak(items.into_boxed_slice());
-        cache.insert(content.to_owned(), items);
+        if cache.len() >= 32 {
+            cache.clear();
+        }
+        let items = Rc::new(iced::widget::markdown::parse(content).collect());
+        cache.insert(content.to_owned(), Rc::clone(&items));
         items
     })
 }
@@ -145,6 +158,7 @@ pub(super) fn markdown(content: &str) -> &'static [iced::widget::markdown::Item]
 /// render.
 pub(super) fn list(
     generation: u64,
+    window: Option<iced::window::Id>,
     id: &str,
     items: Vec<Value>,
     keys: &[Value],
@@ -153,7 +167,9 @@ pub(super) fn list(
 ) -> ListState {
     LISTS.with(|lists| {
         let mut lists = lists.borrow_mut();
-        let entry = lists.entry((generation, id.to_owned())).or_default();
+        let entry = lists
+            .entry((generation, window, id.to_owned()))
+            .or_default();
         let previous = std::mem::take(&mut entry.items);
         let mut old_used = vec![false; previous.len()];
         let mut tokens = Vec::with_capacity(items.len());
@@ -170,7 +186,7 @@ pub(super) fn list(
 
         for (index, (item, key)) in items.iter().zip(keys).enumerate() {
             let matched = if positional {
-                (index < previous.len()).then_some((index, previous[index].2))
+                (index < previous.len()).then(|| (index, previous[index].2))
             } else {
                 previous
                     .iter()
@@ -271,4 +287,69 @@ pub(super) fn read_panes(
     cell: &'static RefCell<pane_grid::State<usize>>,
 ) -> &'static pane_grid::State<usize> {
     unsafe { &*cell.as_ptr() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recreated_table_items_can_grow() {
+        let lua = mlua::Lua::new();
+        for count in [1, 2] {
+            let items = (0..count)
+                .map(|_| Value::Table(lua.create_table().unwrap()))
+                .collect::<Vec<_>>();
+            let result = list(
+                991,
+                None,
+                "grow",
+                items.clone(),
+                &items,
+                false,
+                Duration::ZERO,
+            );
+            assert_eq!(result.tokens.len(), count);
+            assert_eq!(result.added.len(), 1);
+        }
+        forget_generation(991);
+    }
+
+    #[test]
+    fn markdown_cache_releases_evicted_content_without_invalidating_live_widgets() {
+        MARKDOWN.with_borrow_mut(HashMap::clear);
+        let live = markdown("live");
+        let old = markdown("old");
+        let weak = Rc::downgrade(&old);
+        drop(old);
+        for index in 0..100 {
+            markdown(&format!("entry {index}"));
+        }
+        assert!(weak.upgrade().is_none());
+        assert!(!live.is_empty());
+        assert!(MARKDOWN.with_borrow(|cache| cache.len() <= 32));
+    }
+
+    #[test]
+    fn closing_one_window_releases_only_its_list_state() {
+        let a = iced::window::Id::unique();
+        let b = iced::window::Id::unique();
+        for window in [a, b] {
+            list(
+                0,
+                Some(window),
+                "rows",
+                vec![Value::Integer(1)],
+                &[Value::Integer(1)],
+                false,
+                Duration::ZERO,
+            );
+        }
+        forget_window(0, a);
+        LISTS.with_borrow(|lists| {
+            assert!(!lists.contains_key(&(0, Some(a), "rows".into())));
+            assert!(lists.contains_key(&(0, Some(b), "rows".into())));
+        });
+        forget_window(0, b);
+    }
 }

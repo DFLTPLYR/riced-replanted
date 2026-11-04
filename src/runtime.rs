@@ -16,18 +16,24 @@ use iced_exwlshell::{
     settings::StartMode,
 };
 use mlua::{Function, Lua, LuaSerdeExt, Table, UserData, Value};
+use riced_extension_sdk::log;
 
 use crate::{layers, modules, plugins, update, update::Layer, widgets, widgets::Ctx};
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Lua(u64, Option<(String, u64)>, Value),
-    Widget(u64, Option<(String, u64)>, String, WidgetEvent),
+    Lua(u64, Option<(String, u64, Option<window::Id>)>, Value),
+    Widget(
+        u64,
+        Option<(String, u64, Option<window::Id>)>,
+        String,
+        WidgetEvent,
+    ),
     Clipboard(u64, Option<String>),
     Key(u64, KeyEvent),
     Mouse(u64, MouseEvent),
     Frame(u64),
-    Editor(u64, Option<(String, u64)>, EditorAction),
+    Editor(u64, Option<(String, u64, Option<window::Id>)>, EditorAction),
     Tick,
     CheckReload,
     PollPlugins,
@@ -141,13 +147,13 @@ fn frame_payload(lua: &Lua) -> mlua::Result<Value> {
 
 fn editor_payload(
     lua: &Lua,
-    component: &Option<(String, u64)>,
+    component: &Option<(String, u64, Option<window::Id>)>,
     action: &EditorAction,
     text: &str,
 ) -> mlua::Result<Value> {
     let payload = lua.create_table()?;
     payload.set("event", action.event.as_str())?;
-    if let Some((id, _)) = component {
+    if let Some((id, _, _)) = component {
         payload.set("widget", id.as_str())?;
     }
     if action.input {
@@ -175,13 +181,13 @@ fn action_name(action: &iced::widget::text_editor::Action) -> &'static str {
 
 fn widget_event(
     lua: &Lua,
-    component: &Option<(String, u64)>,
+    component: &Option<(String, u64, Option<window::Id>)>,
     event: &str,
     value: &WidgetEvent,
 ) -> mlua::Result<Value> {
     let payload = lua.create_table()?;
     payload.set("event", event)?;
-    if let Some((id, _)) = component {
+    if let Some((id, _, _)) = component {
         payload.set("widget", id.as_str())?;
     }
     match value {
@@ -242,10 +248,11 @@ enum Change {
 struct Mount {
     module: String,
     revision: u64,
-    window: window::Id,
     props: Table,
     table: Table,
 }
+
+type Mounts = Rc<RefCell<HashMap<(window::Id, String), Mount>>>;
 
 impl TryFrom<Message> for ExwlShellCustomActionWithId {
     type Error = Message;
@@ -272,15 +279,14 @@ pub struct App {
     path: PathBuf,
     source: Option<String>,
     generation: u64,
-    windows: RefCell<Vec<window::Id>>,
+    windows: Rc<RefCell<Vec<window::Id>>>,
     layers: Vec<Layer>,
     toplevels: Vec<update::Window>,
     surfaces_dirty: Cell<bool>,
     pending: Vec<ExwlShellCustomActionWithId>,
-    modules: RefCell<modules::Modules>,
-    mounts: RefCell<HashMap<String, Mount>>,
-    seen: RefCell<HashSet<String>>,
-    windows_of: RefCell<HashMap<String, Vec<window::Id>>>,
+    modules: Rc<RefCell<modules::Modules>>,
+    mounts: Mounts,
+    windows_of: Rc<RefCell<HashMap<String, Vec<window::Id>>>>,
     sizes: RefCell<HashMap<window::Id, Size>>,
     plugins: Rc<RefCell<plugins::Plugins>>,
 }
@@ -288,7 +294,7 @@ pub struct App {
 // Iced's rendering callbacks cannot return errors; a broken Lua callback is fatal.
 fn checked<T>(result: mlua::Result<T>) -> T {
     result.unwrap_or_else(|error| {
-        eprintln!("riced: {error}");
+        log::error!(target: "runtime.error", "{error}");
         std::process::exit(1);
     })
 }
@@ -346,15 +352,14 @@ pub fn load_with_plugins(
         path: path.to_owned(),
         source: Some(source.to_owned()),
         generation: 0,
-        windows: RefCell::new(Vec::new()),
+        windows: Rc::new(RefCell::new(Vec::new())),
         layers: Vec::new(),
         toplevels: Vec::new(),
         surfaces_dirty: Cell::new(false),
         pending: Vec::new(),
-        modules: RefCell::new(modules::Modules::default()),
-        mounts: RefCell::new(HashMap::new()),
-        seen: RefCell::new(HashSet::new()),
-        windows_of: RefCell::new(HashMap::new()),
+        modules: Rc::new(RefCell::new(modules::Modules::default())),
+        mounts: Rc::new(RefCell::new(HashMap::new())),
+        windows_of: Rc::new(RefCell::new(HashMap::new())),
         sizes: RefCell::new(HashMap::new()),
         plugins,
     };
@@ -386,13 +391,15 @@ impl App {
         Ok(Value::UserData(self.lua.create_userdata(Window(id))?))
     }
 
-    fn stale(&self, component: &Option<(String, u64)>) -> bool {
-        let Some((id, revision)) = component else {
+    fn stale(&self, component: &Option<(String, u64, Option<window::Id>)>) -> bool {
+        let Some((id, revision, window)) = component else {
             return false;
         };
-        // Events from a component whose module reloaded in the meantime are stale.
-        let current = self.mounts.borrow().get(id).cloned();
-        current.is_none_or(|mount| {
+        let Some(window) = window else {
+            return true;
+        };
+        let mounts = self.mounts.borrow();
+        mounts.get(&(*window, id.clone())).is_none_or(|mount| {
             mount.revision != *revision
                 || self.modules.borrow().revision(&mount.module) != *revision
         })
@@ -407,7 +414,7 @@ impl App {
                 if self.stale(&component) {
                     return Ok(Task::none());
                 }
-                (value, component.map(|(id, _)| id))
+                (value, component.map(|(id, _, _)| id))
             }
             Message::Widget(generation, component, event, value)
                 if generation == self.generation =>
@@ -417,7 +424,7 @@ impl App {
                 }
                 (
                     widget_event(&self.lua, &component, &event, &value)?,
-                    component.map(|(id, _)| id),
+                    component.map(|(id, _, _)| id),
                 )
             }
             Message::Clipboard(generation, value) if generation == self.generation => {
@@ -447,7 +454,7 @@ impl App {
                 };
                 (
                     editor_payload(&self.lua, &component, &action, &text)?,
-                    component.map(|(id, _)| id),
+                    component.map(|(id, _, _)| id),
                 )
             }
             Message::Lua(..)
@@ -644,21 +651,22 @@ impl App {
         let event = self.lua.create_table()?;
         event.set("type", "window_closed")?;
         event.set("id", self.toplevels[index].id.as_str())?;
+        self.forget_window(id)?;
         let task = match self.update.call::<Value>((self.state.clone(), event)) {
             Ok(value) => match self.tasks(value) {
                 Ok(task) => task,
                 Err(error) => {
-                    eprintln!("riced: window close handler returned an invalid task: {error}");
+                    log::error!(target: "window.close", "window close handler returned an invalid task: {error}");
                     Task::none()
                 }
             },
             Err(error) => {
-                eprintln!("riced: window close handler failed: {error}");
+                log::error!(target: "window.close", "window close handler failed: {error}");
                 Task::none()
             }
         };
         if let Err(error) = self.reconcile_layers() {
-            eprintln!("riced: window close changed surfaces but the view is invalid: {error}");
+            log::error!(target: "window.close", "window close changed surfaces but the view is invalid: {error}");
         }
         Ok(task.chain(self.surface_tasks()))
     }
@@ -666,7 +674,7 @@ impl App {
     fn run_ipc(&mut self, command: &str, args: &[String]) -> mlua::Result<Task<Message>> {
         let handlers: Table = self.lua.named_registry_value("riced.ipc_handlers")?;
         let Some(handler) = handlers.get::<Option<Function>>(command)? else {
-            eprintln!("riced: no IPC handler for {command:?}");
+            log::warn!(target: "ipc.command", "no IPC handler for {command:?}");
             return Ok(Task::none());
         };
         let args = self.lua.to_value(args)?;
@@ -674,12 +682,12 @@ impl App {
             Ok(value) => match self.tasks(value) {
                 Ok(task) => Ok(task.chain(Task::done(Message::Reloaded))),
                 Err(error) => {
-                    eprintln!("riced: IPC {command:?} returned an invalid task: {error}");
+                    log::error!(target: "ipc.command", "IPC {command:?} returned an invalid task: {error}");
                     Ok(Task::none())
                 }
             },
             Err(error) => {
-                eprintln!("riced: IPC {command:?} failed: {error}");
+                log::error!(target: "ipc.command", "IPC {command:?} failed: {error}");
                 Ok(Task::none())
             }
         }
@@ -696,7 +704,9 @@ impl App {
         self.modules.borrow_mut().watch_all(&self.lua)?;
         Ok(node)
     }
+}
 
+impl App {
     // Replaces iced.component nodes with their module's rendered children. Children are
     // rebuilt on every render, so props stay fresh; only the module itself survives reloads.
     fn expand(
@@ -706,9 +716,10 @@ impl App {
         path: &mut Vec<String>,
         ids: &mut HashSet<String>,
     ) -> mlua::Result<Table> {
+        let node = copy_table(&self.lua, &node)?;
         match node.get::<Option<String>>("kind")?.as_deref() {
             Some("component") => self.expand_component(node, window, path, ids),
-            Some("row" | "column") => {
+            Some("row" | "column" | "stack" | "grid" | "pane_grid") => {
                 let children = node
                     .get::<Table>("content")?
                     .sequence_values::<Table>()
@@ -720,9 +731,41 @@ impl App {
                 node.set("content", list)?;
                 Ok(node)
             }
-            Some("container" | "button" | "layer") => {
+            Some(
+                "container" | "button" | "layer" | "region" | "scrollable" | "float" | "pin"
+                | "tooltip" | "mouse_area" | "sensor",
+            ) => {
                 if let Value::Table(child) = node.get::<Value>("content")? {
                     node.set("content", self.expand(child, window, path, ids)?)?;
+                }
+                Ok(node)
+            }
+            Some("table") => {
+                for field in ["content", "columns"] {
+                    let output = self.lua.create_table()?;
+                    for (index, row) in node
+                        .get::<Table>(field)?
+                        .sequence_values::<Table>()
+                        .enumerate()
+                    {
+                        let row = copy_table(&self.lua, &row?)?;
+                        if field == "columns" {
+                            if let Value::Table(header) = row.get::<Value>("header")? {
+                                row.set("header", self.expand(header, window, path, ids)?)?;
+                            }
+                        } else {
+                            let cells = row
+                                .sequence_values::<Value>()
+                                .collect::<mlua::Result<Vec<_>>>()?;
+                            for (column, value) in cells.into_iter().enumerate() {
+                                if let Value::Table(cell) = value {
+                                    row.set(column + 1, self.expand(cell, window, path, ids)?)?;
+                                }
+                            }
+                        }
+                        output.set(index + 1, row)?;
+                    }
+                    node.set(field, output)?;
                 }
                 Ok(node)
             }
@@ -776,22 +819,17 @@ impl App {
         // The discovery pass renders with a throwaway window id; only tracked windows
         // get mounts and lifecycle signals.
         if self.windows.borrow().contains(&window) {
-            let first = self
-                .mounts
-                .borrow()
-                .get(&id)
-                .is_none_or(|mount| mount.window != window);
+            let mounted = (window, id.clone());
+            let first = !self.mounts.borrow().contains_key(&mounted);
             self.mounts.borrow_mut().insert(
-                id.clone(),
+                mounted,
                 Mount {
                     module,
                     revision,
-                    window,
                     props: props.clone(),
                     table: table.clone(),
                 },
             );
-            self.seen.borrow_mut().insert(id.clone());
             if first && let Some(hook) = table.get::<Option<Function>>("on_visible")? {
                 hook.call::<()>((table, props, self.window(window)?))?;
             }
@@ -801,6 +839,27 @@ impl App {
         Ok(child)
     }
 
+    // Components expanded in this render are in `ids`; the rest of this window's mounts
+    // disappeared from the tree.
+    fn destroy_unmounted(&self, window: window::Id, ids: &HashSet<String>) -> mlua::Result<()> {
+        let destroyed = self
+            .mounts
+            .borrow()
+            .iter()
+            .filter(|((owner, id), _)| *owner == window && !ids.contains(id))
+            .map(|(key, mount)| (key.clone(), mount.clone()))
+            .collect::<Vec<_>>();
+        for (key, mount) in destroyed {
+            self.mounts.borrow_mut().remove(&key);
+            if let Some(hook) = mount.table.get::<Option<Function>>("on_destroyed")? {
+                hook.call::<()>((mount.table, mount.props, self.window(window)?))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl App {
     fn prepare_layers(&mut self) -> mlua::Result<()> {
         let node = self.view_node(window::Id::unique())?;
         let mut layers = Vec::new();
@@ -873,13 +932,21 @@ impl App {
     fn reconcile_layers(&mut self) -> mlua::Result<()> {
         let previous = self.layers.clone();
         let previous_toplevels = self.toplevels.clone();
+        let had_surfaces = !previous.is_empty() || !previous_toplevels.is_empty();
         self.prepare_layers()?;
-        if !previous.is_empty() && self.layers.is_empty() {
-            self.layers = previous;
-            self.toplevels = previous_toplevels.clone();
-            return Err(mlua::Error::runtime(
-                "cannot replace layer views with a widget-only view during reload",
-            ));
+        let has_surfaces = !self.layers.is_empty() || !self.toplevels.is_empty();
+        if !previous.is_empty() && !has_surfaces {
+            let has_base = self.windows.borrow().iter().any(|id| {
+                !previous.iter().any(|layer| layer.window == *id)
+                    && !previous_toplevels.iter().any(|window| window.window == *id)
+            });
+            if !has_base {
+                self.layers = previous;
+                self.toplevels = previous_toplevels.clone();
+                return Err(mlua::Error::runtime(
+                    "cannot replace layer views with a widget-only view without a base window",
+                ));
+            }
         }
         self.pending
             .extend(update::reconcile(&previous, &mut self.layers));
@@ -887,11 +954,60 @@ impl App {
             &previous_toplevels,
             &mut self.toplevels,
         ));
-        if !previous.is_empty() || !previous_toplevels.is_empty() {
-            self.windows.borrow_mut().retain(|id| {
-                self.layers.iter().any(|layer| layer.window == *id)
-                    || self.toplevels.iter().any(|window| window.window == *id)
-            });
+        if had_surfaces {
+            let mut live = self
+                .layers
+                .iter()
+                .map(|layer| layer.window)
+                .chain(
+                    self.toplevels
+                        .iter()
+                        .filter(|window| !window.closed)
+                        .map(|window| window.window),
+                )
+                .collect::<HashSet<_>>();
+            if !has_surfaces {
+                live.extend(self.windows.borrow().iter().copied().filter(|id| {
+                    !previous.iter().any(|layer| layer.window == *id)
+                        && !previous_toplevels.iter().any(|window| window.window == *id)
+                }));
+            }
+            let removed = self
+                .windows
+                .borrow()
+                .iter()
+                .copied()
+                .filter(|id| !live.contains(id))
+                .collect::<Vec<_>>();
+            for id in removed {
+                self.forget_window(id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn forget_window(&self, id: window::Id) -> mlua::Result<()> {
+        self.windows.borrow_mut().retain(|window| *window != id);
+        self.windows_of.borrow_mut().retain(|_, windows| {
+            windows.retain(|window| *window != id);
+            !windows.is_empty()
+        });
+        self.sizes.borrow_mut().remove(&id);
+        widgets::forget_window(self.generation, id);
+        let mounts = self
+            .mounts
+            .borrow()
+            .iter()
+            .filter(|((window, _), _)| *window == id)
+            .map(|(key, mount)| (key.clone(), mount.clone()))
+            .collect::<Vec<_>>();
+        self.mounts
+            .borrow_mut()
+            .retain(|(window, _), _| *window != id);
+        for (_, mount) in mounts {
+            if let Some(hook) = mount.table.get::<Option<Function>>("on_destroyed")? {
+                hook.call::<()>((mount.table, mount.props, self.window(id)?))?;
+            }
         }
         Ok(())
     }
@@ -917,12 +1033,18 @@ impl App {
     }
 
     fn view(&self, id: window::Id) -> mlua::Result<Element<'static, Message>> {
+        if self
+            .toplevels
+            .iter()
+            .any(|window| window.window == id && window.closed)
+        {
+            return Ok(iced::widget::Space::new().into());
+        }
         // Registered before rendering so component mount/unmount signals skip the
         // surface-discovery pass, which renders with a throwaway window id.
         if !self.windows.borrow().contains(&id) {
             self.windows.borrow_mut().push(id);
         }
-        self.seen.borrow_mut().clear();
         let mut node = self.view_node(id)?;
         if !self.layers.is_empty() || !self.toplevels.is_empty() {
             let nodes = layers::nodes(node)?;
@@ -938,6 +1060,7 @@ impl App {
                     match self.toplevels.iter().find(|toplevel| toplevel.id == id) {
                         Some(toplevel)
                             if window.size == toplevel.size
+                                && window.title == toplevel.title
                                 && window.client_side_decorations
                                     == toplevel.client_side_decorations => {}
                         _ => self.surfaces_dirty.set(true),
@@ -967,45 +1090,31 @@ impl App {
             // A replaced surface can receive a final render before its close action runs.
             let Some(surface) = surface else {
                 self.surfaces_dirty.set(true);
-                return Ok(iced::widget::Space::new().into());
+                return Ok(widgets::with_input_regions(
+                    iced::widget::Space::new().into(),
+                    id,
+                ));
             };
             let Some(surface_node) = by_id.remove(surface) else {
                 self.surfaces_dirty.set(true);
-                return Ok(iced::widget::Space::new().into());
+                return Ok(widgets::with_input_regions(
+                    iced::widget::Space::new().into(),
+                    id,
+                ));
             };
             node = surface_node.get("content")?;
         }
         let mut path = Vec::new();
         let mut ids = HashSet::new();
         let node = self.expand(node, id, &mut path, &mut ids)?;
-        self.destroy_unmounted(id)?;
+        self.destroy_unmounted(id, &ids)?;
         let element = widgets::element(
             node,
             &Ctx::new(self.generation)
                 .with_lua(self.lua.clone())
                 .with_window(id),
         )?;
-        Ok(element)
-    }
-
-    // Components expanded in this render are in `seen`; the rest of this window's mounts
-    // disappeared from the tree.
-    fn destroy_unmounted(&self, window: window::Id) -> mlua::Result<()> {
-        let seen = std::mem::take(&mut *self.seen.borrow_mut());
-        let destroyed: Vec<(String, Mount)> = self
-            .mounts
-            .borrow()
-            .iter()
-            .filter(|(id, mount)| mount.window == window && !seen.contains(*id))
-            .map(|(id, mount)| (id.clone(), mount.clone()))
-            .collect();
-        for (id, mount) in destroyed {
-            self.mounts.borrow_mut().remove(&id);
-            if let Some(hook) = mount.table.get::<Option<Function>>("on_destroyed")? {
-                hook.call::<()>((mount.table, mount.props, self.window(window)?))?;
-            }
-        }
-        Ok(())
+        Ok(widgets::with_input_regions(element, id))
     }
 
     fn theme(&self, id: window::Id) -> mlua::Result<Theme> {
@@ -1230,7 +1339,12 @@ impl App {
     }
 
     fn reload(&mut self, source: &str) -> mlua::Result<()> {
-        self.plugins.borrow_mut().clear_pending();
+        let result = self.replace(source);
+        self.plugins.borrow_mut().retain_pending(&self.lua);
+        result
+    }
+
+    fn replace(&mut self, source: &str) -> mlua::Result<()> {
         let mut candidate = load_with_plugins(source, &self.path, Rc::clone(&self.plugins))?;
         let current = self.settings()?;
         let next = candidate.settings()?;
@@ -1248,6 +1362,8 @@ impl App {
         candidate.generation = self.generation + 1;
         candidate.layers = self.layers.clone();
         candidate.toplevels = self.toplevels.clone();
+        *candidate.windows.borrow_mut() = self.windows.borrow().clone();
+        *candidate.sizes.borrow_mut() = self.sizes.borrow().clone();
         candidate.reconcile_layers()?;
         for layer in &candidate.layers {
             candidate.view(layer.window)?;
@@ -1255,7 +1371,7 @@ impl App {
         for toplevel in &candidate.toplevels {
             candidate.view(toplevel.window)?;
         }
-        for &id in self.windows.borrow().iter() {
+        for &id in candidate.windows.borrow().clone().iter() {
             candidate.view(id)?;
             candidate.title(id)?;
             candidate.style(&candidate.theme(id)?)?;
@@ -1264,6 +1380,7 @@ impl App {
         candidate
             .pending
             .splice(0..0, std::mem::take(&mut self.pending));
+        widgets::forget_generation(self.generation);
         *self = candidate;
         Ok(())
     }
@@ -1287,7 +1404,7 @@ impl App {
         }
         self.source = Some(source.clone());
         self.reload(&source)?;
-        eprintln!("riced: reloaded {}", self.path.display());
+        log::info!(target: "reload.shell", "reloaded {}", self.path.display());
         Ok(Change::All)
     }
 
@@ -1307,6 +1424,7 @@ impl App {
         let previous_mounts = self.mounts.borrow().clone();
         let previous_owners = self.windows_of.borrow().clone();
         let previous_windows = self.windows.borrow().clone();
+        let previous_sizes = self.sizes.borrow().clone();
         let pending_count = self.pending.len();
         let handlers: Table = self.lua.named_registry_value("riced.ipc_handlers")?;
         let previous_handlers = copy_table(&self.lua, &handlers)?;
@@ -1334,14 +1452,21 @@ impl App {
                         .any(|old| old.window == layer.window && old.settings == layer.settings)
                 })
             {
-                affected = self.layers.iter().map(|layer| layer.window).collect();
+                affected = self.windows.borrow().clone();
+                for layer in &self.layers {
+                    if !affected.contains(&layer.window) {
+                        affected.push(layer.window);
+                    }
+                }
             }
             for layer in &self.layers {
                 self.view(layer.window)?;
             }
             for toplevel in &self.toplevels {
                 self.view(toplevel.window)?;
-                affected.push(toplevel.window);
+                if !affected.contains(&toplevel.window) {
+                    affected.push(toplevel.window);
+                }
             }
             for &id in &affected {
                 self.view(id)?;
@@ -1360,11 +1485,12 @@ impl App {
             *self.mounts.borrow_mut() = previous_mounts;
             *self.windows_of.borrow_mut() = previous_owners;
             *self.windows.borrow_mut() = previous_windows;
+            *self.sizes.borrow_mut() = previous_sizes;
             self.pending.truncate(pending_count);
             return Err(error);
         }
         if !affected.is_empty() {
-            eprintln!("riced: reloaded modules {}", changed.join(", "));
+            log::info!(target: "reload.modules", "reloaded modules {}", changed.join(", "));
         }
         Ok(Change::Windows(affected))
     }
@@ -1398,7 +1524,7 @@ impl App {
                     let reload = match app.check_reload() {
                         Ok(change) => app.reload_tasks(change),
                         Err(error) => {
-                            eprintln!("riced: reload rejected; keeping current app: {error}");
+                            log::warn!(target: "reload.rejected", "reload rejected; keeping current app: {error}");
                             Task::none()
                         }
                     };
@@ -1406,7 +1532,7 @@ impl App {
                         match app.reconcile_layers() {
                             Ok(()) => app.surface_tasks(),
                             Err(error) => {
-                                eprintln!("riced: surface change rejected: {error}");
+                                log::warn!(target: "surface.rejected", "surface change rejected: {error}");
                                 Task::none()
                             }
                         }
@@ -1414,16 +1540,17 @@ impl App {
                         Task::none()
                     };
                     let ipc = app.poll_ipc().unwrap_or_else(|error| {
-                        eprintln!("riced: IPC poll failed: {error}");
+                        log::error!(target: "ipc.poll", "IPC poll failed: {error}");
                         Task::none()
                     });
                     return reload.chain(surfaces).chain(ipc);
                 }
                 if matches!(message, Message::PollPlugins) {
-                    return if checked(app.poll_plugins()) {
-                        Task::done(Message::Reloaded)
+                    let (changed, tasks) = checked(app.poll_plugins());
+                    return if changed {
+                        tasks.chain(Task::done(Message::Reloaded))
                     } else {
-                        Task::none()
+                        tasks
                     };
                 }
                 checked(app.update(message))
@@ -1470,7 +1597,7 @@ pub(crate) fn keys(table: &Table, allowed: &[&str]) -> mlua::Result<()> {
 }
 
 fn widget_id(id: &str) -> iced::widget::Id {
-    iced::widget::Id::new(widgets::intern(id))
+    iced::widget::Id::from(id.to_owned())
 }
 
 fn key_name(key: iced::keyboard::Key) -> String {
@@ -1667,6 +1794,7 @@ mod tests {
             function app:view() return iced.text('ipc') end
             riced.ipc({
                 add = function(self, args)
+                    log("called")
                     self.hits = self.hits + 1
                     self.args = args
                 end,
@@ -2086,7 +2214,7 @@ return m",
         app.view(id).unwrap();
         assert_eq!(seen(&app, "seen_left"), "v1:0");
         assert_eq!(seen(&app, "seen_right"), "right");
-        assert_eq!(app.mounts.borrow()["left"].revision, 0);
+        assert_eq!(app.mounts.borrow()[&(id, "left".to_owned())].revision, 0);
         assert_eq!(app.windows_of.borrow()["left"], [id]);
     }
 
@@ -2110,7 +2238,7 @@ return m";
         let _ = app
             .update(Message::Lua(
                 app.generation,
-                Some(("left".into(), 0)),
+                Some(("left".into(), 0, Some(id))),
                 click,
             ))
             .unwrap();
@@ -2118,6 +2246,26 @@ return m";
 
         let _ = app.update(Message::Tick).unwrap();
         assert_eq!(app.state.get::<String>("origin").unwrap(), "none");
+    }
+
+    #[test]
+    fn plugin_events_return_their_tasks() {
+        let plugins = Rc::new(RefCell::new(plugins::Plugins::with_event(
+            serde_json::json!({"ready": true}),
+        )));
+        let shell = r#"
+            local app = {}
+            function app:update(event)
+                assert(event.type == 'plugin' and event.plugin == 'demo' and event.event.ready)
+                return {type = 'clipboard_write', content = 'ready'}
+            end
+            function app:view() return iced.text('x') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let mut app = load_with_plugins(shell, Path::new("shell.lua"), plugins).unwrap();
+        let (changed, tasks) = app.poll_plugins().unwrap();
+        assert!(changed);
+        assert!(tasks.units() > 0);
     }
 
     #[test]
@@ -2183,12 +2331,217 @@ return m";
         app.view(id).unwrap();
         app.view(id).unwrap();
         assert_eq!(app.lua.globals().get::<u32>("visible").unwrap(), 1);
-        assert!(app.mounts.borrow().contains_key("left"));
+        assert!(app.mounts.borrow().contains_key(&(id, "left".to_owned())));
 
         app.lua.globals().set("show", false).unwrap();
         app.view(id).unwrap();
         assert_eq!(app.lua.globals().get::<u32>("destroyed").unwrap(), 1);
         assert!(app.mounts.borrow().is_empty());
+    }
+
+    #[test]
+    fn components_inside_containers_render() {
+        let panel = "return {view=function() return iced.text('ok') end}";
+        let profile = Profile::new(&[("panel.lua", panel)]);
+        let source = r#"
+            local app = {}
+            function app:update() end
+            function app:view() return iced.region(iced.component('panel', 'panel')) end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let app = load(source, &profile.shell()).unwrap();
+        app.view(window::Id::unique()).unwrap();
+    }
+
+    #[test]
+    fn failed_reload_keeps_plugin_callbacks_in_the_active_lua() {
+        let (plugins, reply) = plugins::audit_ready();
+        let source = r#"
+            local app = {}
+            function app:update() end
+            function app:view() return iced.text('ok') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let mut app = load_with_plugins(source, Path::new("shell.lua"), plugins).unwrap();
+        assert!(
+            app.reload("riced.plugins('demo').query(function() end); error('reject candidate')")
+                .is_err()
+        );
+        reply();
+        let _ = app.poll_plugins().unwrap();
+    }
+
+    #[test]
+    fn plain_widget_module_reload_validates_live_windows() {
+        let source = r#"
+            local helper = require('helper')
+            local app = {}
+            function app:update() end
+            function app:view() return helper.view() end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let profile = Profile::new(&[
+            ("shell.lua", source),
+            (
+                "helper.lua",
+                "return {view=function() return iced.text('ok') end}",
+            ),
+        ]);
+        let mut app = load(source, &profile.shell()).unwrap();
+        app.prepare_layers().unwrap();
+        app.view(window::Id::unique()).unwrap();
+        profile.write(
+            "helper.lua",
+            "return {view=function() return iced.text('bad', {unsupported=true}) end}",
+        );
+        assert!(app.reload_modules().is_err());
+    }
+
+    #[test]
+    fn title_only_changes_mark_the_surface_dirty() {
+        let mut app = load(
+            r#"
+            local app = {title='before'}
+            function app:update() end
+            function app:view()
+                return iced.window({id='settings', title=self.title, content=iced.text('ok')})
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        app.prepare_layers().unwrap();
+        let id = app.toplevels[0].window;
+        app.view(id).unwrap();
+        app.state.set("title", "after").unwrap();
+        app.view(id).unwrap();
+        assert!(app.surfaces_dirty.get());
+    }
+
+    #[test]
+    fn same_component_id_mounts_once_per_window() {
+        let shell = r#"
+            show_layer = true
+            local app = {}
+            function app:update() end
+            function app:view()
+                local layer = show_layer and iced.component('left', 'left') or iced.text('layer')
+                return {
+                    iced.layer(layer, {id = 'layer', layer = 'background'}),
+                    iced.window({id = 'window', content = iced.component('left', 'left')}),
+                }
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let left = "local m = {}
+function m:view() return iced.text('x') end
+function m:on_visible() visible = (visible or 0) + 1 end
+function m:on_destroyed() destroyed = (destroyed or 0) + 1 end
+return m";
+        let profile = Profile::new(&[("shell.lua", shell), ("left.lua", left)]);
+        let mut app = load(shell, &profile.shell()).unwrap();
+        app.prepare_layers().unwrap();
+        let layer = app.layers[0].window;
+        let window = app.toplevels[0].window;
+
+        app.view(layer).unwrap();
+        app.view(window).unwrap();
+        app.view(layer).unwrap();
+        app.view(window).unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("visible").unwrap(), 2);
+        assert_eq!(app.mounts.borrow().len(), 2);
+        assert!(!app.stale(&Some(("left".into(), 0, Some(layer)))));
+        assert!(!app.stale(&Some(("left".into(), 0, Some(window)))));
+
+        app.lua.globals().set("show_layer", false).unwrap();
+        app.view(layer).unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("destroyed").unwrap(), 1);
+        assert_eq!(app.mounts.borrow().len(), 1);
+        assert!(app.stale(&Some(("left".into(), 0, Some(layer)))));
+        assert!(!app.stale(&Some(("left".into(), 0, Some(window)))));
+    }
+
+    #[test]
+    fn closing_a_window_drops_its_mounts() {
+        let shell = r#"
+            local app = { open = true }
+            function app:update(event)
+                if type(event) == 'table' and event.type == 'window_closed' then
+                    self.open = false
+                end
+            end
+            function app:view()
+                if not self.open then return iced.text('closed') end
+                return iced.window({
+                    id = 'settings',
+                    content = iced.component('left', 'left'),
+                })
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let left = "local m = {}
+function m:view() return iced.text('left') end
+function m:on_destroyed() destroyed = (destroyed or 0) + 1 end
+return m";
+        let profile = Profile::new(&[("shell.lua", shell), ("left.lua", left)]);
+        let mut app = load(shell, &profile.shell()).unwrap();
+        app.prepare_layers().unwrap();
+        let window = app.toplevels[0].window;
+        app.view(window).unwrap();
+        assert_eq!(app.mounts.borrow().len(), 1);
+
+        let _ = app.update(Message::WindowClosed(window)).unwrap();
+        assert!(app.toplevels.is_empty());
+        assert!(app.mounts.borrow().is_empty());
+        assert!(!app.windows_of.borrow().contains_key("left"));
+        assert_eq!(app.lua.globals().get::<u32>("destroyed").unwrap(), 1);
+    }
+
+    #[test]
+    fn reload_can_replace_layers_with_windows() {
+        let layers = "return riced.daemon({}, 'test', function() end, function() \
+            return iced.layer(iced.text('x'), {id='panel'}) end):run()";
+        let windows = "return riced.daemon({}, 'test', function() end, function() \
+            return iced.window({id='settings', content=iced.text('x')}) end):run()";
+        let mut app = load(layers, Path::new("shell.lua")).unwrap();
+        app.prepare_layers().unwrap();
+        app.view(app.layers[0].window).unwrap();
+
+        app.reload(windows).unwrap();
+        assert!(app.layers.is_empty());
+        assert_eq!(app.toplevels.len(), 1);
+    }
+
+    #[test]
+    fn closed_windows_are_cleaned_up_even_if_the_view_keeps_declaring_them() {
+        let shell = r#"
+            local app = {}
+            function app:update() end
+            function app:view()
+                return iced.window({id='settings', content=iced.component('left', 'left')})
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let profile = Profile::new(&[
+            ("shell.lua", shell),
+            (
+                "left.lua",
+                "return {view=function() return iced.text('left') end}",
+            ),
+        ]);
+        let mut app = load(shell, &profile.shell()).unwrap();
+        app.prepare_layers().unwrap();
+        let id = app.toplevels[0].window;
+        app.view(id).unwrap();
+        app.sizes.borrow_mut().insert(id, Size::new(100.0, 50.0));
+        let _ = app.update(Message::WindowClosed(id)).unwrap();
+        app.view(id).unwrap();
+        assert!(app.toplevels[0].closed);
+        assert!(app.mounts.borrow().is_empty());
+        assert!(app.windows.borrow().is_empty());
+        assert!(app.sizes.borrow().is_empty());
+        assert!(app.windows_of.borrow().is_empty());
     }
 
     #[test]
@@ -2238,8 +2591,8 @@ return m";
         app.view(id).unwrap();
 
         assert_eq!(seen(&app, "seen_left"), "v2:0");
-        assert_eq!(app.mounts.borrow()["left"].revision, 1);
-        assert_eq!(app.mounts.borrow()["right"].revision, 0);
+        assert_eq!(app.mounts.borrow()[&(id, "left".to_owned())].revision, 1);
+        assert_eq!(app.mounts.borrow()[&(id, "right".to_owned())].revision, 0);
         assert!(matches!(app.check_reload().unwrap(), Change::None));
     }
 
@@ -2252,7 +2605,7 @@ return m";
 
         let old = Message::Lua(
             app.generation,
-            Some(("left".into(), 0)),
+            Some(("left".into(), 0, Some(id))),
             Value::String(app.lua.create_string("click").unwrap()),
         );
         profile.write("left.lua", &versioned("v2"));
@@ -2264,7 +2617,7 @@ return m";
         let _ = app
             .update(Message::Lua(
                 app.generation,
-                Some(("left".into(), 1)),
+                Some(("left".into(), 1, Some(id))),
                 Value::String(app.lua.create_string("click").unwrap()),
             ))
             .unwrap();
@@ -2283,7 +2636,7 @@ return m";
             "local m = {}\nfunction m:view() error('broken') end\nreturn m",
         );
         assert!(app.check_reload().is_err());
-        assert_eq!(app.mounts.borrow()["left"].revision, 0);
+        assert_eq!(app.mounts.borrow()[&(id, "left".to_owned())].revision, 0);
         assert!(matches!(app.check_reload().unwrap(), Change::None));
         app.view(id).unwrap();
         assert_eq!(seen(&app, "seen_left"), "v1:0");
