@@ -40,7 +40,7 @@ config = {}
 ---@field args any
 
 ---@class iced.Transition
----@field props? ("width"|"height"|"padding"|"size"|"spacing"|"color")[]
+---@field props? ("width"|"height"|"padding"|"size"|"spacing"|"color"|"value")[]
 ---@field duration? integer
 ---@field easing? "linear"|"ease"|"in"|"out"|"in_out"|"ease_in"|"ease_out"|"ease_in_out"
 ---@field spring? "smooth"|"snappy"|"bouncy"|"instant"

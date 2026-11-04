@@ -1168,7 +1168,7 @@ Buttons: `left`, `right`, `middle`, `back`, `forward`, or `other`.
 
 For widgets other than `list_view`, `transition` animates property changes
 instead of jumping. Animatable props are `width`, `height`, `padding`, `size`
-(text), `spacing` (row/column), and `color` (text).
+(text), `spacing` (row/column), `color` (text), and `value` (progress_bar).
 
 ```lua
 iced.container(child, { width = self.width, padding = 16, transition = true })

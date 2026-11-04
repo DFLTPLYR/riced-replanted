@@ -138,16 +138,22 @@ struct Motion {
     spacing: f32,
     size: f32,
     color: Color,
+    value: f32,
 }
 
 impl Motion {
     fn target(table: &Table) -> mlua::Result<Self> {
-        let color = match table.get::<String>("kind")?.as_str() {
+        let kind = table.get::<String>("kind")?;
+        let color = match kind.as_str() {
             "text" => match table.get::<Option<String>>("color")? {
                 Some(value) => color(&value)?,
                 None => Color::WHITE,
             },
             _ => Color::WHITE,
+        };
+        let value = match kind.as_str() {
+            "progress_bar" => table.get::<Option<f32>>("value")?.unwrap_or(0.0),
+            _ => 0.0,
         };
         Ok(Self {
             width: pixels(table.get::<Value>("width")?).unwrap_or(0.0),
@@ -159,11 +165,20 @@ impl Motion {
             spacing: number(table, "spacing", 0.0)?,
             size: number(table, "size", 16.0)?,
             color,
+            value,
         })
     }
 }
 
 const ANIMATABLE: [&str; 6] = ["width", "height", "padding", "spacing", "size", "color"];
+
+fn animatable(kind: &str) -> Vec<&'static str> {
+    let mut props = ANIMATABLE.to_vec();
+    if kind == "progress_bar" {
+        props.push("value");
+    }
+    props
+}
 
 /// An element's `transition` prop: which pixel props interpolate, and how.
 #[derive(Clone)]
@@ -185,7 +200,11 @@ impl Transition {
                 ));
             }
         };
-        let mut props = ANIMATABLE.map(String::from).to_vec();
+        let allowed = animatable(&node.get::<String>("kind")?);
+        let mut props = allowed
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
         let mut easing = None;
         let mut spring = None;
         let mut duration = None;
@@ -195,10 +214,7 @@ impl Transition {
                 props = list
                     .sequence_values::<String>()
                     .collect::<mlua::Result<Vec<_>>>()?;
-                if let Some(name) = props
-                    .iter()
-                    .find(|name| !ANIMATABLE.contains(&name.as_str()))
-                {
+                if let Some(name) = props.iter().find(|name| !allowed.contains(&name.as_str())) {
                     return Err(mlua::Error::runtime(format!(
                         "unknown transition prop: {name}"
                     )));
@@ -271,6 +287,7 @@ impl Transition {
             "padding" => Some(self.motion.padding),
             "spacing" => Some(self.motion.spacing),
             "size" => Some(self.motion.size),
+            "value" => Some(self.motion.value),
             _ => None,
         }
     }
@@ -546,7 +563,7 @@ fn build(
         "image" => media::image(node, layout)?,
         "svg" => media::svg(node, layout)?,
         "rule" => media::rule(node)?,
-        "progress_bar" => media::progress_bar(node)?,
+        "progress_bar" => media::progress_bar(node, transition)?,
         "qr_code" => media::qr_code(node)?,
         "row" | "column" => layout::row_column(node, ctx, transition, layout, &kind)?,
         "grid" => layout::grid(node, ctx)?,
@@ -708,6 +725,8 @@ mod tests {
             "{kind='row',content={},transition=true,spacing=4}",
             "{kind='text',content='x',color='#ff0000',transition=true}",
             "{kind='text',content='x',color='#ff0000',transition={props={'color'}}}",
+            "{kind='progress_bar',value=0.5,transition=true}",
+            "{kind='progress_bar',value=0.5,transition={props={'value'},duration=300}}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_ok(),
@@ -722,6 +741,8 @@ mod tests {
             "{kind='text',content='x',transition={duration=0}}",
             "{kind='text',content='x',transition={bogus=true}}",
             "{kind='text',content='x',transition='yes'}",
+            "{kind='text',content='x',transition={props={'value'}}}",
+            "{kind='progress_bar',value=2,transition=true}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_err(),
@@ -930,6 +951,24 @@ mod tests {
             .unwrap();
         let transition = Transition::parse(&node).unwrap().unwrap();
         assert_eq!(transition.color(), None);
+    }
+
+    #[test]
+    fn transitions_interpolate_progress_bar_value() {
+        let lua = mlua::Lua::new();
+        let node: Table = lua
+            .load("{kind='progress_bar',value=0.4,transition={props={'value'},easing='linear'}}")
+            .eval()
+            .unwrap();
+        let transition = Transition::parse(&node).unwrap().unwrap();
+        assert_eq!(transition.value("value"), Some(0.4));
+        assert_eq!(transition.value("width"), None);
+
+        let node: Table = lua
+            .load("{kind='text',content='x',transition={props={'value'}}}")
+            .eval()
+            .unwrap();
+        assert!(Transition::parse(&node).is_err());
     }
 
     #[test]

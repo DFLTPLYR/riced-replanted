@@ -102,8 +102,13 @@ pub(super) fn rule(node: &Table) -> mlua::Result<Element<'static, Message>> {
     Ok(rule.into())
 }
 
-pub(super) fn progress_bar(node: &Table) -> mlua::Result<Element<'static, Message>> {
-    let value = node.get::<Option<f32>>("value")?.unwrap_or(0.0);
+pub(super) fn progress_bar(
+    node: &Table,
+    transition: Option<&super::Transition>,
+) -> mlua::Result<Element<'static, Message>> {
+    let value = transition
+        .and_then(|transition| transition.value("value"))
+        .unwrap_or(node.get::<Option<f32>>("value")?.unwrap_or(0.0));
     if !(0.0..=1.0).contains(&value) {
         return Err(mlua::Error::runtime(
             "progress_bar value must be from 0 to 1",
