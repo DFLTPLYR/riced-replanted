@@ -1105,6 +1105,27 @@ mod tests {
     }
 
     #[test]
+    fn list_view_transition_slides_on_either_axis() {
+        let lua = mlua::Lua::new();
+        let ctx = Ctx::new(41);
+        for source in [
+            "{kind='list_view',id='axis-y',content={{kind='text',content='a'}},transition={duration=180,y={from=-30,to=0}}}",
+            "{kind='list_view',id='axis-num',content={{kind='text',content='a'}},transition={duration=180,y=-30}}",
+            "{kind='list_view',id='axis-both',content={{kind='text',content='a'}},transition={duration=180,x={from=-30,to=0},y={from=-10,to=0}}}",
+        ] {
+            element(lua.load(source).eval().unwrap(), &ctx).unwrap();
+        }
+        let bad: Table = lua
+            .load(
+                "{kind='list_view',id='axis-bad',content={{kind='text',content='a'}},\
+                 transition={duration=180,z={from=-30,to=0}}}",
+            )
+            .eval()
+            .unwrap();
+        assert!(element(bad, &ctx).is_err());
+    }
+
+    #[test]
     fn list_view_displaces_survivors_and_fires_the_callback() {
         let lua = mlua::Lua::new();
         lua.load("added = ''; removed = ''; moved = ''")

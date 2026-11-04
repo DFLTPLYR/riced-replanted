@@ -12,10 +12,12 @@ struct ScaleState {
     start: Instant,
     scale: f32,
     x: f32,
+    y: f32,
     done: bool,
     entering: bool,
     duration: Duration,
     x_range: (f32, f32),
+    y_range: (f32, f32),
     leave_token: Option<Instant>,
     window: Option<window::Id>,
     last_bounds: Option<Rectangle>,
@@ -31,6 +33,7 @@ pub(super) struct ScaleItem<'a> {
     entering: bool,
     duration: Duration,
     x_range: (f32, f32),
+    y_range: (f32, f32),
     leave_token: Option<Instant>,
     displace: bool,
     window: Option<window::Id>,
@@ -43,6 +46,7 @@ impl<'a> ScaleItem<'a> {
         entering: bool,
         duration: Duration,
         x_range: (f32, f32),
+        y_range: (f32, f32),
         leave_token: Option<Instant>,
         displace: bool,
         window: Option<window::Id>,
@@ -52,6 +56,7 @@ impl<'a> ScaleItem<'a> {
             entering,
             duration,
             x_range,
+            y_range,
             leave_token,
             displace,
             window,
@@ -84,10 +89,16 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
             } else {
                 self.x_range.1
             },
+            y: if self.entering {
+                self.y_range.0
+            } else {
+                self.y_range.1
+            },
             done: !self.entering && self.leave_token.is_none(),
             entering: self.entering,
             duration: self.duration,
             x_range: self.x_range,
+            y_range: self.y_range,
             leave_token: self.leave_token,
             window: self.window,
             last_bounds: None,
@@ -119,10 +130,16 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
                 } else {
                     self.x_range.1
                 },
+                y: if self.entering {
+                    self.y_range.0
+                } else {
+                    self.y_range.1
+                },
                 done: !self.entering && self.leave_token.is_none(),
                 entering: self.entering,
                 duration: self.duration,
                 x_range: self.x_range,
+                y_range: self.y_range,
                 leave_token: self.leave_token,
                 window: self.window,
                 last_bounds: None,
@@ -214,6 +231,7 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
             let progress = if state.entering { eased } else { 1.0 - eased };
             state.scale = progress;
             state.x = state.x_range.0 + (state.x_range.1 - state.x_range.0) * progress;
+            state.y = state.y_range.0 + (state.y_range.1 - state.y_range.0) * progress;
             if t >= 1.0 {
                 state.done = true;
                 state.scale = if state.entering { 1.0 } else { 0.0 };
@@ -221,6 +239,11 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
                     state.x_range.1
                 } else {
                     state.x_range.0
+                };
+                state.y = if state.entering {
+                    state.y_range.1
+                } else {
+                    state.y_range.0
                 };
                 if !state.entering
                     && let Some(window) = state.window
@@ -300,10 +323,11 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         }
         let bounds = layout.bounds();
         let center = bounds.center();
-        let transformation =
-            Transformation::translate(state.x + state.shift.0 + center.x, state.shift.1 + center.y)
-                * Transformation::scale(state.scale)
-                * Transformation::translate(-center.x, -center.y);
+        let transformation = Transformation::translate(
+            state.x + state.shift.0 + center.x,
+            state.y + state.shift.1 + center.y,
+        ) * Transformation::scale(state.scale)
+            * Transformation::translate(-center.x, -center.y);
         renderer.with_transformation(transformation, |renderer| {
             self.content.as_widget().draw(
                 &tree.children[0],
@@ -345,6 +369,7 @@ mod tests {
             widget::text("x").into(),
             entering,
             Duration::from_millis(100),
+            (0.0, 0.0),
             (0.0, 0.0),
             leaving.then(Instant::now),
             true,

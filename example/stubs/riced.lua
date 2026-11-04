@@ -48,6 +48,7 @@ config = {}
 ---@class iced.ListTransition
 ---@field duration? integer
 ---@field x? number|{ from: number, to: number }
+---@field y? number|{ from: number, to: number }
 ---@field onAdded? fun(index: integer, item: any)
 ---@field onRemoved? fun(index: integer, item: any)
 ---@field onDisplaced? fun(index: integer, item: any)

@@ -772,14 +772,16 @@ change takes effect on the next render. The direct callbacks take precedence ove
 ```lua
 transition = {
     duration = 180,                       -- whole milliseconds
-    x = { from = -180, to = 0 },          -- slide range; number means { n, 0 }
+    x = { from = -180, to = 0 },          -- horizontal slide; number means { n, 0 }
+    y = { from = 20, to = 0 },            -- vertical slide; same forms
     onAdded = function(index, item) end,
     onRemoved = function(index, item) end,
     onDisplaced = function(index, item) end,
 }
 ```
 
-New items transition from `x.from` to `x.to` while scaling from 0 to 1. Leaving
+New items transition from `x.from`/`y.from` to `x.to`/`y.to` while scaling
+from 0 to 1. Leaving
 items reverse that. `onDisplaced` runs for surviving items whose index changed;
 they glide from their previous slot to the new one over the same duration.
 Leaving items are drawn until the animation finishes. Transforms only change

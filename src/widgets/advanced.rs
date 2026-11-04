@@ -295,6 +295,10 @@ pub(super) fn list_view(
         .as_ref()
         .map(|transition| transition.x)
         .unwrap_or((0.0, 0.0));
+    let y = transition
+        .as_ref()
+        .map(|transition| transition.y)
+        .unwrap_or((0.0, 0.0));
     let mut children: Vec<Element<'static, Message>> =
         Vec::with_capacity(items.len() + previous.leaving.len());
     let mut keyed: Vec<(u64, Element<'static, Message>)> =
@@ -307,6 +311,7 @@ pub(super) fn list_view(
                 previous.entering[index],
                 duration,
                 x,
+                y,
                 None,
                 true,
                 ctx.window(),
@@ -324,6 +329,7 @@ pub(super) fn list_view(
             false,
             duration,
             x,
+            y,
             Some(leaving.at),
             false,
             ctx.window(),
@@ -387,9 +393,32 @@ fn list_key(item: &Value, key: Option<&str>) -> mlua::Result<Value> {
 struct ListTransition {
     duration: Duration,
     x: (f32, f32),
+    y: (f32, f32),
     added: Option<Function>,
     removed: Option<Function>,
     displaced: Option<Function>,
+}
+
+fn slide_range(table: &Table, key: &str) -> mlua::Result<(f32, f32)> {
+    match table.get::<Value>(key)? {
+        Value::Nil => Ok((0.0, 0.0)),
+        Value::Integer(value) => Ok((value as f32, 0.0)),
+        Value::Number(value) if value.is_finite() => Ok((value as f32, 0.0)),
+        Value::Table(range) => {
+            crate::runtime::keys(&range, &["from", "to"])?;
+            let from = range.get::<Option<f32>>("from")?.unwrap_or(0.0);
+            let to = range.get::<Option<f32>>("to")?.unwrap_or(0.0);
+            if !from.is_finite() || !to.is_finite() {
+                return Err(mlua::Error::runtime(format!(
+                    "list_view transition {key} values must be finite"
+                )));
+            }
+            Ok((from, to))
+        }
+        _ => Err(mlua::Error::runtime(format!(
+            "list_view transition {key} must be a pixel offset or {{from, to}}"
+        ))),
+    }
 }
 
 fn list_transition(node: &Table) -> mlua::Result<Option<ListTransition>> {
@@ -398,6 +427,7 @@ fn list_transition(node: &Table) -> mlua::Result<Option<ListTransition>> {
         Value::Boolean(true) => Ok(Some(ListTransition {
             duration: Duration::from_millis(200),
             x: (0.0, 0.0),
+            y: (0.0, 0.0),
             added: None,
             removed: None,
             displaced: None,
@@ -405,7 +435,7 @@ fn list_transition(node: &Table) -> mlua::Result<Option<ListTransition>> {
         Value::Table(table) => {
             crate::runtime::keys(
                 &table,
-                &["duration", "x", "onAdded", "onRemoved", "onDisplaced"],
+                &["duration", "x", "y", "onAdded", "onRemoved", "onDisplaced"],
             )?;
             let duration = table.get::<Option<f64>>("duration")?.unwrap_or(200.0);
             if !(1.0..=86_400_000.0).contains(&duration) || duration.fract() != 0.0 {
@@ -413,30 +443,10 @@ fn list_transition(node: &Table) -> mlua::Result<Option<ListTransition>> {
                     "list_view transition duration must be a whole number from 1 to 86400000 ms",
                 ));
             }
-            let x = match table.get::<Value>("x")? {
-                Value::Nil => (0.0, 0.0),
-                Value::Integer(value) => (value as f32, 0.0),
-                Value::Number(value) if value.is_finite() => (value as f32, 0.0),
-                Value::Table(range) => {
-                    crate::runtime::keys(&range, &["from", "to"])?;
-                    let from = range.get::<Option<f32>>("from")?.unwrap_or(0.0);
-                    let to = range.get::<Option<f32>>("to")?.unwrap_or(0.0);
-                    if !from.is_finite() || !to.is_finite() {
-                        return Err(mlua::Error::runtime(
-                            "list_view transition x values must be finite",
-                        ));
-                    }
-                    (from, to)
-                }
-                _ => {
-                    return Err(mlua::Error::runtime(
-                        "list_view transition x must be a pixel offset or {from, to}",
-                    ));
-                }
-            };
             Ok(Some(ListTransition {
                 duration: Duration::from_millis(duration as u64),
-                x,
+                x: slide_range(&table, "x")?,
+                y: slide_range(&table, "y")?,
                 added: table.get::<Option<Function>>("onAdded")?,
                 removed: table.get::<Option<Function>>("onRemoved")?,
                 displaced: table.get::<Option<Function>>("onDisplaced")?,
