@@ -4,7 +4,7 @@ use mlua::{Table, Value};
 
 use crate::runtime::{Message, WidgetEvent};
 
-use super::enums::{font_value, horizontal, intern_font};
+use super::enums::{font_value, horizontal};
 use super::style::{style_patch, validate};
 use super::{Ctx, Layout, element, number};
 
@@ -544,7 +544,7 @@ pub(super) fn scrollable(
         scrollable = scrollable.auto_scroll(auto_scroll);
     }
     if let Some(id) = node.get::<Option<String>>("id")? {
-        scrollable = scrollable.id(widget::Id::new(intern_font(&id)));
+        scrollable = scrollable.id(widget::Id::from(id));
     }
     if let Some(event) = node.get::<Option<String>>("on_scroll")? {
         let generation = ctx.generation;
@@ -616,7 +616,7 @@ pub(super) fn text_input(
         input = input.secure(secure);
     }
     if let Some(id) = node.get::<Option<String>>("id")? {
-        input = input.id(widget::Id::new(intern_font(&id)));
+        input = input.id(widget::Id::from(id));
     }
     if let Some(size) = node.get::<Option<f32>>("size")? {
         if !size.is_finite() || size <= 0.0 {

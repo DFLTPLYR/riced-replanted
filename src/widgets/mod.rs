@@ -36,10 +36,6 @@ pub fn color(value: &str) -> mlua::Result<Color> {
     })
 }
 
-pub(crate) fn intern(value: &str) -> &'static str {
-    enums::intern_font(value)
-}
-
 pub(crate) fn edit(
     generation: u64,
     id: &str,
@@ -880,6 +876,7 @@ mod tests {
             "{kind='slider',min=1,max=0}",
             "{kind='text_input',size=0}",
             "{kind='text_input',font={weight='heavy'}}",
+            "{kind='text_input',font=string.rep('x',1025)}",
             "{kind='button',content='x',style={border={width=-1}}}",
             "{kind='scrollable',content={},direction='diagonal'}",
             "{kind='pick_list',options='a'}",

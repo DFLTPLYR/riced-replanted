@@ -7,7 +7,7 @@ use iced::{Element, Event, Length, Rectangle, Size, Theme, Transformation, Vecto
 
 use crate::runtime::Message;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ScaleState {
     start: Instant,
     scale: f32,
@@ -84,7 +84,7 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
             } else {
                 self.x_range.1
             },
-            done: false,
+            done: !self.entering && self.leave_token.is_none(),
             entering: self.entering,
             duration: self.duration,
             x_range: self.x_range,
@@ -119,7 +119,7 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
                 } else {
                     self.x_range.1
                 },
-                done: false,
+                done: !self.entering && self.leave_token.is_none(),
                 entering: self.entering,
                 duration: self.duration,
                 x_range: self.x_range,
@@ -332,5 +332,38 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
             viewport,
             translation,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::widget;
+
+    fn state(entering: bool, leaving: bool) -> ScaleState {
+        let item: Element<'static, Message> = ScaleItem::new(
+            widget::text("x").into(),
+            entering,
+            Duration::from_millis(100),
+            (0.0, 0.0),
+            leaving.then(Instant::now),
+            true,
+            None,
+        )
+        .into();
+        let tree = Tree::new(&item);
+        tree.state.downcast_ref::<ScaleState>().clone()
+    }
+
+    #[test]
+    fn fresh_static_items_start_finished() {
+        assert!(state(false, false).done);
+        assert_eq!(state(false, false).scale, 1.0);
+    }
+
+    #[test]
+    fn entering_and_leaving_items_animate() {
+        assert!(!state(true, false).done);
+        assert!(!state(false, true).done);
     }
 }

@@ -93,15 +93,15 @@ pub(super) fn shaping(value: &str) -> mlua::Result<Shaping> {
 pub(super) fn font_value(value: Value) -> mlua::Result<iced::Font> {
     use iced::font::{Family, Stretch, Style as FontStyle, Weight};
 
-    fn family(name: &str) -> Family {
-        match name {
+    fn family(name: &str) -> mlua::Result<Family> {
+        Ok(match name {
             "sans_serif" | "sans-serif" => Family::SansSerif,
             "serif" => Family::Serif,
             "monospace" | "mono" => Family::Monospace,
             "cursive" => Family::Cursive,
             "fantasy" => Family::Fantasy,
-            _ => Family::Name(intern_font(name)),
-        }
+            _ => Family::Name(intern_font(name)?),
+        })
     }
 
     fn weight(name: &str) -> mlua::Result<Weight> {
@@ -142,7 +142,7 @@ pub(super) fn font_value(value: Value) -> mlua::Result<iced::Font> {
         Value::String(name) => {
             let name = name.to_str()?;
             Ok(iced::Font {
-                family: family(&name),
+                family: family(&name)?,
                 ..iced::Font::DEFAULT
             })
         }
@@ -150,7 +150,7 @@ pub(super) fn font_value(value: Value) -> mlua::Result<iced::Font> {
             crate::runtime::keys(&table, &["family", "weight", "style", "stretch"])?;
             let mut font = iced::Font::DEFAULT;
             if let Some(name) = table.get::<Option<String>>("family")? {
-                font.family = family(&name);
+                font.family = family(&name)?;
             }
             if let Some(name) = table.get::<Option<String>>("weight")? {
                 font.weight = weight(&name)?;
@@ -178,7 +178,7 @@ pub(super) fn font_value(value: Value) -> mlua::Result<iced::Font> {
     }
 }
 
-pub(super) fn intern_font(name: &str) -> &'static str {
+fn intern_font(name: &str) -> mlua::Result<&'static str> {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
 
@@ -188,11 +188,17 @@ pub(super) fn intern_font(name: &str) -> &'static str {
         .lock()
         .unwrap();
     if let Some(name) = names.get(name) {
-        return name;
+        return Ok(name);
+    }
+    // Iced requires static family names; bound the process-lifetime allocation.
+    if names.len() >= 256 || name.len() > 1024 {
+        return Err(mlua::Error::runtime(
+            "font family limit: 256 distinct names, 1024 bytes each",
+        ));
     }
     let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
     names.insert(leaked);
-    leaked
+    Ok(leaked)
 }
 
 pub(super) fn content_fit(value: &str) -> mlua::Result<ContentFit> {
