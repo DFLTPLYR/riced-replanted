@@ -97,6 +97,12 @@ The bundled extensions are:
   protocols.
 - `riced-dbus` — StatusNotifier tray items and freedesktop notifications.
 
+The D-Bus and Wayland extensions bound display text and array snapshots to stay
+below the protocol's 256 KiB message limit. Entries that exceed an array's byte
+budget are omitted with a diagnostic; identifiers and action keys are preserved.
+Notifications retain at most 64 entries, 16 actions per entry, and 1024 characters
+each for summary and body. Ambiguous multi-monitor focus is reported as `nil`.
+
 Build and install the examples into `~/.config/riced/test/extensions/`:
 
 ```sh
@@ -109,6 +115,37 @@ The extension SDK is [`crates/riced-extension-sdk`](crates/riced-extension-sdk).
 Third-party extensions depend on it by git or path, build their own binary, and
 never need `riced` rebuilt. Extensions run as your user and have the same trust
 as `shell.lua`.
+
+### Logging
+
+Core and SDK diagnostics use the shared `log` facade and write to stderr as
+`[event]: information`. `Plugin::serve` / `serve_at` install the default logger
+automatically, preserving any logger the extension has already installed.
+On a terminal, `[event]` is colored by severity: errors red, warnings yellow,
+info green, debug cyan, and trace gray. Redirected logs stay plain; setting
+`NO_COLOR` disables color.
+
+Lua profiles can use `log(...)` instead of `print(...)`:
+
+```lua
+log("called") -- [lua]: called
+log("settings", state.settings) -- values are tab-separated, like print
+```
+
+Lua logs use info level and the same terminal colors and `NO_COLOR` behavior.
+
+```rust
+use riced_extension_sdk::log;
+
+log::info!(target: "dbus.connected", "connected to the session bus");
+// [dbus.connected]: connected to the session bus
+log::warn!(target: "dbus.retry", "retrying after {error}");
+```
+
+For logging before `serve`, call `riced_extension_sdk::logging::init()` first.
+Info, warnings, and errors are enabled by default; use `log::set_max_level` to
+change verbosity. Logging is separate from `Context::event`, which sends an
+application event to Lua.
 
 ## Documentation
 

@@ -4,6 +4,11 @@
 -- lua-language-server through .luarc.json; never executed at runtime.
 -- Keep in sync with src/lua/, src/file.rs, and API.md when the Lua API changes.
 
+---Logs values at info level as `[lua]: information` on stderr.
+---Uses Lua tostring and separates multiple values with tabs, like print.
+---@param ... any
+function log(...) end
+
 ---@class riced.Theme
 ---@field background string
 ---@field text string
@@ -112,6 +117,15 @@ config = {}
 ---@field cell? string
 ---@field background? string
 
+---@class iced.MarkdownStyle
+---@field link_color? string
+---@field inline_code_color? string
+
+---@class iced.PaneGridStyle
+---@field hovered_region? { background?: string, border?: iced.Border }
+---@field picked_split? { color?: string, width?: number }
+---@field hovered_split? { color?: string, width?: number }
+
 ---@class iced.TableColumn
 ---@field header string|number|iced.Element
 ---@field width? string|number|{ fill_portion: integer }
@@ -215,7 +229,7 @@ config = {}
 ---@field gap? number
 ---@field columns? number
 ---@field fluid? number
----@field style? iced.Style|iced.RuleStyle|iced.ProgressStyle|iced.QrStyle
+---@field style? iced.Style|iced.RuleStyle|iced.ProgressStyle|iced.QrStyle|iced.MarkdownStyle|iced.PaneGridStyle
 ---@field cell_size? number
 ---@field total_size? number
 ---@field on_input? string
@@ -250,8 +264,6 @@ config = {}
 ---@field onItemAdded? fun(index: integer, item: any)
 ---@field onItemRemoved? fun(index: integer, item: any)
 ---@field min_size? number
----@field link_color? string
----@field inline_code_color? string
 
 ---@class iced.LayerSettings
 ---@field id? string

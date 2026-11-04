@@ -13,6 +13,7 @@ stub when this document changes.
 
 - [Conventions](#conventions)
 - [riced API](#riced-api)
+  - [`log`](#log)
   - [`riced.daemon`](#riceddaemon)
   - [Daemon callbacks](#daemon-callbacks)
   - [`riced.ipc`](#ricedipc)
@@ -86,6 +87,29 @@ Stretches: `ultra_condensed`, `extra_condensed`, `condensed`, `semi_condensed`,
 
 ## riced API
 
+### `log`
+
+`log(...)` is a global function available in profiles, modules, and callbacks.
+It writes an info-level message through the shared logger to stderr with the
+event label `[lua]`. Values use Lua `tostring` (including `__tostring`) and are
+separated by tabs, like `print`. It returns no values; `log()` emits an empty
+message. Errors from `tostring` propagate to the caller.
+
+```lua
+riced.ipc({
+    settings = function(self, args)
+        if #args ~= 0 then
+            error("usage: riced ipc settings")
+        end
+        log("called") -- [lua]: called
+        self.settings = not self.settings
+    end,
+})
+```
+
+The `[lua]` label is green on a terminal. Redirected output stays plain, and
+`NO_COLOR` disables coloring. Standard Lua `print` still writes to stdout.
+
 ### `riced.daemon`
 
 ```lua
@@ -106,50 +130,50 @@ return riced.daemon(app, "my-profile", app.update, app.view)
 
 Arguments:
 
-| Argument    | Type     | Required | Meaning                                                |
-| ----------- | -------- | -------- | ------------------------------------------------------ |
-| `app`       | table    | yes      | State table passed as `self` to every callback         |
-| `namespace` | string   | yes      | Nonempty Iced theme namespace and surface namespace    |
+| Argument    | Type     | Required | Meaning                                                   |
+| ----------- | -------- | -------- | --------------------------------------------------------- |
+| `app`       | table    | yes      | State table passed as `self` to every callback            |
+| `namespace` | string   | yes      | Nonempty Iced theme namespace and surface namespace       |
 | `update`    | function | yes      | Event handler, called as `update(self, event, component)` |
-| `view`      | function | yes      | Renderer, called as `view(self, props)`                |
+| `view`      | function | yes      | Renderer, called as `view(self, props)`                   |
 
 `riced.daemon` returns a builder. Chain any of the options below and finish with
 `:run()`. `run()` must be called exactly once. Rust starts the event loop after
 `shell.lua` returns.
 
-| Builder method             | Value                                             |
-| -------------------------- | ------------------------------------------------- |
-| `:title(value)`            | string, or `function(self, window) -> string?`    |
-| `:subscription(value)`     | `function(self, active) -> subscription(s)?`      |
-| `:theme(value)`            | palette table, or `function(self, window)`        |
-| `:style(value)`            | `function(self, palette) -> style table?`         |
-| `:redraw_scope(value)`     | `function(self, event) -> scope`                  |
-| `:settings(value)`         | settings table                                    |
+| Builder method         | Value                                          |
+| ---------------------- | ---------------------------------------------- |
+| `:title(value)`        | string, or `function(self, window) -> string?` |
+| `:subscription(value)` | `function(self, active) -> subscription(s)?`   |
+| `:theme(value)`        | palette table, or `function(self, window)`     |
+| `:style(value)`        | `function(self, palette) -> style table?`      |
+| `:redraw_scope(value)` | `function(self, event) -> scope`               |
+| `:settings(value)`     | settings table                                 |
 
 Every callback except `update` and `view` is optional.
 
 ### Daemon callbacks
 
-| Callback       | Signature                                | Return                                               |
-| -------------- | ---------------------------------------- | ---------------------------------------------------- |
-| `update`       | `(self, event, component)`               | `nil`, a task, or a list of tasks                    |
-| `view`         | `(self, props)`                          | element, `iced.layer`/`iced.window`, or a nonempty list of surfaces |
-| `title`        | `(self, window)`                         | string or `nil`                                      |
-| `subscription` | `(self, active)`                         | subscription, list of subscriptions, or `nil`        |
-| `theme`        | `(self, window)`                         | palette table or `nil`                               |
-| `style`        | `(self, palette)`                        | `{ background_color?, text_color? }` or `nil`        |
-| `redraw_scope` | `(self, event)`                          | `"all"`, `"none"`, `props.window`, or `nil`           |
+| Callback       | Signature                  | Return                                                              |
+| -------------- | -------------------------- | ------------------------------------------------------------------- |
+| `update`       | `(self, event, component)` | `nil`, a task, or a list of tasks                                   |
+| `view`         | `(self, props)`            | element, `iced.layer`/`iced.window`, or a nonempty list of surfaces |
+| `title`        | `(self, window)`           | string or `nil`                                                     |
+| `subscription` | `(self, active)`           | subscription, list of subscriptions, or `nil`                       |
+| `theme`        | `(self, window)`           | palette table or `nil`                                              |
+| `style`        | `(self, palette)`          | `{ background_color?, text_color? }` or `nil`                       |
+| `redraw_scope` | `(self, event)`            | `"all"`, `"none"`, `props.window`, or `nil`                         |
 
 `component` is the component id that raised the event, or `nil` for global
 events. See [Widget events](#widget-events).
 
 `props` passed to `view` has:
 
-| Field    | Type          | Meaning                                                       |
-| -------- | ------------- | ------------------------------------------------------------- |
-| `window` | opaque userdata | Surface identifier for this render; use with window tasks    |
-| `width`  | number or nil | Current logical surface width; available after the first resize |
-| `height` | number or nil | Current logical surface height; available after the first resize |
+| Field    | Type            | Meaning                                                          |
+| -------- | --------------- | ---------------------------------------------------------------- |
+| `window` | opaque userdata | Surface identifier for this render; use with window tasks        |
+| `width`  | number or nil   | Current logical surface width; available after the first resize  |
+| `height` | number or nil   | Current logical surface height; available after the first resize |
 
 `redraw_scope` runs for every incoming message before `update`. Return `nil` or
 `"all"` to redraw every window, `"none"` to skip redraws, or `props.window` to
@@ -191,7 +215,7 @@ riced.ipc({
 
 ```sh
 riced ipc settings
-riced ipc add --anchor top --output DP-1
+riced ipc -p work add --anchor top --output DP-1
 ```
 
 Handlers receive the daemon's state table as `self` and the command-line
@@ -203,8 +227,10 @@ replaces the previous handler, so editing the module that registers handlers
 keeps working. An empty command name is an error.
 
 The CLI only queues the request, so success means it was queued, not that a
-daemon handled it. Commands share one queue per user, so with multiple `riced`
-processes the request goes to whichever process polls first.
+daemon handled it. Each profile has its own queue. Without `-p`, the CLI targets
+the only running profile discovered through
+`$XDG_RUNTIME_DIR/riced/<profile>.sock`; with several running profiles it fails
+and asks for `-p <profile>`.
 
 ### `config` and `theme`
 
@@ -261,23 +287,23 @@ local settings = riced.file({
 
 Options:
 
-| Option     | Type     | Required | Meaning                                             |
-| ---------- | -------- | -------- | --------------------------------------------------- |
-| `path`     | string   | yes      | Nonempty absolute path or profile-relative path     |
-| `type`     | string   | no       | `"json"` or `"toml"`; inferred from the extension   |
-| `onLoaded` | function | no       | `(file, data)` after a successful load/create       |
+| Option     | Type     | Required | Meaning                                              |
+| ---------- | -------- | -------- | ---------------------------------------------------- |
+| `path`     | string   | yes      | Nonempty absolute path or profile-relative path      |
+| `type`     | string   | no       | `"json"` or `"toml"`; inferred from the extension    |
+| `onLoaded` | function | no       | `(file, data)` after a successful load/create        |
 | `onError`  | function | no       | `(file, error)` after a read, create, or parse error |
 
 `riced.file` returns a userdata with:
 
-| Field/method | Type                     | Meaning                                                     |
-| ------------ | ------------------------ | ----------------------------------------------------------- |
-| `path`       | string                   | Resolved path                                               |
-| `type`       | string                   | `"json"` or `"toml"`                                        |
-| `data`       | any                      | Loaded value; assign to replace it                          |
-| `error`      | string or nil            | Last load/save error                                        |
-| `file:save()` | `boolean, string?`      | Writes `data`; returns `true` or `false, error`             |
-| `file:write(value?)` | `boolean, string?` | Replaces `data` when provided, then saves                   |
+| Field/method         | Type               | Meaning                                         |
+| -------------------- | ------------------ | ----------------------------------------------- |
+| `path`               | string             | Resolved path                                   |
+| `type`               | string             | `"json"` or `"toml"`                            |
+| `data`               | any                | Loaded value; assign to replace it              |
+| `error`              | string or nil      | Last load/save error                            |
+| `file:save()`        | `boolean, string?` | Writes `data`; returns `true` or `false, error` |
+| `file:write(value?)` | `boolean, string?` | Replaces `data` when provided, then saves       |
 
 Missing files are created before `onLoaded` runs: `{}` for JSON and an empty
 document for TOML. Missing parent directories are created. Writes are atomic
@@ -317,11 +343,11 @@ if wayland.connected then
 end
 ```
 
-| Field   | Type    | Meaning                                                       |
-| ------- | ------- | ------------------------------------------------------------- |
-| `name`  | string  | Extension name                                                |
-| `alive` | boolean | Whether the extension is connected                            |
-| `store` | table   | Last published snapshot                                       |
+| Field   | Type    | Meaning                            |
+| ------- | ------- | ---------------------------------- |
+| `name`  | string  | Extension name                     |
+| `alive` | boolean | Whether the extension is connected |
+| `store` | table   | Last published snapshot            |
 
 Unknown keys on the proxy read through to `store`, so `plugin.cpu` and
 `plugin.store.cpu` are equivalent. Declared extension methods keep their names.
@@ -373,15 +399,15 @@ end
 
 Store fields:
 
-| Field              | Shape                                                                                                    |
-| ------------------ | -------------------------------------------------------------------------------------------------------- |
-| `connected`        | boolean; false while the compositor connection is down                                                   |
-| `capabilities`     | `{ toplevels, toplevel_control, workspaces }` booleans                                                   |
-| `outputs`          | `{ id, name, description, make, model, x, y, width, height, scale }`                                     |
+| Field              | Shape                                                                                                                                    |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `connected`        | boolean; false while the compositor connection is down                                                                                   |
+| `capabilities`     | `{ toplevels, toplevel_control, workspaces }` booleans                                                                                   |
+| `outputs`          | `{ id, name, description, make, model, x, y, width, height, scale }`                                                                     |
 | `toplevels`        | `{ id, title, app_id, outputs, activated, maximized, minimized, fullscreen }`; the read-only fallback also has `identifier` and no state |
-| `workspaces`       | `{ id, protocol_id, name, coordinates, active, urgent, hidden, capabilities, group, outputs }`           |
-| `workspace_groups` | `{ id, capabilities, outputs }`                                                                          |
-| `focused`          | `{ toplevel, workspace, output }` ids or names; `nil` when unknown                                        |
+| `workspaces`       | `{ id, protocol_id, name, coordinates, active, urgent, hidden, capabilities, group, outputs }`                                           |
+| `workspace_groups` | `{ id, capabilities, outputs }`                                                                                                          |
+| `focused`          | `{ toplevel, workspace, output }` ids or names; `nil` when unknown                                                                       |
 
 Methods: `activate_toplevel(id)`, `close_toplevel(id)`, and
 `activate_workspace(id)`.
@@ -412,12 +438,12 @@ dbus.close_notification(notification.id)
 
 Store fields:
 
-| Field           | Shape                                                                              |
-| --------------- | ---------------------------------------------------------------------------------- |
-| `connected`     | boolean; session bus connection                                                    |
-| `capabilities`  | `{ tray, tray_host, notifications }` booleans                                      |
-| `tray`          | `{ id, title, icon, status, menu, item_is_menu }`                                  |
-| `notifications` | `{ id, app_name, app_icon, summary, body, actions, timeout, timestamp }`           |
+| Field           | Shape                                                                    |
+| --------------- | ------------------------------------------------------------------------ |
+| `connected`     | boolean; session bus connection                                          |
+| `capabilities`  | `{ tray, tray_host, notifications }` booleans                            |
+| `tray`          | `{ id, title, icon, status, menu, item_is_menu }`                        |
+| `notifications` | `{ id, app_name, app_icon, summary, body, actions, timeout, timestamp }` |
 
 `actions` is a list of `{ key, label }`.
 
@@ -456,12 +482,12 @@ the widget has no content. `props` defaults to `{}`.
 
 Every constructor also accepts these common props:
 
-| Prop         | Type                        | Meaning                                               |
-| ------------ | --------------------------- | ----------------------------------------------------- |
-| `width`      | [length](#lengths)          | Layout width                                          |
-| `height`     | [length](#lengths)          | Layout height                                         |
-| `padding`    | number or side table        | Padding around the widget; `{ top, right, bottom, left }` |
-| `transition` | `true`, table, or `false`   | Animate supported property changes; see [transitions](#property-transitions) |
+| Prop         | Type                      | Meaning                                                                      |
+| ------------ | ------------------------- | ---------------------------------------------------------------------------- |
+| `width`      | [length](#lengths)        | Layout width                                                                 |
+| `height`     | [length](#lengths)        | Layout height                                                                |
+| `padding`    | number or side table      | Padding around the widget; `{ top, right, bottom, left }`                    |
+| `transition` | `true`, table, or `false` | Animate supported property changes; see [transitions](#property-transitions) |
 
 Widget-specific props are listed below. `transition` on `list_view` means item
 enter/leave/displacement animation instead of property animation.
@@ -559,11 +585,11 @@ not as a widget-event table.
 
 Pass `nil` as content.
 
-| Widget      | Props                                                                 | Event        |
-| ----------- | --------------------------------------------------------------------- | ------------ |
-| `checkbox`  | `value` (boolean, default false), `label`, `text_size`, `on_toggle`   | `on_toggle`  |
-| `radio`     | `value` (integer, default 0), `selected` (integer), `label`, `text_size`, `on_select` | `on_select` |
-| `toggler`   | `value` (boolean, default false), `label`, `text_size`, `on_toggle`   | `on_toggle`  |
+| Widget     | Props                                                                                 | Event       |
+| ---------- | ------------------------------------------------------------------------------------- | ----------- |
+| `checkbox` | `value` (boolean, default false), `label`, `text_size`, `on_toggle`                   | `on_toggle` |
+| `radio`    | `value` (integer, default 0), `selected` (integer), `label`, `text_size`, `on_select` | `on_select` |
+| `toggler`  | `value` (boolean, default false), `label`, `text_size`, `on_toggle`                   | `on_toggle` |
 
 These widgets send wrapped widget events with boolean or numeric `value`.
 `radio` values are cast to unsigned integers. `radio` defaults `on_select` to an
@@ -694,10 +720,10 @@ number, element, or `nil`. Missing cells render as empty space.
 
 Props:
 
-| Prop       | Type                                                         | Meaning                    |
-| ---------- | ------------------------------------------------------------ | -------------------------- |
-| `columns`  | array of column tables (required, at least one)              | Header and column layout   |
-| `spacing`  | non-negative number                                          | Separator size             |
+| Prop      | Type                                            | Meaning                  |
+| --------- | ----------------------------------------------- | ------------------------ |
+| `columns` | array of column tables (required, at least one) | Header and column layout |
+| `spacing` | non-negative number                             | Separator size           |
 
 A column accepts:
 
@@ -719,18 +745,18 @@ Without `render`, items must already be elements, strings, numbers, or `nil`.
 
 Props:
 
-| Prop             | Type       | Meaning                                                     |
-| ---------------- | ---------- | ----------------------------------------------------------- |
-| `id`             | string     | Required, nonempty identity for item tracking               |
-| `key`            | string     | Table field used as item identity; requires `render`        |
-| `direction`      | string     | `"vertical"` default or `"horizontal"`                      |
-| `spacing`        | number     | Gap between items                                           |
-| `render`         | function   | `(item, index) -> element`; index is zero-based             |
-| `on_item_added`  | function   | `(index, item)` when a value first appears                   |
-| `on_item_removed`| function   | `(index, item)` when a value disappears; index is its old slot |
-| `onItemAdded`    | function   | Alias for `on_item_added`                                   |
-| `onItemRemoved`  | function   | Alias for `on_item_removed`                                 |
-| `transition`     | boolean/table | Item enter/leave/displacement animation; see below        |
+| Prop              | Type          | Meaning                                                        |
+| ----------------- | ------------- | -------------------------------------------------------------- |
+| `id`              | string        | Required, nonempty identity for item tracking                  |
+| `key`             | string        | Table field used as item identity; requires `render`           |
+| `direction`       | string        | `"vertical"` default or `"horizontal"`                         |
+| `spacing`         | number        | Gap between items                                              |
+| `render`          | function      | `(item, index) -> element`; index is zero-based                |
+| `on_item_added`   | function      | `(index, item)` when a value first appears                     |
+| `on_item_removed` | function      | `(index, item)` when a value disappears; index is its old slot |
+| `onItemAdded`     | function      | Alias for `on_item_added`                                      |
+| `onItemRemoved`   | function      | Alias for `on_item_removed`                                    |
+| `transition`      | boolean/table | Item enter/leave/displacement animation; see below             |
 
 Diffing matches items by `key` when set, otherwise by value. Inserting,
 removing, or reordering distinct items is detected and their positions animate;
@@ -779,13 +805,13 @@ layout.
 
 `content`: array of shape tables.
 
-| Shape    | Fields                                                                 |
-| -------- | ---------------------------------------------------------------------- |
+| Shape    | Fields                                                                                           |
+| -------- | ------------------------------------------------------------------------------------------------ |
 | `rect`   | `x`, `y`, `width` (positive), `height` (positive), `color`, optional `border = { color, width }` |
-| `circle` | `x`, `y`, `radius` (positive), `color`, optional `border`              |
-| `line`   | `from = { x, y }`, `to = { x, y }`, `color`, `width` (default 1)        |
-| `path`   | `points` (at least two `{ x, y }`), `color`, `width`, `fill` (boolean)   |
-| `text`   | `x`, `y`, `content`, `size` (default 16), `color`                      |
+| `circle` | `x`, `y`, `radius` (positive), `color`, optional `border`                                        |
+| `line`   | `from = { x, y }`, `to = { x, y }`, `color`, `width` (default 1)                                 |
+| `path`   | `points` (at least two `{ x, y }`), `color`, `width`, `fill` (boolean)                           |
+| `text`   | `x`, `y`, `content`, `size` (default 16), `color`                                                |
 
 Coordinates default to 0. `border.width` defaults to 1. Arbitrary Iced canvas
 programs are not supported.
@@ -891,19 +917,19 @@ iced.layer(content, {
 
 Settings:
 
-| Key                    | Values                                                                                       | Default |
-| ---------------------- | -------------------------------------------------------------------------------------------- | ------- |
-| `id`                   | nonempty string                                                                              | position-based |
-| `size`                 | `{ width, height }`, each `"fill"` or positive integer pixels                                | fill/fill |
-| `layer`                | `"background"`, `"bottom"`, `"top"`, `"overlay"`                                             | `"top"` |
-| `anchor`               | array of `"top"`, `"bottom"`, `"left"`, `"right"`                                            | all edges |
-| `exclusive_zone`       | integer at least -1, or nil                                                                  | none/0 |
-| `margin`               | four integers: top, right, bottom, left                                                      | zeros |
-| `keyboard_interactivity` | `"none"`, `"on_demand"`, `"exclusive"`                                                     | `"on_demand"` |
-| `output_option`        | `"active"`, `"last_output"`, output name, or positive Wayland registry global ID             | `"active"` |
-| `events_transparent`   | boolean                                                                                      | false |
-| `namespace`            | nonempty string without NUL                                                                  | inherited |
-| `blur_option`          | `"none"`, `"full"`, or an array of `{ x, y, width, height }` with positive width/height      | `"none"` |
+| Key                      | Values                                                                                  | Default        |
+| ------------------------ | --------------------------------------------------------------------------------------- | -------------- |
+| `id`                     | nonempty string                                                                         | position-based |
+| `size`                   | `{ width, height }`, each `"fill"` or positive integer pixels                           | fill/fill      |
+| `layer`                  | `"background"`, `"bottom"`, `"top"`, `"overlay"`                                        | `"top"`        |
+| `anchor`                 | array of `"top"`, `"bottom"`, `"left"`, `"right"`                                       | all edges      |
+| `exclusive_zone`         | integer at least -1, or nil                                                             | none/0         |
+| `margin`                 | four integers: top, right, bottom, left                                                 | zeros          |
+| `keyboard_interactivity` | `"none"`, `"on_demand"`, `"exclusive"`                                                  | `"on_demand"`  |
+| `output_option`          | `"active"`, `"last_output"`, output name, or positive Wayland registry global ID        | `"active"`     |
+| `events_transparent`     | boolean                                                                                 | false          |
+| `namespace`              | nonempty string without NUL                                                             | inherited      |
+| `blur_option`            | `"none"`, `"full"`, or an array of `{ x, y, width, height }` with positive width/height | `"none"`       |
 
 A `"fill"` axis requires both opposite anchors on that axis. Pixel dimensions
 must fit a signed 32-bit integer.
@@ -930,15 +956,15 @@ Widget callbacks (`on_input`, `on_submit`, `on_toggle`, `on_change`,
 
 `value` types by widget:
 
-| Value              | Widgets / callbacks                                                   |
-| ------------------ | --------------------------------------------------------------------- |
-| boolean            | `checkbox.on_toggle`, `toggler.on_toggle`                             |
-| number             | `radio.on_select`, `slider.on_change`/`on_release`, `vertical_slider`, `pane_grid.on_click` (index), `pane_grid.on_resize` (ratio) |
-| string             | `text_input`, `pick_list`, `combo_box`, `markdown.on_link_click`, `text_editor.on_input` |
-| `{ x, y }`         | `mouse_area.on_move`, `mouse_area.on_scroll`                          |
-| `{ width, height }`| `sensor.on_show`, `sensor.on_resize`                                   |
-| scroll table       | `scrollable.on_scroll`                                                |
-| action table       | `text_editor.on_action` adds `text`; `pane_grid.on_drag` adds `pane`  |
+| Value               | Widgets / callbacks                                                                                                                |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| boolean             | `checkbox.on_toggle`, `toggler.on_toggle`                                                                                          |
+| number              | `radio.on_select`, `slider.on_change`/`on_release`, `vertical_slider`, `pane_grid.on_click` (index), `pane_grid.on_resize` (ratio) |
+| string              | `text_input`, `pick_list`, `combo_box`, `markdown.on_link_click`, `text_editor.on_input`                                           |
+| `{ x, y }`          | `mouse_area.on_move`, `mouse_area.on_scroll`                                                                                       |
+| `{ width, height }` | `sensor.on_show`, `sensor.on_resize`                                                                                               |
+| scroll table        | `scrollable.on_scroll`                                                                                                             |
+| action table        | `text_editor.on_action` adds `text`; `pane_grid.on_drag` adds `pane`                                                               |
 
 `scrollable.on_scroll` carries:
 
@@ -977,11 +1003,11 @@ style = {
 
 Shared fields:
 
-| Field        | Type                                                    |
-| ------------ | ------------------------------------------------------- |
-| `background` | color                                                   |
-| `text_color` | color                                                   |
-| `border`     | `{ color?, width?, radius? }`; width/radius non-negative |
+| Field        | Type                                                       |
+| ------------ | ---------------------------------------------------------- |
+| `background` | color                                                      |
+| `text_color` | color                                                      |
+| `border`     | `{ color?, width?, radius? }`; width/radius non-negative   |
 | `shadow`     | `{ color?, offset? = { x, y }, blur? }`; blur non-negative |
 
 `radius` is a uniform number or a table with `top_left`, `top_right`,
@@ -1000,18 +1026,18 @@ highlight borders.
 
 Widget style support:
 
-| Widget                                                     | Fields                                                                          | State overrides                            |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------ |
-| `container`                                                | `background`, `text_color`, `border`, `shadow`                                  | —                                          |
-| `button`                                                   | `background`, `text_color`, `border`, `shadow`                                  | `active`, `hovered`, `pressed`, `disabled` |
-| `checkbox`                                                 | `background`, `text_color`, `border`, `icon_color`                              | `active`, `hovered`, `disabled`            |
-| `radio`                                                    | `background`, `text_color`, `border`, `dot_color`                               | `active`, `hovered`                        |
-| `toggler`                                                  | `background`, `text_color`, `border`, `foreground`                              | `active`, `hovered`, `disabled`            |
-| `slider`, `vertical_slider`                                | `rail`, `filled`, `border`, `handle`, `handle_border`                           | `active`, `hovered`, `dragged`             |
-| `text_input`, `combo_box`                                  | `background`, `text_color`, `border`, `placeholder`, `selection`, `icon_color`  | `active`, `hovered`, `focused`, `disabled` |
-| `text_editor`                                              | `background`, `text_color`, `border`, `placeholder`, `selection`                | `active`, `hovered`, `focused`, `disabled` |
-| `scrollable`                                               | `background`, `border`, `shadow`, `rail`, `scroller`                            | `active`, `hovered`, `dragged`             |
-| `pick_list`                                                | `background`, `text_color`, `border`, `placeholder`, `handle`                   | `active`, `hovered`, `opened`              |
+| Widget                      | Fields                                                                         | State overrides                            |
+| --------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------ |
+| `container`                 | `background`, `text_color`, `border`, `shadow`                                 | —                                          |
+| `button`                    | `background`, `text_color`, `border`, `shadow`                                 | `active`, `hovered`, `pressed`, `disabled` |
+| `checkbox`                  | `background`, `text_color`, `border`, `icon_color`                             | `active`, `hovered`, `disabled`            |
+| `radio`                     | `background`, `text_color`, `border`, `dot_color`                              | `active`, `hovered`                        |
+| `toggler`                   | `background`, `text_color`, `border`, `foreground`                             | `active`, `hovered`, `disabled`            |
+| `slider`, `vertical_slider` | `rail`, `filled`, `border`, `handle`, `handle_border`                          | `active`, `hovered`, `dragged`             |
+| `text_input`, `combo_box`   | `background`, `text_color`, `border`, `placeholder`, `selection`, `icon_color` | `active`, `hovered`, `focused`, `disabled` |
+| `text_editor`               | `background`, `text_color`, `border`, `placeholder`, `selection`               | `active`, `hovered`, `focused`, `disabled` |
+| `scrollable`                | `background`, `border`, `shadow`, `rail`, `scroller`                           | `active`, `hovered`, `dragged`             |
+| `pick_list`                 | `background`, `text_color`, `border`, `placeholder`, `handle`                  | `active`, `hovered`, `opened`              |
 
 Special styles:
 
@@ -1067,25 +1093,25 @@ return {
 }
 ```
 
-| Task              | Fields                                         | Effect                                                           |
-| ----------------- | ---------------------------------------------- | ---------------------------------------------------------------- |
-| `focus`           | `id`                                           | Focus the widget with that id                                    |
-| `scroll_to`       | `id`, `x?`, `y?`                              | Scroll the widget with that id to an absolute offset             |
-| `clipboard_read`  | —                                              | Deliver `{ type = "clipboard", value = string? }` to `update`    |
-| `clipboard_write` | `content` (string)                             | Write text to the clipboard                                      |
-| `font`            | `path`                                         | Load a font file at runtime                                      |
-| `window`          | `window`, `action`, plus action fields         | Resize, move, close, fullscreen, or window the surface            |
-| `exit`            | —                                              | Exit `riced`                                                     |
+| Task              | Fields                                 | Effect                                                        |
+| ----------------- | -------------------------------------- | ------------------------------------------------------------- |
+| `focus`           | `id`                                   | Focus the widget with that id                                 |
+| `scroll_to`       | `id`, `x?`, `y?`                       | Scroll the widget with that id to an absolute offset          |
+| `clipboard_read`  | —                                      | Deliver `{ type = "clipboard", value = string? }` to `update` |
+| `clipboard_write` | `content` (string)                     | Write text to the clipboard                                   |
+| `font`            | `path`                                 | Load a font file at runtime                                   |
+| `window`          | `window`, `action`, plus action fields | Resize, move, close, fullscreen, or window the surface        |
+| `exit`            | —                                      | Exit `riced`                                                  |
 
 Window actions:
 
-| Action       | Fields                    |
-| ------------ | ------------------------- |
+| Action       | Fields                       |
+| ------------ | ---------------------------- |
 | `resize`     | `width`, `height` (positive) |
-| `move`       | `x`, `y` (finite)         |
-| `close`      | —                         |
-| `fullscreen` | —                         |
-| `windowed`   | —                         |
+| `move`       | `x`, `y` (finite)            |
+| `close`      | —                            |
+| `fullscreen` | —                            |
+| `windowed`   | —                            |
 
 `window` must be the opaque `props.window` value. A table with a `type` key is
 treated as one task; any other table is treated as a list of tasks. Returning an
@@ -1101,14 +1127,14 @@ function app:subscription(active)
 end
 ```
 
-| Constructor       | Event delivered to `update`                                                                 |
-| ----------------- | ------------------------------------------------------------------------------------------- |
-| `iced.every(ms)`  | `{ type = "tick" }`; interval is a whole number from 1 to 86400000 ms                       |
-| `iced.frames()`   | `{ type = "frame" }` on every frame                                                         |
-| `iced.on_key()`   | key press and release events; see below                                                     |
-| `iced.on_key(true)` | key press events only                                                                     |
-| `iced.on_key(false)` | key release events only                                                                   |
-| `iced.on_mouse()` | mouse events; see below                                                                     |
+| Constructor          | Event delivered to `update`                                           |
+| -------------------- | --------------------------------------------------------------------- |
+| `iced.every(ms)`     | `{ type = "tick" }`; interval is a whole number from 1 to 86400000 ms |
+| `iced.frames()`      | `{ type = "frame" }` on every frame                                   |
+| `iced.on_key()`      | key press and release events; see below                               |
+| `iced.on_key(true)`  | key press events only                                                 |
+| `iced.on_key(false)` | key release events only                                               |
+| `iced.on_mouse()`    | mouse events; see below                                               |
 
 Key events:
 
@@ -1151,12 +1177,12 @@ iced.container(child, { width = self.width, padding = 16, transition = true })
 `transition = true` uses a smooth spring over every animatable prop present on
 the element. The table form accepts:
 
-| Key        | Values                                                                 |
-| ---------- | ---------------------------------------------------------------------- |
-| `props`    | array of animatable prop names                                         |
-| `duration` | whole milliseconds from 1 to 86400000                                  |
+| Key        | Values                                                                        |
+| ---------- | ----------------------------------------------------------------------------- |
+| `props`    | array of animatable prop names                                                |
+| `duration` | whole milliseconds from 1 to 86400000                                         |
 | `easing`   | `linear`, `ease`, `in`, `out`, `in_out`, `ease_in`, `ease_out`, `ease_in_out` |
-| `spring`   | `smooth` (default), `snappy`, `bouncy`, `instant`                      |
+| `spring`   | `smooth` (default), `snappy`, `bouncy`, `instant`                             |
 
 `easing` and `spring` are mutually exclusive. All selected props share one
 timing. `"fill"`, `"shrink"`, and fill portions are not interpolated. The
@@ -1204,6 +1230,11 @@ updated methods. A separately cached function or value (for example
 keeps the previous modules and UI and is not retried until the file changes
 again.
 
+Components are expanded through layout containers, `table` cells, and
+`pane_grid` panes. Elements returned by a `responsive` callback or a
+`list_view` `render` callback are rendered directly and are not mounted as
+components.
+
 ### Layer surfaces
 
 See [`iced.layer`](#icedlayercontent-settings). Layer views can be returned from
@@ -1239,13 +1270,13 @@ function app:view()
 end
 ```
 
-| Key                       | Values                        | Default |
-| ------------------------- | ----------------------------- | ------- |
-| `id`                      | nonempty string               | position-based |
-| `title`                   | string without NUL            | `"Riced"` |
-| `width`, `height`         | integer in 1..32768           | 960, 720 |
-| `client_side_decorations` | boolean                       | false   |
-| `content`                 | iced element                  | required |
+| Key                       | Values              | Default        |
+| ------------------------- | ------------------- | -------------- |
+| `id`                      | nonempty string     | position-based |
+| `title`                   | string without NUL  | `"Riced"`      |
+| `width`, `height`         | integer in 1..32768 | 960, 720       |
+| `client_side_decorations` | boolean             | false          |
+| `content`                 | iced element        | required       |
 
 Returning the window declares it and opens it; omitting it closes it. Window
 ids share a namespace with layer ids. Changing `width`, `height`, or
