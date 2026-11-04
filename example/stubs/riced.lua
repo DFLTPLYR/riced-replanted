@@ -6,8 +6,13 @@
 
 ---Logs values at info level as `[lua]: information` on stderr.
 ---Uses Lua tostring and separates multiple values with tabs, like print.
+---@class riced.Log
+---@overload fun(...: any)
+log = {}
+
+---Logs values like `log`, but expands table arguments recursively.
 ---@param ... any
-function log(...) end
+function log.table(...) end
 
 ---@class riced.Theme
 ---@field background string

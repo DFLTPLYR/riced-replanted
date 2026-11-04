@@ -8,23 +8,43 @@ const PARTS: &[(&str, &str)] = &[
     ("subscriptions", include_str!("subscriptions.lua")),
 ];
 
+fn write_log(
+    lua: &mlua::Lua,
+    values: impl IntoIterator<Item = mlua::Value>,
+    expand_tables: bool,
+) -> mlua::Result<()> {
+    let tostring: mlua::Function = lua.globals().get("tostring")?;
+    let parts = values
+        .into_iter()
+        .map(|value| match value {
+            mlua::Value::Table(table) if expand_tables => Ok(format!("{table:#?}")),
+            value => tostring
+                .call::<mlua::LuaString>(value)
+                .map(|text| text.to_string_lossy()),
+        })
+        .collect::<mlua::Result<Vec<_>>>()?;
+    riced_extension_sdk::log::info!(target: "lua", "{}", parts.join("\t"));
+    Ok(())
+}
+
 pub fn load(lua: &mlua::Lua) -> mlua::Result<()> {
-    lua.globals().set(
-        "log",
+    let log = lua.create_table()?;
+    let metatable = lua.create_table()?;
+    metatable.set(
+        "__call",
+        // `__call` receives the callable table as its first argument.
         lua.create_function(|lua, values: mlua::Variadic<mlua::Value>| {
-            let tostring: mlua::Function = lua.globals().get("tostring")?;
-            let parts = values
-                .into_iter()
-                .map(|value| {
-                    tostring
-                        .call::<mlua::LuaString>(value)
-                        .map(|text| text.to_string_lossy())
-                })
-                .collect::<mlua::Result<Vec<_>>>()?;
-            riced_extension_sdk::log::info!(target: "lua", "{}", parts.join("\t"));
-            Ok(())
+            write_log(lua, values.into_iter().skip(1), false)
         })?,
     )?;
+    log.set_metatable(Some(metatable))?;
+    log.set(
+        "table",
+        lua.create_function(|lua, values: mlua::Variadic<mlua::Value>| {
+            write_log(lua, values, true)
+        })?,
+    )?;
+    lua.globals().set("log", log)?;
     for (name, source) in PARTS {
         lua.load(*source)
             .set_name(format!("riced API: {name}"))
@@ -68,6 +88,16 @@ mod tests {
             .exec()
             .unwrap_err();
         assert!(error.to_string().contains("cannot format value"));
+    }
+
+    #[test]
+    fn log_remains_callable_and_formats_tables_on_request() {
+        let lua = mlua::Lua::new();
+        load(&lua).unwrap();
+        lua.load("log('called')").exec().unwrap();
+        lua.load("log.table({ name = 'test', nested = { 1, 2 } })")
+            .exec()
+            .unwrap();
     }
 
     #[test]

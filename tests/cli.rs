@@ -61,6 +61,44 @@ fn lua_log_uses_shared_stderr_logging_and_lua_tostring() {
 }
 
 #[test]
+fn lua_log_table_formats_nested_tables() {
+    let directory = std::path::PathBuf::from(format!(
+        "/tmp/opencode/riced-lua-log-table-{}",
+        std::process::id()
+    ));
+    let profile = directory.join("riced/test");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(
+        profile.join("shell.lua"),
+        r#"
+        log.table({
+            name = "test",
+            nested = { 1, 2 },
+            empty = {},
+        })
+        -- Stop before starting the compositor-dependent runtime.
+        error("logging test complete")
+    "#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env("XDG_CONFIG_HOME", &directory)
+        .env("XDG_RUNTIME_DIR", &directory)
+        .args(["-p", "test"])
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.starts_with(
+            "[lua]: {\n  empty = {},\n  name = \"test\",\n  nested = {\n    1,\n    2,\n  },\n}\n"
+        ),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn ipc_queues_command_with_arguments() {
     let runtime = format!("/tmp/opencode/riced-ipc-{}", std::process::id());
     let _ = std::fs::remove_dir_all(&runtime);

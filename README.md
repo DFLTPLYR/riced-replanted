@@ -130,6 +130,7 @@ Lua profiles can use `log(...)` instead of `print(...)`:
 ```lua
 log("called") -- [lua]: called
 log("settings", state.settings) -- values are tab-separated, like print
+log.table(state) -- tables expand recursively with sorted keys
 ```
 
 Lua logs use info level and the same terminal colors and `NO_COLOR` behavior.

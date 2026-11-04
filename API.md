@@ -89,11 +89,16 @@ Stretches: `ultra_condensed`, `extra_condensed`, `condensed`, `semi_condensed`,
 
 ### `log`
 
-`log(...)` is a global function available in profiles, modules, and callbacks.
+`log(...)` is a global callable available in profiles, modules, and callbacks.
 It writes an info-level message through the shared logger to stderr with the
 event label `[lua]`. Values use Lua `tostring` (including `__tostring`) and are
 separated by tabs, like `print`. It returns no values; `log()` emits an empty
 message. Errors from `tostring` propagate to the caller.
+
+`log.table(...)` behaves the same, but expands table arguments recursively
+instead of using `tostring`. Keys are sorted, sequences print one item per
+line, and cycles print as `table: 0x...`. Non-table values still use
+`tostring`:
 
 ```lua
 riced.ipc({
@@ -102,6 +107,9 @@ riced.ipc({
             error("usage: riced ipc settings")
         end
         log("called") -- [lua]: called
+        log.table(self) -- [lua]: {
+        --   settings = false,
+        -- }
         self.settings = not self.settings
     end,
 })
