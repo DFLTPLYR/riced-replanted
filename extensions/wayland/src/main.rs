@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use riced_extension_sdk::Plugin;
+use riced_extension_sdk::{Plugin, log};
 use serde_json::{Value, json};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop, event_created_child,
@@ -163,7 +163,7 @@ fn run(context: riced_extension_sdk::Context, requests: Arc<Mutex<Requests>>) {
     context.publish(last.clone());
     loop {
         if let Err(error) = connected(&context, &requests, &mut last) {
-            eprintln!("riced-wayland: {error}");
+            log::warn!(target: "wayland.connection", "{error}");
         }
         requests.lock().unwrap().clear();
         if let Some(object) = last.as_object_mut() {
@@ -202,6 +202,15 @@ fn connected(
             state.dirty = false;
         }
     }
+}
+
+const MAX_TEXT: usize = 1024;
+
+fn clamp(mut value: String, max: usize) -> String {
+    if let Some((index, _)) = value.char_indices().nth(max) {
+        value.truncate(index);
+    }
+    value
 }
 
 fn empty(connected: bool) -> Value {
@@ -476,9 +485,9 @@ impl Wayland {
                 json!({
                     "id": output.id.protocol_id(),
                     "name": output.display_name(),
-                    "description": output.description,
-                    "make": output.make,
-                    "model": output.model,
+                    "description": clamp(output.description.clone(), MAX_TEXT),
+                    "make": clamp(output.make.clone(), MAX_TEXT),
+                    "model": clamp(output.model.clone(), MAX_TEXT),
                     "x": output.x,
                     "y": output.y,
                     "width": output.width,
@@ -495,8 +504,8 @@ impl Wayland {
                 .map(|(id, toplevel)| {
                     json!({
                         "id": id,
-                        "title": toplevel.title,
-                        "app_id": toplevel.app_id,
+                        "title": clamp(toplevel.title.clone(), MAX_TEXT),
+                        "app_id": clamp(toplevel.app_id.clone(), MAX_TEXT),
                         "activated": toplevel.state.activated,
                         "maximized": toplevel.state.maximized,
                         "minimized": toplevel.state.minimized,
@@ -511,8 +520,8 @@ impl Wayland {
                 .map(|(id, toplevel)| {
                     json!({
                         "id": id,
-                        "title": toplevel.title,
-                        "app_id": toplevel.app_id,
+                        "title": clamp(toplevel.title.clone(), MAX_TEXT),
+                        "app_id": clamp(toplevel.app_id.clone(), MAX_TEXT),
                         "identifier": toplevel.identifier,
                         "outputs": [],
                     })
@@ -527,7 +536,7 @@ impl Wayland {
                 json!({
                     "id": id,
                     "protocol_id": workspace.protocol_id,
-                    "name": workspace.name,
+                    "name": clamp(workspace.name.clone(), MAX_TEXT),
                     "coordinates": workspace.coordinates,
                     "active": workspace.state & 1 != 0,
                     "urgent": workspace.state & 2 != 0,
@@ -559,19 +568,27 @@ impl Wayland {
         } else {
             None
         };
-        let focused_workspace = self
-            .workspaces
-            .iter()
-            .find(|(_, workspace)| workspace.state & 1 != 0)
-            .map(|(id, _)| id.clone());
-        let focused_output = focused_workspace
+        let focused_workspace = only(
+            self.workspaces
+                .iter()
+                .filter(|(_, workspace)| workspace.state & 1 != 0),
+        )
+        .map(|(id, _)| id.clone());
+        let focused_output = focused_toplevel
             .as_ref()
-            .and_then(|id| self.workspaces.get(id))
-            .and_then(|workspace| workspace.group.as_ref())
-            .and_then(|id| self.groups.get(id))
-            .and_then(|group| group.outputs.first())
+            .and_then(|id| self.wlr_toplevels.get(id))
+            .and_then(|toplevel| only(toplevel.outputs.iter()))
             .map(|output| self.output_name(output))
-            .or_else(|| self.outputs.values().next().map(Output::display_name));
+            .or_else(|| {
+                focused_workspace
+                    .as_ref()
+                    .and_then(|id| self.workspaces.get(id))
+                    .and_then(|workspace| workspace.group.as_ref())
+                    .and_then(|id| self.groups.get(id))
+                    .and_then(|group| only(group.outputs.iter()))
+                    .map(|output| self.output_name(output))
+            })
+            .or_else(|| only(self.outputs.values()).map(Output::display_name));
 
         json!({
             "connected": true,
@@ -580,17 +597,23 @@ impl Wayland {
                 "toplevel_control": has_wlr,
                 "workspaces": self.workspace_manager.is_some(),
             },
-            "outputs": outputs,
-            "toplevels": toplevels,
-            "workspaces": workspaces,
-            "workspace_groups": groups,
+            "outputs": riced_extension_sdk::bounded_array(outputs, riced_extension_sdk::protocol::MAX_LINE / 8),
+            "toplevels": riced_extension_sdk::bounded_array(toplevels, riced_extension_sdk::protocol::MAX_LINE / 8),
+            "workspaces": riced_extension_sdk::bounded_array(workspaces, riced_extension_sdk::protocol::MAX_LINE / 8),
+            "workspace_groups": riced_extension_sdk::bounded_array(groups, riced_extension_sdk::protocol::MAX_LINE / 8),
             "focused": {
                 "toplevel": focused_toplevel,
                 "workspace": focused_workspace,
-                "output": focused_output,
+                "output": focused_output.filter(|name| name.len() <= MAX_TEXT),
             },
         })
     }
+}
+
+fn only<T>(items: impl IntoIterator<Item = T>) -> Option<T> {
+    let mut items = items.into_iter();
+    let first = items.next()?;
+    items.next().is_none().then_some(first)
 }
 
 fn workspace_capabilities(bits: u32) -> Vec<&'static str> {
@@ -985,6 +1008,13 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for Wayland {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_requires_an_unambiguous_candidate() {
+        assert_eq!(only(Vec::<u32>::new()), None);
+        assert_eq!(only([1]), Some(1));
+        assert_eq!(only([1, 2]), None);
+    }
 
     #[test]
     fn decodes_toplevel_states() {
