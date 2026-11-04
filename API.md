@@ -1198,8 +1198,14 @@ transition = { spring = "bouncy" }
 
 ### Custom widgets
 
-`iced.define(name, factory)` creates a reusable constructor. The factory runs
-once and must return a table with a `view` method (or a `render` function):
+`iced.define(name, factory)` creates a reusable constructor. Accessing
+`iced.name` while it is undefined searches the profile for a Lua file named
+`name.lua` in any directory (the shell file is skipped), loads it on demand, and
+returns the constructor. No top-level `require` and no fixed widget directory
+are needed. Two files with the same name are an error, and the file basename
+must match the widget name (`workspaces.lua` defines `iced.workspaces`). The
+factory runs when that file first loads and must return a table with a `view`
+method (or a `render` function):
 
 ```lua
 iced.define("counted", function()
@@ -1215,10 +1221,13 @@ end)
 iced.counted({ count = self.count })
 ```
 
-The name must be a valid identifier and must not already exist on `iced`. The
-constructor takes only props. Events still go through `app:update`; there is no
-per-widget update callback. The factory is not reloaded from a file — use a
-component module when you need file-watch reloads.
+The name must be a valid identifier and must not already exist on `iced`.
+Defining an existing custom widget again replaces it, so edits reload. If a
+reload fails, the previous definition is restored and the error is logged; the
+shell keeps running. The constructor takes only props. Events still go through
+`app:update`; there is no per-widget update callback. Build the element inside
+`view` when it reads live state or plugin store values. Use a component module
+for mounted widgets with lifecycle hooks.
 
 ### Components
 

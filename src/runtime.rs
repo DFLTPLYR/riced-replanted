@@ -299,6 +299,91 @@ fn checked<T>(result: mlua::Result<T>) -> T {
     })
 }
 
+// `iced.<name>` lazily loads the first `<name>.lua` under the profile. Widgets can
+// live anywhere; the shell file is never treated as one. A missing name stays nil.
+fn install_widget_loader(lua: &Lua, profile: &Path, shell: &Path) -> mlua::Result<()> {
+    let iced: Table = lua.globals().get("iced")?;
+    let root = profile.to_owned();
+    let shell = shell.to_owned();
+    let misses = std::sync::Arc::new(std::sync::Mutex::new(HashSet::new()));
+    let loader = lua.create_function(move |lua, (_table, name): (Table, String)| {
+        if !widget_name(&name) {
+            return Ok(Value::Nil);
+        }
+        if misses.lock().unwrap().contains(&name) {
+            return Ok(Value::Nil);
+        }
+        let mut found = Vec::new();
+        find_widget(&root, &shell, &name, &mut found);
+        match found.len() {
+            0 => {
+                misses.lock().unwrap().insert(name);
+                Ok(Value::Nil)
+            }
+            1 => {
+                let path = &found[0];
+                let module = module_name(&root, path);
+                let require: Function = lua.globals().get("require")?;
+                let _: Value = require.call(module.as_str())?;
+                let iced: Table = lua.globals().get("iced")?;
+                let value: Value = iced.raw_get(name.as_str())?;
+                if value.is_nil() {
+                    return Err(mlua::Error::runtime(format!(
+                        "{} did not define iced.{name}",
+                        path.display()
+                    )));
+                }
+                Ok(value)
+            }
+            _ => Err(mlua::Error::runtime(format!(
+                "multiple files define iced.{name}: {}",
+                found
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
+    })?;
+    let meta = lua.create_table()?;
+    meta.set("__index", loader)?;
+    iced.set_metatable(Some(meta))?;
+    Ok(())
+}
+
+fn widget_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn find_widget(directory: &Path, shell: &Path, name: &str, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            find_widget(&path, shell, name, found);
+        } else if path != shell
+            && path.extension().is_some_and(|extension| extension == "lua")
+            && path.file_stem().and_then(|stem| stem.to_str()) == Some(name)
+        {
+            found.push(path);
+        }
+    }
+}
+
+fn module_name(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .with_extension("")
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 #[cfg(test)]
 pub fn load(source: &str, path: &Path) -> mlua::Result<App> {
     load_with_plugins(
@@ -336,6 +421,9 @@ pub fn load_with_plugins(
     }
     modules::Modules::install(&lua)?;
     plugins.borrow_mut().install(&lua)?;
+    if let Some(parent) = path.parent() {
+        install_widget_loader(&lua, parent, path)?;
+    }
     let definition: Table = lua.load(source).set_name(path.to_string_lossy()).eval()?;
     if !definition.get::<Option<bool>>("started")?.unwrap_or(false) {
         return Err(mlua::Error::runtime(
@@ -1428,6 +1516,8 @@ impl App {
         let pending_count = self.pending.len();
         let handlers: Table = self.lua.named_registry_value("riced.ipc_handlers")?;
         let previous_handlers = copy_table(&self.lua, &handlers)?;
+        let widgets: Table = self.lua.globals().get("iced")?;
+        let previous_widgets = copy_table(&self.lua, &widgets)?;
         let mut affected = Vec::new();
         {
             let windows_of = self.windows_of.borrow();
@@ -1479,6 +1569,11 @@ impl App {
             for pair in previous_handlers.pairs::<Value, Value>() {
                 let (name, handler) = pair?;
                 handlers.raw_set(name, handler)?;
+            }
+            widgets.clear()?;
+            for pair in previous_widgets.clone().pairs::<Value, Value>() {
+                let (name, widget) = pair?;
+                widgets.raw_set(name, widget)?;
             }
             self.layers = previous_layers;
             self.toplevels = previous_toplevels;
@@ -1982,6 +2077,133 @@ mod tests {
         )
         .unwrap();
         app.view(window::Id::unique()).unwrap();
+    }
+
+    #[test]
+    fn widgets_load_from_any_path_without_a_require() {
+        let profile = Profile::new(&[
+            ("shell.lua", ""),
+            (
+                "widgets/deep/greeting.lua",
+                r#"iced.define("greeting", function()
+                    local widget = {}
+                    function widget:view() seen = "loaded"; return iced.text("hi") end
+                    return widget
+                end)"#,
+            ),
+        ]);
+        let app = load(
+            r#"
+            return riced.daemon({}, 'test', function() end, function()
+                return iced.greeting()
+            end):run()
+        "#,
+            &profile.shell(),
+        )
+        .unwrap();
+        app.view(window::Id::unique()).unwrap();
+        assert_eq!(app.lua.globals().get::<String>("seen").unwrap(), "loaded");
+    }
+
+    #[test]
+    fn duplicate_widget_names_are_rejected() {
+        let profile = Profile::new(&[
+            ("shell.lua", ""),
+            (
+                "left/greeting.lua",
+                r#"iced.define("greeting", function()
+                    local widget = {}
+                    function widget:view() seen = "left"; return iced.text("hi") end
+                    return widget
+                end)"#,
+            ),
+            (
+                "right/greeting.lua",
+                r#"iced.define("greeting", function()
+                    local widget = {}
+                    function widget:view() seen = "right"; return iced.text("hi") end
+                    return widget
+                end)"#,
+            ),
+        ]);
+        let app = load(
+            r#"
+            return riced.daemon({}, 'test', function() end, function()
+                return iced.greeting()
+            end):run()
+        "#,
+            &profile.shell(),
+        )
+        .unwrap();
+        let error = match app.view(window::Id::unique()) {
+            Ok(_) => panic!("duplicate widget names must fail"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("multiple files define iced.greeting"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn widget_redefinition_replaces_the_constructor() {
+        let app = load(
+            r#"
+            iced.define("greeting", function()
+                local widget = {}
+                function widget:view() seen = "first"; return iced.text("one") end
+                return widget
+            end)
+            iced.define("greeting", function()
+                local widget = {}
+                function widget:view() seen = "second"; return iced.text("two") end
+                return widget
+            end)
+            return riced.daemon({}, 'test', function() end, function()
+                return iced.greeting()
+            end):run()
+        "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        app.view(window::Id::unique()).unwrap();
+        assert_eq!(app.lua.globals().get::<String>("seen").unwrap(), "second");
+    }
+
+    #[test]
+    fn rejected_widget_reload_keeps_the_previous_definition() {
+        let profile = Profile::new(&[
+            ("shell.lua", ""),
+            (
+                "widgets/greeting.lua",
+                r#"iced.define("greeting", function()
+                    local widget = {}
+                    function widget:view() return iced.text("ok") end
+                    return widget
+                end)"#,
+            ),
+        ]);
+        let mut app = load(
+            r#"
+            return riced.daemon({}, 'test', function() end, function()
+                return iced.greeting()
+            end):run()
+        "#,
+            &profile.shell(),
+        )
+        .unwrap();
+        let id = window::Id::unique();
+        app.view(id).unwrap();
+        profile.write(
+            "widgets/greeting.lua",
+            r#"iced.define("greeting", function()
+                local widget = {}
+                function widget:view() return iced.text("bad", { nope = true }) end
+                return widget
+            end)"#,
+        );
+        assert!(app.reload_modules().is_err());
+        app.view(id).unwrap();
     }
 
     #[test]

@@ -69,15 +69,18 @@ function iced.window(settings)
 end
 
 -- Custom widgets: define a named constructor once, then use iced.name(props).
--- The factory returns a table with a view (or render) method, or an element.
+-- Files under components/widgets/ are loaded automatically; redefining a name
+-- replaces the previous constructor so edits reload.
+local defined = {}
 function iced.define(name, factory)
 	assert(type(name) == "string" and name:match("^[%a_][%w_]*$"), "widget name must be a valid identifier")
 	assert(type(factory) == "function", "widget factory must be a function")
-	assert(iced[name] == nil, "widget already exists: " .. name)
+	assert(rawget(iced, name) == nil or defined[name], "widget already exists: " .. name)
 	local widget = factory()
 	assert(type(widget) == "table", "widget factory must return a table")
 	local view = widget.view or widget.render
 	assert(type(view) == "function", "custom widget needs a view or render method")
+	defined[name] = true
 	iced[name] = function(props)
 		assert(props == nil or type(props) == "table", "widget props must be a table")
 		return view(widget, props or {})
