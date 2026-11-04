@@ -592,31 +592,39 @@ impl App {
         }
     }
 
-    fn poll_plugins(&mut self) -> mlua::Result<bool> {
+    fn poll_plugins(&mut self) -> mlua::Result<(bool, Task<Message>)> {
         let (changed, events) = self.plugins.borrow_mut().poll(&self.lua)?;
-        let mut events = events.into_iter();
+        let mut tasks = Vec::new();
         let mut fired = false;
-        while let Some(plugins::Update::Event(name, event)) = events.next() {
+        for plugins::Update::Event(name, event) in events {
             fired = true;
             let payload = self.lua.create_table()?;
             payload.set("type", "plugin")?;
             payload.set("plugin", name)?;
             payload.set("event", self.lua.to_value(&event)?)?;
-            self.update.call::<()>((self.state.clone(), payload))?;
+            let value = self.update.call((self.state.clone(), payload))?;
+            tasks.push(self.tasks(value)?);
         }
-        Ok(changed || fired)
+        Ok((changed || fired, Task::batch(tasks)))
     }
 
     fn poll_ipc(&mut self) -> mlua::Result<Task<Message>> {
         let mut tasks = Vec::new();
         let mut handled = false;
-        while let Some(command) = crate::ipc::take() {
+        let profile = self
+            .path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+            .to_owned();
+        while let Some(command) = crate::ipc::take(&profile) {
             handled = true;
             tasks.push(self.run_ipc(&command.command, &command.args)?);
         }
         if handled {
             if let Err(error) = self.reconcile_layers() {
-                eprintln!("riced: IPC changed surfaces but the view is invalid: {error}");
+                log::error!(target: "ipc.surface", "IPC changed surfaces but the view is invalid: {error}");
             } else {
                 tasks.push(self.surface_tasks());
             }

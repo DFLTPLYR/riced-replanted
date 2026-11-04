@@ -1,6 +1,7 @@
 use std::{
     env, fs, io,
     os::unix::fs::PermissionsExt,
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process,
     sync::atomic::{AtomicU64, Ordering},
@@ -15,23 +16,53 @@ pub struct Command {
     pub args: Vec<String>,
 }
 
-fn queue_dir() -> PathBuf {
+fn runtime_dir() -> io::Result<PathBuf> {
     env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(env::temp_dir)
-        .join("riced")
-        .join("ipc")
+        .map(|path| path.join("riced"))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR is not set"))
 }
 
-pub fn queue(command: &str, args: &[String]) -> io::Result<()> {
-    let dir = queue_dir();
+fn destination(root: &Path, profile: Option<&str>) -> io::Result<PathBuf> {
+    let profile = match profile {
+        Some(profile) => {
+            crate::profile_path(Path::new(""), std::ffi::OsStr::new(profile))
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            UnixStream::connect(root.join(format!("{profile}.sock")))?;
+            profile.to_owned()
+        }
+        None => {
+            let mut profiles = Vec::new();
+            for entry in fs::read_dir(root)? {
+                let path = entry?.path();
+                if path.extension().is_some_and(|ext| ext == "sock")
+                    && UnixStream::connect(&path).is_ok()
+                    && let Some(name) = path.file_stem().and_then(|name| name.to_str())
+                {
+                    profiles.push(name.to_owned());
+                }
+            }
+            if profiles.len() != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "expected one running profile; use riced ipc -p <profile> <command> [args...]",
+                ));
+            }
+            profiles.remove(0)
+        }
+    };
+    Ok(root.join("ipc").join(profile))
+}
+
+pub fn queue(profile: Option<&str>, command: &str, args: &[String]) -> io::Result<()> {
+    let dir = destination(&runtime_dir()?, profile)?;
     fs::create_dir_all(&dir)?;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
     queue_at(&dir, command, args)
 }
 
-pub fn take() -> Option<Command> {
-    take_from(&queue_dir())
+pub fn take(profile: &str) -> Option<Command> {
+    take_from(&runtime_dir().ok()?.join("ipc").join(profile))
 }
 
 fn queue_at(dir: &Path, command: &str, args: &[String]) -> io::Result<()> {

@@ -78,7 +78,7 @@ fn ipc_queues_command_with_arguments() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let entry = std::fs::read_dir(format!("{runtime}/riced/ipc"))
+    let entry = std::fs::read_dir(format!("{runtime}/riced/ipc/test"))
         .unwrap()
         .next()
         .unwrap()
@@ -89,6 +89,47 @@ fn ipc_queues_command_with_arguments() {
     assert_eq!(
         value["args"],
         serde_json::json!(["--anchor", "top bar", ""])
+    );
+    let _ = std::fs::remove_dir_all(&runtime);
+}
+
+#[test]
+fn ipc_targets_one_of_several_running_profiles() {
+    let runtime = format!("/tmp/opencode/riced-ipc-profiles-{}", std::process::id());
+    let _ = std::fs::remove_dir_all(&runtime);
+    std::fs::create_dir_all(format!("{runtime}/riced")).unwrap();
+    let _one = std::os::unix::net::UnixListener::bind(format!("{runtime}/riced/one.sock")).unwrap();
+    let _two = std::os::unix::net::UnixListener::bind(format!("{runtime}/riced/two.sock")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .args(["ipc", "-p", "two", "settings", "x"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let entry = std::fs::read_dir(format!("{runtime}/riced/ipc/two"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap();
+    assert_eq!(value["command"], "settings");
+
+    let ambiguous = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .args(["ipc", "settings"])
+        .output()
+        .unwrap();
+    assert!(!ambiguous.status.success());
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("expected one running profile"),
+        "{}",
+        String::from_utf8_lossy(&ambiguous.stderr)
     );
     let _ = std::fs::remove_dir_all(&runtime);
 }

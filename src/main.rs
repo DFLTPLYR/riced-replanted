@@ -29,13 +29,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let flag = args.next();
     if flag.as_deref() == Some(std::ffi::OsStr::new("--help")) {
         println!(
-            "Usage: riced -p <profile>\n       riced ipc <command> [args...]\nLoads $XDG_CONFIG_HOME/riced/<profile>/shell.lua (or ~/.config/riced/...).\nSends an IPC command to the running daemon."
+            "Usage: riced -p <profile>\n       riced ipc [-p <profile>] <command> [args...]\nLoads $XDG_CONFIG_HOME/riced/<profile>/shell.lua (or ~/.config/riced/...).\nIPC selects the only running profile unless -p is given."
         );
         return Ok(());
     }
     if flag.as_deref() == Some(std::ffi::OsStr::new("ipc")) {
-        let command = args
-            .next()
+        let mut command = args.next();
+        let profile = if matches!(
+            command.as_deref().and_then(|s| s.to_str()),
+            Some("-p" | "--profile")
+        ) {
+            let profile = args
+                .next()
+                .ok_or("missing profile after -p")?
+                .into_string()
+                .map_err(|_| "IPC profile must be valid UTF-8")?;
+            command = args.next();
+            Some(profile)
+        } else {
+            None
+        };
+        let command = command
             .ok_or("usage: riced ipc <command> [args...]")?
             .into_string()
             .map_err(|_| "IPC command must be valid UTF-8")?;
@@ -48,7 +62,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .map_err(|_| "IPC arguments must be valid UTF-8")
             })
             .collect::<Result<Vec<_>, _>>()?;
-        ipc::queue(&command, &args)?;
+        ipc::queue(profile.as_deref(), &command, &args)?;
         return Ok(());
     }
     if !matches!(
