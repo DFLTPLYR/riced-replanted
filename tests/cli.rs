@@ -9,6 +9,8 @@ fn missing_profile_reports_shell_path_and_fails() {
         .output()
         .unwrap();
     assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("[startup.error]: "));
     assert!(
         String::from_utf8_lossy(&output.stderr)
             .contains(&format!("cannot read {config}/riced/test/shell.lua"))
@@ -16,9 +18,55 @@ fn missing_profile_reports_shell_path_and_fails() {
 }
 
 #[test]
+fn lua_log_uses_shared_stderr_logging_and_lua_tostring() {
+    let directory = std::path::PathBuf::from(format!(
+        "/tmp/opencode/riced-lua-log-{}",
+        std::process::id()
+    ));
+    let profile = directory.join("riced/test");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(
+        profile.join("shell.lua"),
+        r#"
+        local settings = function(self, args)
+            assert(#args == 0)
+            log("called", 42, true, nil, setmetatable({}, {
+                __tostring = function() return "custom" end
+            }))
+            assert(select('#', log()) == 0)
+        end
+        riced.ipc({settings = settings})
+        settings({}, {})
+        -- Stop before starting the compositor-dependent runtime.
+        error("logging test complete")
+    "#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env("XDG_CONFIG_HOME", &directory)
+        .env("XDG_RUNTIME_DIR", &directory)
+        .args(["-p", "test"])
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr.starts_with("[lua]: called\t42\ttrue\tnil\tcustom\n[lua]: \n"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("logging test complete"), "{stderr}");
+    assert!(!stderr.contains('\x1b'));
+}
+
+#[test]
 fn ipc_queues_command_with_arguments() {
     let runtime = format!("/tmp/opencode/riced-ipc-{}", std::process::id());
     let _ = std::fs::remove_dir_all(&runtime);
+    std::fs::create_dir_all(format!("{runtime}/riced")).unwrap();
+    let _listener =
+        std::os::unix::net::UnixListener::bind(format!("{runtime}/riced/test.sock")).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_riced"))
         .env("XDG_RUNTIME_DIR", &runtime)
         .args(["ipc", "settings", "--anchor", "top bar", ""])

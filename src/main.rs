@@ -79,10 +79,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn main() -> ExitCode {
+    let _ = riced_extension_sdk::logging::init();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("riced: {error}");
+            riced_extension_sdk::log::error!(target: "startup.error", "{error}");
             ExitCode::FAILURE
         }
     }

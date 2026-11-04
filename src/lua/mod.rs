@@ -9,6 +9,22 @@ const PARTS: &[(&str, &str)] = &[
 ];
 
 pub fn load(lua: &mlua::Lua) -> mlua::Result<()> {
+    lua.globals().set(
+        "log",
+        lua.create_function(|lua, values: mlua::Variadic<mlua::Value>| {
+            let tostring: mlua::Function = lua.globals().get("tostring")?;
+            let parts = values
+                .into_iter()
+                .map(|value| {
+                    tostring
+                        .call::<mlua::LuaString>(value)
+                        .map(|text| text.to_string_lossy())
+                })
+                .collect::<mlua::Result<Vec<_>>>()?;
+            riced_extension_sdk::log::info!(target: "lua", "{}", parts.join("\t"));
+            Ok(())
+        })?,
+    )?;
     for (name, source) in PARTS {
         lua.load(*source)
             .set_name(format!("riced API: {name}"))
@@ -38,6 +54,21 @@ pub fn load(lua: &mlua::Lua) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_propagates_tostring_errors() {
+        let lua = mlua::Lua::new();
+        load(&lua).unwrap();
+        let error = lua
+            .load(
+                r#"log(setmetatable({}, {
+            __tostring = function() error('cannot format value') end
+        }))"#,
+            )
+            .exec()
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot format value"));
+    }
 
     #[test]
     fn opacity_sets_the_alpha_channel() {
