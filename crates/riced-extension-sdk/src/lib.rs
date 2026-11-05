@@ -59,6 +59,8 @@ impl Plugin {
         }
     }
 
+    /// Advertises store keys as protocol metadata. The host does not validate
+    /// snapshots or restrict subscriptions against this list.
     pub fn state<I, S>(mut self, keys: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -68,6 +70,8 @@ impl Plugin {
         self
     }
 
+    /// Registers a callable method. `readonly` is descriptive metadata, not an
+    /// access restriction; trusted Lua profiles can call every registered method.
     pub fn method<F>(mut self, name: &str, readonly: bool, handler: F) -> Self
     where
         F: Fn(&Value) -> Result<Value, String> + Send + Sync + 'static,

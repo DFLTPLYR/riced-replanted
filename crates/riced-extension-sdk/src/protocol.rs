@@ -51,6 +51,7 @@ mod tests {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct MethodSpec {
+    /// Descriptive metadata; the host does not enforce read-only execution.
     #[serde(default)]
     pub readonly: bool,
 }
@@ -62,6 +63,7 @@ pub enum ToHost {
     Register {
         v: u32,
         name: String,
+        /// Advertised store keys; not a host-enforced schema or subscription filter.
         #[serde(default)]
         state: Vec<String>,
         #[serde(default)]
