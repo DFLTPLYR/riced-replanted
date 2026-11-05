@@ -13,6 +13,7 @@ use serde_json::Value;
 
 pub mod logging;
 pub mod protocol;
+pub mod write_atomic;
 
 pub use log;
 pub use protocol::{MethodSpec, ToHost, ToPlugin, VERSION};

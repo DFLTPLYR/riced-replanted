@@ -2,16 +2,14 @@
 
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use mlua::{
     AnyUserData, Function, Lua, LuaSerdeExt, Table, UserData, UserDataFields, UserDataMethods,
     Value,
 };
+use riced_extension_sdk::write_atomic::write_atomic;
 use serde_json::Value as Json;
 
 use crate::runtime::keys;
@@ -144,65 +142,6 @@ impl File {
     }
 }
 
-static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-
-fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
-    let resolved;
-    let path = match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            resolved = fs::canonicalize(path)?;
-            resolved.as_path()
-        }
-        Ok(_) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path,
-        Err(error) => return Err(error),
-    };
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("data");
-    let mode = match fs::metadata(path) {
-        Ok(metadata) => Some(metadata.permissions()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error),
-    };
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = path.with_file_name(format!(
-        ".{name}.tmp-{}-{suffix}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    // create_new refuses to follow a symlink planted at the temporary path.
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    let result = (|| {
-        file.write_all(contents.as_bytes())?;
-        if let Some(mode) = mode {
-            file.set_permissions(mode)?;
-        }
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
 /// Installs `riced.file` onto the `riced` table. Relative paths are resolved
 /// against the profile directory.
 pub fn install(lua: &Lua, base: &Path) -> mlua::Result<()> {
@@ -257,7 +196,7 @@ pub fn install(lua: &Lua, base: &Path) -> mlua::Result<()> {
                 callback.call::<()>((userdata.clone(), error))?;
             }
         } else if let Some(callback) = on_loaded {
-            let data = userdata.borrow::<File>().unwrap().data.clone();
+            let data = userdata.borrow::<File>()?.data.clone();
             callback.call::<()>((userdata.clone(), data))?;
         }
         Ok(userdata)
@@ -270,30 +209,27 @@ pub fn install(lua: &Lua, base: &Path) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn error_callback_can_repair_file() {
-        let (lua, dir) = setup("repair");
-        fs::write(dir.join("data.json"), "invalid").unwrap();
-        lua.load("riced.file({path='data.json', onError=function(file) assert(file:write({fixed=true})) end})")
-            .exec().unwrap();
-        let saved: Json =
-            serde_json::from_str(&fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
-        assert_eq!(saved["fixed"], true);
-    }
-
-    fn temp(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("riced-file-{}-{name}", std::process::id()))
-    }
+    use std::path::PathBuf;
 
     fn setup(name: &str) -> (Lua, PathBuf) {
         let lua = Lua::new();
         crate::lua::load(&lua).unwrap();
-        let dir = temp(name);
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let dir = std::env::temp_dir().join(format!("riced-file-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
         install(&lua, &dir).unwrap();
         (lua, dir)
+    }
+
+    #[test]
+    fn error_callback_can_repair_file() {
+        let (lua, dir) = setup("repair");
+        std::fs::write(dir.join("data.json"), "invalid").unwrap();
+        lua.load("riced.file({path='data.json', onError=function(file) assert(file:write({fixed=true})) end})")
+            .exec().unwrap();
+        let saved: Json =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
+        assert_eq!(saved["fixed"], true);
     }
 
     #[test]
@@ -319,7 +255,7 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(
-            fs::read_to_string(dir.join("data.json")).unwrap(),
+            std::fs::read_to_string(dir.join("data.json")).unwrap(),
             "{\n  \"value\": 2\n}"
         );
         assert_eq!(result.borrow::<File>().unwrap().error, None);
@@ -328,7 +264,7 @@ mod tests {
     #[test]
     fn loads_toml_and_creates_missing_files() {
         let (lua, dir) = setup("toml");
-        fs::write(dir.join("data.toml"), "value = 3\n").unwrap();
+        std::fs::write(dir.join("data.toml"), "value = 3\n").unwrap();
         let result: AnyUserData = lua
             .load(
                 r#"
@@ -350,7 +286,7 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(
-            fs::read_to_string(dir.join("data.toml")).unwrap(),
+            std::fs::read_to_string(dir.join("data.toml")).unwrap(),
             "value = 4\n"
         );
         assert_eq!(result.borrow::<File>().unwrap().error, None);
@@ -375,7 +311,7 @@ mod tests {
             .unwrap();
         assert!(missing.borrow::<File>().unwrap().error.is_none());
         assert_eq!(
-            fs::read_to_string(dir.join("nested/missing.json")).unwrap(),
+            std::fs::read_to_string(dir.join("nested/missing.json")).unwrap(),
             "{}"
         );
     }
@@ -386,15 +322,15 @@ mod tests {
         use std::os::unix::fs::{PermissionsExt, symlink};
         let (_, dir) = setup("symlink");
         let victim = dir.join("victim");
-        fs::write(&victim, "untouched").unwrap();
+        std::fs::write(&victim, "untouched").unwrap();
         let temporary = dir.join(format!(".data.json.tmp-{}", std::process::id()));
         symlink(&victim, &temporary).unwrap();
         let path = dir.join("data.json");
         write_atomic(&path, "private").unwrap();
-        assert_eq!(fs::read_to_string(victim).unwrap(), "untouched");
-        assert_eq!(fs::read_to_string(&path).unwrap(), "private");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "private");
         assert_eq!(
-            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
     }
@@ -406,13 +342,13 @@ mod tests {
 
         let (lua, dir) = setup("mode");
         let path = dir.join("data.json");
-        fs::write(&path, "{}").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         lua.load(r#"riced.file({path="data.json"}):write({value=1})"#)
             .exec()
             .unwrap();
         assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
     }
@@ -422,32 +358,32 @@ mod tests {
         use std::os::unix::fs::{PermissionsExt, symlink};
         let (_, dir) = setup("destination-symlink");
         let target = dir.join("actual.json");
-        fs::write(&target, "old").unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
         symlink("actual.json", dir.join("relative.json")).unwrap();
         let link = dir.join("link.json");
         symlink(dir.join("relative.json"), &link).unwrap();
         write_atomic(&link, "new").unwrap();
-        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
         assert!(
-            fs::symlink_metadata(&link)
+            std::fs::symlink_metadata(&link)
                 .unwrap()
                 .file_type()
                 .is_symlink()
         );
         assert_eq!(
-            fs::read_link(dir.join("relative.json")).unwrap(),
+            std::fs::read_link(dir.join("relative.json")).unwrap(),
             Path::new("actual.json")
         );
         assert_eq!(
-            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o640
         );
 
-        fs::remove_file(&target).unwrap();
+        std::fs::remove_file(&target).unwrap();
         assert!(write_atomic(&link, "lost").is_err());
         assert!(
-            fs::symlink_metadata(&link)
+            std::fs::symlink_metadata(&link)
                 .unwrap()
                 .file_type()
                 .is_symlink()

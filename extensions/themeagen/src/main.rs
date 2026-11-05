@@ -6,24 +6,19 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    env, fs,
-    io::{self, Write},
+    env, fs, io,
     path::{Path, PathBuf},
     process::Command,
-    sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use material_colors::{color::Argb, dynamic_color::Variant, scheme::Scheme, theme::ThemeBuilder};
+use riced_extension_sdk::write_atomic::write_atomic;
 use riced_extension_sdk::{Context, Plugin, log};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
-
-static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 const CORE: &[&str] = &[
     "primary",
@@ -887,60 +882,6 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
-    let resolved;
-    let path = match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            resolved = fs::canonicalize(path)?;
-            resolved.as_path()
-        }
-        Ok(_) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => path,
-        Err(error) => return Err(error),
-    };
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("theme");
-    let mode = fs::metadata(path)
-        .ok()
-        .map(|metadata| metadata.permissions());
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = path.with_file_name(format!(
-        ".{name}.tmp-{}-{suffix}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    let result = (|| {
-        file.write_all(contents.as_bytes())?;
-        if let Some(mode) = mode {
-            file.set_permissions(mode)?;
-        }
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
 fn config_path() -> Result<PathBuf, String> {
     if let Some(path) = env::var_os("RICED_THEMEAGEN_CONFIG") {
         return Ok(PathBuf::from(path));
@@ -996,6 +937,9 @@ fn load_from(path: &Path) -> Result<Option<Persisted>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
     struct TempDir(PathBuf);
 
