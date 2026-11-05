@@ -7,12 +7,13 @@ use crate::runtime::Message;
 
 use super::enums::{horizontal, vertical};
 use super::style::style_patch;
-use super::{Ctx, Layout, children, element, max_pixels};
+use super::{Ctx, Layout, Transition, children, element, max_pixels};
 
 pub(super) fn container(
     node: &Table,
     ctx: &Ctx,
     layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let padding = layout.padding;
     let content = element(node.get::<Table>("content")?, ctx)?;
@@ -40,7 +41,7 @@ pub(super) fn container(
     }
     if let Some(style) = node.get::<Option<Table>>("style")? {
         crate::runtime::keys(&style, &["background", "text_color", "border", "shadow"])?;
-        let patch = style_patch(&style, None)?;
+        let patch = style_patch(&style, None, transition)?;
         container = container.style(move |_theme| widget::container::Style {
             background: patch.background.map(Background::Color),
             text_color: patch.text_color,
@@ -56,6 +57,7 @@ pub(super) fn button(
     node: &Table,
     ctx: &Ctx,
     layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let content = match node.get::<Value>("content")? {
         Value::String(s) => widget::text(s.to_str()?.to_owned()).into(),
@@ -94,10 +96,26 @@ pub(super) fn button(
                 "disabled",
             ],
         )?;
-        let active = style_patch(&style, style.get::<Option<Table>>("active")?.as_ref())?;
-        let hovered = style_patch(&style, style.get::<Option<Table>>("hovered")?.as_ref())?;
-        let pressed = style_patch(&style, style.get::<Option<Table>>("pressed")?.as_ref())?;
-        let disabled = style_patch(&style, style.get::<Option<Table>>("disabled")?.as_ref())?;
+        let active = style_patch(
+            &style,
+            style.get::<Option<Table>>("active")?.as_ref(),
+            transition,
+        )?;
+        let hovered = style_patch(
+            &style,
+            style.get::<Option<Table>>("hovered")?.as_ref(),
+            transition,
+        )?;
+        let pressed = style_patch(
+            &style,
+            style.get::<Option<Table>>("pressed")?.as_ref(),
+            transition,
+        )?;
+        let disabled = style_patch(
+            &style,
+            style.get::<Option<Table>>("disabled")?.as_ref(),
+            transition,
+        )?;
         button = button.style(move |theme, status| {
             let patch = match status {
                 widget::button::Status::Active => &active,

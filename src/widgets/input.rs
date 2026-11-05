@@ -6,10 +6,14 @@ use crate::runtime::{Message, WidgetEvent};
 
 use super::enums::{font_value, horizontal};
 use super::style::{style_patch, validate};
-use super::{Ctx, Layout, element, number};
+use super::{Ctx, Layout, Transition, element, number};
 
-fn checkbox_patch(style: &Table, key: &str) -> mlua::Result<super::style::StylePatch> {
-    style_patch(style, style.get::<Option<Table>>(key)?.as_ref())
+fn checkbox_patch(
+    style: &Table,
+    key: &str,
+    transition: Option<&Transition>,
+) -> mlua::Result<super::style::StylePatch> {
+    style_patch(style, style.get::<Option<Table>>(key)?.as_ref(), transition)
 }
 
 fn paint_checkbox(style: &mut widget::checkbox::Style, patch: &super::style::StylePatch) {
@@ -145,6 +149,7 @@ pub(super) fn checkbox(
     node: &Table,
     ctx: &Ctx,
     layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let mut checkbox = widget::Checkbox::new(node.get::<Option<bool>>("value")?.unwrap_or(false));
     if let Some(width) = layout.width {
@@ -164,9 +169,9 @@ pub(super) fn checkbox(
     if let Some(style) = node.get::<Option<Table>>("style")? {
         const FIELDS: &[&str] = &["background", "icon_color", "border", "text_color"];
         validate(&style, FIELDS, &["active", "hovered", "disabled"])?;
-        let active = checkbox_patch(&style, "active")?;
-        let hovered = checkbox_patch(&style, "hovered")?;
-        let disabled = checkbox_patch(&style, "disabled")?;
+        let active = checkbox_patch(&style, "active", transition)?;
+        let hovered = checkbox_patch(&style, "hovered", transition)?;
+        let disabled = checkbox_patch(&style, "disabled", transition)?;
         checkbox = checkbox.style(move |theme, status| {
             let mut out = widget::checkbox::primary(theme, status);
             let patch = match status {
@@ -197,6 +202,7 @@ pub(super) fn radio(
     node: &Table,
     ctx: &Ctx,
     layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let value = node.get::<Option<u32>>("value")?.unwrap_or(0) as usize;
     let selected = node.get::<Option<u32>>("selected")?.map(|v| v as usize);
@@ -226,8 +232,8 @@ pub(super) fn radio(
     if let Some(style) = node.get::<Option<Table>>("style")? {
         const FIELDS: &[&str] = &["background", "dot_color", "border", "text_color"];
         validate(&style, FIELDS, &["active", "hovered"])?;
-        let active = checkbox_patch(&style, "active")?;
-        let hovered = checkbox_patch(&style, "hovered")?;
+        let active = checkbox_patch(&style, "active", transition)?;
+        let hovered = checkbox_patch(&style, "hovered", transition)?;
         radio = radio.style(move |theme, status| {
             let mut out = widget::radio::default(theme, status);
             let patch = match status {
@@ -245,6 +251,7 @@ pub(super) fn toggler(
     node: &Table,
     ctx: &Ctx,
     layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let mut toggler = widget::Toggler::new(node.get::<Option<bool>>("value")?.unwrap_or(false));
     if let Some(width) = layout.width {
@@ -264,9 +271,9 @@ pub(super) fn toggler(
     if let Some(style) = node.get::<Option<Table>>("style")? {
         const FIELDS: &[&str] = &["background", "foreground", "border", "text_color"];
         validate(&style, FIELDS, &["active", "hovered", "disabled"])?;
-        let active = checkbox_patch(&style, "active")?;
-        let hovered = checkbox_patch(&style, "hovered")?;
-        let disabled = checkbox_patch(&style, "disabled")?;
+        let active = checkbox_patch(&style, "active", transition)?;
+        let hovered = checkbox_patch(&style, "hovered", transition)?;
+        let disabled = checkbox_patch(&style, "disabled", transition)?;
         toggler = toggler.style(move |theme, status| {
             let mut out = widget::toggler::default(theme, status);
             let patch = match status {
@@ -298,6 +305,7 @@ pub(super) fn slider(
     ctx: &Ctx,
     kind: &str,
     layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let min = node.get::<Option<f32>>("min")?.unwrap_or(0.0);
     let max = node.get::<Option<f32>>("max")?.unwrap_or(1.0);
@@ -321,9 +329,9 @@ pub(super) fn slider(
             const FIELDS: &[&str] = &["rail", "filled", "border", "handle", "handle_border"];
             validate(&style, FIELDS, &["active", "hovered", "dragged"])?;
             Some((
-                checkbox_patch(&style, "active")?,
-                checkbox_patch(&style, "hovered")?,
-                checkbox_patch(&style, "dragged")?,
+                checkbox_patch(&style, "active", transition)?,
+                checkbox_patch(&style, "hovered", transition)?,
+                checkbox_patch(&style, "dragged", transition)?,
             ))
         }
         None => None,
@@ -510,6 +518,7 @@ pub(super) fn scrollable(
     node: &Table,
     ctx: &Ctx,
     layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let content = element(node.get::<Table>("content")?, ctx)?;
     let mut scrollable = widget::Scrollable::new(content);
@@ -581,9 +590,9 @@ pub(super) fn scrollable(
     if let Some(style) = node.get::<Option<Table>>("style")? {
         const FIELDS: &[&str] = &["background", "border", "shadow", "rail", "scroller"];
         validate(&style, FIELDS, &["active", "hovered", "dragged"])?;
-        let active = checkbox_patch(&style, "active")?;
-        let hovered = checkbox_patch(&style, "hovered")?;
-        let dragged = checkbox_patch(&style, "dragged")?;
+        let active = checkbox_patch(&style, "active", transition)?;
+        let hovered = checkbox_patch(&style, "hovered", transition)?;
+        let dragged = checkbox_patch(&style, "dragged", transition)?;
         scrollable = scrollable.style(move |theme, status| {
             let mut out = widget::scrollable::default(theme, status);
             let patch = match status {
@@ -602,6 +611,7 @@ pub(super) fn text_input(
     node: &Table,
     ctx: &Ctx,
     layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let placeholder = node
         .get::<Option<String>>("placeholder")?
@@ -645,10 +655,10 @@ pub(super) fn text_input(
             FIELDS,
             &["active", "hovered", "focused", "disabled"],
         )?;
-        let active = checkbox_patch(&style, "active")?;
-        let hovered = checkbox_patch(&style, "hovered")?;
-        let focused = checkbox_patch(&style, "focused")?;
-        let disabled = checkbox_patch(&style, "disabled")?;
+        let active = checkbox_patch(&style, "active", transition)?;
+        let hovered = checkbox_patch(&style, "hovered", transition)?;
+        let focused = checkbox_patch(&style, "focused", transition)?;
+        let disabled = checkbox_patch(&style, "disabled", transition)?;
         input = input.style(move |theme, status| {
             let mut out = widget::text_input::default(theme, status);
             let patch = match status {
@@ -700,6 +710,7 @@ pub(super) fn pick_list(
     node: &Table,
     ctx: &Ctx,
     layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let options = node
         .get::<Table>("options")?
@@ -740,9 +751,9 @@ pub(super) fn pick_list(
             "border",
         ];
         validate(&style, FIELDS, &["active", "hovered", "opened"])?;
-        let active = checkbox_patch(&style, "active")?;
-        let hovered = checkbox_patch(&style, "hovered")?;
-        let opened = checkbox_patch(&style, "opened")?;
+        let active = checkbox_patch(&style, "active", transition)?;
+        let hovered = checkbox_patch(&style, "hovered", transition)?;
+        let opened = checkbox_patch(&style, "opened", transition)?;
         list = list.style(move |theme, status| {
             let mut out = widget::pick_list::default(theme, status);
             let patch = match status {

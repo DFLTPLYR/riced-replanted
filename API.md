@@ -495,12 +495,12 @@ the widget has no content. `props` defaults to `{}`.
 
 Every constructor also accepts these common props:
 
-| Prop         | Type                      | Meaning                                                                      |
-| ------------ | ------------------------- | ---------------------------------------------------------------------------- |
-| `width`      | [length](#lengths)        | Layout width                                                                 |
-| `height`     | [length](#lengths)        | Layout height                                                                |
-| `padding`    | number or side table      | Padding around the widget; `{ top, right, bottom, left }`                    |
-| `transition` | event table | Configure `change`, `enter`, `exit`, and interaction animations; see [transitions](#property-transitions) |
+| Prop         | Type                 | Meaning                                                                                                   |
+| ------------ | -------------------- | --------------------------------------------------------------------------------------------------------- |
+| `width`      | [length](#lengths)   | Layout width                                                                                              |
+| `height`     | [length](#lengths)   | Layout height                                                                                             |
+| `padding`    | number or side table | Padding around the widget; `{ top, right, bottom, left }`                                                 |
+| `transition` | event table          | Configure `change`, `enter`, `exit`, and interaction animations; see [transitions](#property-transitions) |
 
 Widget-specific props are listed below. `transition` on `list_view` means item
 enter/leave/displacement animation instead of property animation.
@@ -763,14 +763,14 @@ Without `render`, items must already be elements, strings, numbers, or `nil`.
 
 Props:
 
-| Prop              | Type          | Meaning                                                        |
-| ----------------- | ------------- | -------------------------------------------------------------- |
-| `id`              | string        | Required, nonempty identity for item tracking                  |
-| `key`             | string        | Table field used as item identity; requires `render`           |
-| `direction`       | string        | `"vertical"` default or `"horizontal"`                         |
-| `spacing`         | number        | Gap between items                                              |
-| `render`          | function      | `(item, index) -> element`; index is zero-based                |
-| `transition`      | event table | Independent item `enter`, `exit`, and `displaced` animations |
+| Prop         | Type        | Meaning                                                      |
+| ------------ | ----------- | ------------------------------------------------------------ |
+| `id`         | string      | Required, nonempty identity for item tracking                |
+| `key`        | string      | Table field used as item identity; requires `render`         |
+| `direction`  | string      | `"vertical"` default or `"horizontal"`                       |
+| `spacing`    | number      | Gap between items                                            |
+| `render`     | function    | `(item, index) -> element`; index is zero-based              |
+| `transition` | event table | Independent item `enter`, `exit`, and `displaced` animations |
 
 Diffing matches items by `key` when set, otherwise by value. Inserting,
 removing, or reordering distinct items is detected and their positions animate;
@@ -1177,14 +1177,41 @@ Buttons: `left`, `right`, `middle`, `back`, `forward`, or `other`.
 
 `transition` is a table keyed by event. Omit it to disable animations.
 `change` interpolates `width`, `height`, scalar `padding`, `size`/`color` (text),
-`spacing` (row/column), and `value` (progress_bar).
+`spacing` (row/column), `value` (progress_bar), and the style fields
+`background`, `text_color`, `border`, and `shadow` on widgets that support them.
+
+| Widgets                                                                               | Animatable style fields                        |
+| ------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `container`, `button`                                                                 | `background`, `text_color`, `border`, `shadow` |
+| `checkbox`, `radio`, `toggler`, `text_input`, `text_editor`, `combo_box`, `pick_list` | `background`, `text_color`, `border`           |
+| `scrollable`                                                                          | `background`, `border`, `shadow`               |
+| `slider`, `vertical_slider`                                                           | `border`                                       |
+
+Unsupported transition properties are rejected. Progress-bar targets must stay
+within `0..1`; spring overshoot is clamped for display. Width and height targets
+must remain valid lengths even when animated.
 
 ```lua
 iced.container(child, {
     width = self.width,
     transition = { change = { props = { "width" }, duration = 150 } },
 })
+
+iced.button("Workspace", {
+    style = {
+        background = theme.primary,
+        border = { color = theme.background, width = 1, radius = 4 },
+        hovered = { background = "#303030" },
+    },
+    transition = {
+        change = { props = { "background", "border" }, duration = 180 },
+    },
+})
 ```
+
+Style state overrides (`active`, `hovered`, `pressed`, `focused`, `disabled`,
+and so on) stay static and win over the animated base value. Only the base
+style fields animate.
 
 Each event has independent timing. `change` accepts:
 
@@ -1193,8 +1220,8 @@ Each event has independent timing. `change` accepts:
 | `props`    | array of animatable prop names                                                |
 | `duration` | whole milliseconds from 1 to 86400000                                         |
 | `easing`   | `linear`, `ease`, `in`, `out`, `in_out`, `ease_in`, `ease_out`, `ease_in_out` |
-| `spring`   | `smooth`, `snappy`, `bouncy`, `instant` |
-| `callback` | Optional `function(self)` called once after completion; may return tasks |
+| `spring`   | `smooth`, `snappy`, `bouncy`, `instant`                                       |
+| `callback` | Optional `function(self)` called once after completion; may return tasks      |
 
 Default timing is 200 ms with `out` easing. `easing` and `spring` are mutually
 exclusive. `"fill"`, `"shrink"`, fill portions, and per-side padding stay static.

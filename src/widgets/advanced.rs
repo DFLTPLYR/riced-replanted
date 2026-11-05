@@ -10,7 +10,7 @@ use super::input::paint_text_input;
 use super::scale::ScaleItem;
 use super::state;
 use super::style::{style_patch, validate};
-use super::{Ctx, Layout, color, element, length, number};
+use super::{Ctx, Layout, Transition, color, element, length, number};
 
 fn text_or_element(value: Value, ctx: &Ctx) -> mlua::Result<Element<'static, Message>> {
     match value {
@@ -47,6 +47,7 @@ pub(super) fn text_editor(
     node: &Table,
     ctx: &Ctx,
     _layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let id: String = node
         .get::<Option<String>>("id")?
@@ -86,10 +87,26 @@ pub(super) fn text_editor(
             &fields,
             &["active", "hovered", "focused", "disabled"],
         )?;
-        let active = style_patch(&style, style.get::<Option<Table>>("active")?.as_ref())?;
-        let hovered = style_patch(&style, style.get::<Option<Table>>("hovered")?.as_ref())?;
-        let focused = style_patch(&style, style.get::<Option<Table>>("focused")?.as_ref())?;
-        let disabled = style_patch(&style, style.get::<Option<Table>>("disabled")?.as_ref())?;
+        let active = style_patch(
+            &style,
+            style.get::<Option<Table>>("active")?.as_ref(),
+            transition,
+        )?;
+        let hovered = style_patch(
+            &style,
+            style.get::<Option<Table>>("hovered")?.as_ref(),
+            transition,
+        )?;
+        let focused = style_patch(
+            &style,
+            style.get::<Option<Table>>("focused")?.as_ref(),
+            transition,
+        )?;
+        let disabled = style_patch(
+            &style,
+            style.get::<Option<Table>>("disabled")?.as_ref(),
+            transition,
+        )?;
         editor = editor.style(move |theme, status| {
             let mut out = widget::text_editor::default(theme, status);
             let patch = match status {
@@ -132,6 +149,7 @@ pub(super) fn combo_box(
     node: &Table,
     ctx: &Ctx,
     _layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let id: String = node
         .get::<Option<String>>("id")?
@@ -187,10 +205,26 @@ pub(super) fn combo_box(
             &fields,
             &["active", "hovered", "focused", "disabled"],
         )?;
-        let active = style_patch(&style, style.get::<Option<Table>>("active")?.as_ref())?;
-        let hovered = style_patch(&style, style.get::<Option<Table>>("hovered")?.as_ref())?;
-        let focused = style_patch(&style, style.get::<Option<Table>>("focused")?.as_ref())?;
-        let disabled = style_patch(&style, style.get::<Option<Table>>("disabled")?.as_ref())?;
+        let active = style_patch(
+            &style,
+            style.get::<Option<Table>>("active")?.as_ref(),
+            transition,
+        )?;
+        let hovered = style_patch(
+            &style,
+            style.get::<Option<Table>>("hovered")?.as_ref(),
+            transition,
+        )?;
+        let focused = style_patch(
+            &style,
+            style.get::<Option<Table>>("focused")?.as_ref(),
+            transition,
+        )?;
+        let disabled = style_patch(
+            &style,
+            style.get::<Option<Table>>("disabled")?.as_ref(),
+            transition,
+        )?;
         combo = combo.input_style(move |theme, status| {
             let mut out = widget::text_input::default(theme, status);
             let patch = match status {

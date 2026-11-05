@@ -13,7 +13,7 @@ mod state;
 mod style;
 mod text;
 
-use iced::{Color, Element, Length, Padding, widget};
+use iced::{Border, Color, Element, Length, Padding, Shadow, widget};
 use iced_anim::Animate;
 use iced_anim::animated::Mode;
 use mlua::{Table, Value};
@@ -135,6 +135,10 @@ struct Motion {
     size: f32,
     color: Color,
     value: f32,
+    background: Color,
+    text_color: Color,
+    border: Border,
+    shadow: Shadow,
 }
 
 impl Motion {
@@ -151,6 +155,23 @@ impl Motion {
             "progress_bar" => table.get::<Option<f32>>("value")?.unwrap_or(0.0),
             _ => 0.0,
         };
+        let (background, text_color, border, shadow) = match table.get::<Option<Table>>("style")? {
+            Some(style) => {
+                let patch = style::style_patch(&style, None, None)?;
+                (
+                    patch.background.unwrap_or(Color::TRANSPARENT),
+                    patch.text_color.unwrap_or(Color::TRANSPARENT),
+                    patch.border.unwrap_or_default(),
+                    patch.shadow.unwrap_or_default(),
+                )
+            }
+            None => (
+                Color::TRANSPARENT,
+                Color::TRANSPARENT,
+                Border::default(),
+                Shadow::default(),
+            ),
+        };
         Ok(Self {
             width: pixels(table.get::<Value>("width")?).unwrap_or(0.0),
             height: pixels(table.get::<Value>("height")?).unwrap_or(0.0),
@@ -162,6 +183,10 @@ impl Motion {
             size: number(table, "size", 16.0)?,
             color,
             value,
+            background,
+            text_color,
+            border,
+            shadow,
         })
     }
 }
@@ -172,6 +197,14 @@ fn animatable(kind: &str) -> Vec<&'static str> {
         "text" => props.extend(["size", "color"]),
         "row" | "column" => props.push("spacing"),
         "progress_bar" => props.push("value"),
+        _ => {}
+    }
+    match kind {
+        "container" | "button" => props.extend(["background", "text_color", "border", "shadow"]),
+        "checkbox" | "radio" | "toggler" | "text_input" | "pick_list" | "text_editor"
+        | "combo_box" => props.extend(["background", "text_color", "border"]),
+        "scrollable" => props.extend(["background", "border", "shadow"]),
+        "slider" | "vertical_slider" => props.push("border"),
         _ => {}
     }
     props
@@ -234,6 +267,18 @@ impl Transition {
         if !props.iter().any(|prop| prop == "color") {
             motion.color = Color::WHITE;
         }
+        if !props.iter().any(|prop| prop == "background") {
+            motion.background = Color::TRANSPARENT;
+        }
+        if !props.iter().any(|prop| prop == "text_color") {
+            motion.text_color = Color::TRANSPARENT;
+        }
+        if !props.iter().any(|prop| prop == "border") {
+            motion.border = Border::default();
+        }
+        if !props.iter().any(|prop| prop == "shadow") {
+            motion.shadow = Shadow::default();
+        }
         Ok(Some(Self {
             motion,
             props,
@@ -262,6 +307,34 @@ impl Transition {
             .iter()
             .any(|prop| prop == "color")
             .then_some(self.motion.color)
+    }
+
+    fn background(&self) -> Option<Color> {
+        self.props
+            .iter()
+            .any(|prop| prop == "background")
+            .then_some(self.motion.background)
+    }
+
+    fn text_color(&self) -> Option<Color> {
+        self.props
+            .iter()
+            .any(|prop| prop == "text_color")
+            .then_some(self.motion.text_color)
+    }
+
+    fn border(&self) -> Option<Border> {
+        self.props
+            .iter()
+            .any(|prop| prop == "border")
+            .then_some(self.motion.border)
+    }
+
+    fn shadow(&self) -> Option<Shadow> {
+        self.props
+            .iter()
+            .any(|prop| prop == "shadow")
+            .then_some(self.motion.shadow)
     }
 }
 
@@ -561,23 +634,23 @@ fn build(
         "row" | "column" => layout::row_column(node, ctx, transition, layout, &kind)?,
         "grid" => layout::grid(node, ctx)?,
         "space" => layout::space(layout),
-        "container" => containers::container(node, ctx, layout)?,
-        "button" => containers::button(node, ctx, layout)?,
+        "container" => containers::container(node, ctx, layout, transition)?,
+        "button" => containers::button(node, ctx, layout, transition)?,
         "stack" => containers::stack(node, ctx, layout)?,
         "float" => containers::float(node, ctx)?,
         "pin" => containers::pin(node, ctx, layout)?,
         "tooltip" => containers::tooltip(node, ctx)?,
-        "checkbox" => input::checkbox(node, ctx, layout)?,
-        "radio" => input::radio(node, ctx, layout)?,
-        "toggler" => input::toggler(node, ctx, layout)?,
-        "slider" | "vertical_slider" => input::slider(node, ctx, &kind, layout)?,
+        "checkbox" => input::checkbox(node, ctx, layout, transition)?,
+        "radio" => input::radio(node, ctx, layout, transition)?,
+        "toggler" => input::toggler(node, ctx, layout, transition)?,
+        "slider" | "vertical_slider" => input::slider(node, ctx, &kind, layout, transition)?,
         "mouse_area" => input::mouse_area(node, ctx)?,
         "sensor" => input::sensor(node, ctx)?,
-        "scrollable" => input::scrollable(node, ctx, layout)?,
-        "text_input" => input::text_input(node, ctx, layout)?,
-        "pick_list" => input::pick_list(node, ctx, layout)?,
-        "text_editor" => advanced::text_editor(node, ctx, layout)?,
-        "combo_box" => advanced::combo_box(node, ctx, layout)?,
+        "scrollable" => input::scrollable(node, ctx, layout, transition)?,
+        "text_input" => input::text_input(node, ctx, layout, transition)?,
+        "pick_list" => input::pick_list(node, ctx, layout, transition)?,
+        "text_editor" => advanced::text_editor(node, ctx, layout, transition)?,
+        "combo_box" => advanced::combo_box(node, ctx, layout, transition)?,
         "table" => advanced::table(node, ctx, layout)?,
         "list_view" => advanced::list_view(node, ctx, layout)?,
         "region" => {
@@ -958,6 +1031,37 @@ mod tests {
     }
 
     #[test]
+    fn transitions_interpolate_style_values() {
+        let lua = mlua::Lua::new();
+        let node: Table = lua
+            .load(
+                "{kind='button',content='x',style={background='#ff0000',text_color='#ffffff',border={color='#00ff00',width=1,radius=4},shadow={color='#00000080',offset={x=0,y=2},blur=8},hovered={background='#00ff00'}},transition={change={props={'background','text_color','border','shadow'}}}}",
+            )
+            .eval()
+            .unwrap();
+        let mut transition = Transition::parse(&node).unwrap().unwrap();
+        assert_eq!(transition.background(), Some(color("#ff0000").unwrap()));
+        assert_eq!(transition.text_color(), Some(color("#ffffff").unwrap()));
+        assert_eq!(transition.border().unwrap().width, 1.0);
+        assert_eq!(transition.shadow().unwrap().blur_radius, 8.0);
+
+        let style: Table = node.get("style").unwrap();
+        transition.motion.background = color("#0000ff").unwrap();
+        transition.motion.text_color = color("#000000").unwrap();
+        transition.motion.border.width = 2.0;
+        transition.motion.shadow.blur_radius = 4.0;
+        let patch = style::style_patch(&style, None, Some(&transition)).unwrap();
+        assert_eq!(patch.background, Some(color("#0000ff").unwrap()));
+        assert_eq!(patch.text_color, Some(color("#000000").unwrap()));
+        assert_eq!(patch.border.unwrap().width, 2.0);
+        assert_eq!(patch.shadow.unwrap().blur_radius, 4.0);
+
+        let hovered: Table = style.get("hovered").unwrap();
+        let patch = style::style_patch(&style, Some(&hovered), Some(&transition)).unwrap();
+        assert_eq!(patch.background, Some(color("#00ff00").unwrap()));
+    }
+
+    #[test]
     fn transitions_interpolate_progress_bar_value() {
         let lua = mlua::Lua::new();
         let node: Table = lua
@@ -1016,6 +1120,45 @@ mod tests {
             axis(&node, "width", Some(-0.1)).unwrap(),
             Some(Length::Fixed(0.0))
         );
+    }
+
+    #[test]
+    fn style_transitions_match_widget_capabilities() {
+        let lua = mlua::Lua::new();
+        for (kind, supported) in [
+            (
+                "container",
+                &["background", "text_color", "border", "shadow"][..],
+            ),
+            (
+                "button",
+                &["background", "text_color", "border", "shadow"][..],
+            ),
+            ("checkbox", &["background", "text_color", "border"][..]),
+            ("radio", &["background", "text_color", "border"][..]),
+            ("toggler", &["background", "text_color", "border"][..]),
+            ("text_input", &["background", "text_color", "border"][..]),
+            ("pick_list", &["background", "text_color", "border"][..]),
+            ("text_editor", &["background", "text_color", "border"][..]),
+            ("combo_box", &["background", "text_color", "border"][..]),
+            ("scrollable", &["background", "border", "shadow"][..]),
+            ("slider", &["border"][..]),
+            ("vertical_slider", &["border"][..]),
+        ] {
+            for prop in ["background", "text_color", "border", "shadow"] {
+                let node = lua
+                    .load(format!(
+                        "{{kind='{kind}',transition={{change={{props={{'{prop}'}}}}}}}}"
+                    ))
+                    .eval()
+                    .unwrap();
+                assert_eq!(
+                    Transition::parse(&node).is_ok(),
+                    supported.contains(&prop),
+                    "{kind}.{prop}"
+                );
+            }
+        }
     }
 
     #[test]

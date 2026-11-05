@@ -4,6 +4,7 @@ use mlua::{Table, Value};
 
 use crate::runtime::keys;
 
+use super::Transition;
 use super::color;
 
 #[derive(Clone, Default)]
@@ -24,7 +25,11 @@ pub(super) struct StylePatch {
     pub(super) handle_border: Option<Border>,
 }
 
-pub(super) fn style_patch(base: &Table, over: Option<&Table>) -> mlua::Result<StylePatch> {
+pub(super) fn style_patch(
+    base: &Table,
+    over: Option<&Table>,
+    transition: Option<&Transition>,
+) -> mlua::Result<StylePatch> {
     let mut patch = StylePatch::default();
     for table in [Some(base), over].into_iter().flatten() {
         if let Some(value) = table.get::<Option<String>>("background")? {
@@ -58,7 +63,41 @@ pub(super) fn style_patch(base: &Table, over: Option<&Table>) -> mlua::Result<St
             patch.handle_border = Some(border_value(&value)?);
         }
     }
+    if let Some(transition) = transition {
+        // A state override wins so hover/press colors stay static.
+        if !overridden(over, "background")?
+            && patch.background.is_some()
+            && let Some(value) = transition.background()
+        {
+            patch.background = Some(value);
+        }
+        if !overridden(over, "text_color")?
+            && patch.text_color.is_some()
+            && let Some(value) = transition.text_color()
+        {
+            patch.text_color = Some(value);
+        }
+        if !overridden(over, "border")?
+            && patch.border.is_some()
+            && let Some(value) = transition.border()
+        {
+            patch.border = Some(value);
+        }
+        if !overridden(over, "shadow")?
+            && patch.shadow.is_some()
+            && let Some(value) = transition.shadow()
+        {
+            patch.shadow = Some(value);
+        }
+    }
     Ok(patch)
+}
+
+fn overridden(over: Option<&Table>, key: &str) -> mlua::Result<bool> {
+    match over {
+        Some(over) => over.contains_key(key),
+        None => Ok(false),
+    }
 }
 
 /// Validates a widget style table and every per-state override.
