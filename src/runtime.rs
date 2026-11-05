@@ -339,7 +339,7 @@ fn install_widget_loader(lua: &Lua, profile: &Path, shell: &Path) -> mlua::Resul
             return Ok(Value::Nil);
         }
         let mut found = Vec::new();
-        find_widget(&root, &shell, &name, &mut found);
+        find_widget(&root, &shell, &name, &mut found, &mut HashSet::new());
         match found.len() {
             0 => {
                 misses.lock().unwrap().insert(name);
@@ -382,14 +382,26 @@ fn widget_name(name: &str) -> bool {
         && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
-fn find_widget(directory: &Path, shell: &Path, name: &str, found: &mut Vec<PathBuf>) {
+fn find_widget(
+    directory: &Path,
+    shell: &Path,
+    name: &str,
+    found: &mut Vec<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+) {
+    let Ok(canonical) = std::fs::canonicalize(directory) else {
+        return;
+    };
+    if !visited.insert(canonical) {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            find_widget(&path, shell, name, found);
+            find_widget(&path, shell, name, found, visited);
         } else if path != shell
             && path.extension().is_some_and(|extension| extension == "lua")
             && path.file_stem().and_then(|stem| stem.to_str()) == Some(name)
@@ -2413,6 +2425,33 @@ mod tests {
             error.contains("multiple files define iced.greeting"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn widget_discovery_visits_symlinked_directories_once() {
+        use std::os::unix::fs::symlink;
+
+        let profile = Profile::new(&[("shell.lua", ""), ("widgets/greeting.lua", "")]);
+        let external = Profile::new(&[("linked.lua", "")]);
+        symlink("..", profile.0.join("widgets/loop")).unwrap();
+        symlink("widgets", profile.0.join("alias")).unwrap();
+        symlink(&external.0, profile.0.join("external")).unwrap();
+
+        for name in ["greeting", "linked", "missing"] {
+            let mut found = Vec::new();
+            find_widget(
+                &profile.0,
+                &profile.shell(),
+                name,
+                &mut found,
+                &mut HashSet::new(),
+            );
+            assert_eq!(
+                found.len(),
+                usize::from(name != "missing"),
+                "{name}: {found:?}"
+            );
+        }
     }
 
     #[test]
