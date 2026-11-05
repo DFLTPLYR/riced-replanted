@@ -495,7 +495,7 @@ Every constructor also accepts these common props:
 | `width`      | [length](#lengths)        | Layout width                                                                 |
 | `height`     | [length](#lengths)        | Layout height                                                                |
 | `padding`    | number or side table      | Padding around the widget; `{ top, right, bottom, left }`                    |
-| `transition` | `true`, table, or `false` | Animate supported property changes; see [transitions](#property-transitions) |
+| `transition` | event table | Configure `change`, `enter`, `exit`, and interaction animations; see [transitions](#property-transitions) |
 
 Widget-specific props are listed below. `transition` on `list_view` means item
 enter/leave/displacement animation instead of property animation.
@@ -765,40 +765,29 @@ Props:
 | `direction`       | string        | `"vertical"` default or `"horizontal"`                         |
 | `spacing`         | number        | Gap between items                                              |
 | `render`          | function      | `(item, index) -> element`; index is zero-based                |
-| `on_item_added`   | function      | `(index, item)` when a value first appears                     |
-| `on_item_removed` | function      | `(index, item)` when a value disappears; index is its old slot |
-| `onItemAdded`     | function      | Alias for `on_item_added`                                      |
-| `onItemRemoved`   | function      | Alias for `on_item_removed`                                    |
-| `transition`      | boolean/table | Item enter/leave/displacement animation; see below             |
+| `transition`      | event table | Independent item `enter`, `exit`, and `displaced` animations |
 
 Diffing matches items by `key` when set, otherwise by value. Inserting,
 removing, or reordering distinct items is detected and their positions animate;
-duplicate keys are matched in order. Lists whose Lua values are rebuilt every
-render (tables) fall back to index matching when no key or value matches, so
-they keep continuity but do not displace; set `key` to the stable field (for
-example `"id"`) to animate data items. Callbacks run during render, so state they
-change takes effect on the next render. The direct callbacks take precedence over
-`transition.onAdded`/`onRemoved` when both are set.
-
-`transition = true` uses a 200 ms scale animation. A table accepts:
+duplicate keys are matched in order. Rebuilt data tables need a stable `key`
+(for example `"id"`); there is no positional fallback. Reappearing keys cancel
+their pending exit and resume from the displayed values.
 
 ```lua
 transition = {
-    duration = 180,                       -- whole milliseconds
-    x = { from = -180, to = 0 },          -- horizontal slide; number means { n, 0 }
-    y = { from = 20, to = 0 },            -- vertical slide; same forms
-    onAdded = function(index, item) end,
-    onRemoved = function(index, item) end,
-    onDisplaced = function(index, item) end,
+    enter = { from = { x = -180, scale = 0 }, duration = 180 },
+    exit = { to = { x = 180, scale = 0 }, duration = 120 },
+    displaced = { duration = 180 },
 }
 ```
 
-New items transition from `x.from`/`y.from` to `x.to`/`y.to` while scaling
-from 0 to 1. Leaving
-items reverse that. `onDisplaced` runs for surviving items whose index changed;
-they glide from their previous slot to the new one over the same duration.
-Leaving items are drawn until the animation finishes. Transforms only change
-drawing; layout itself is not interpolated.
+`displaced` uses measured layout positions and accepts timing and `callback`,
+not explicit `from`/`to`. Outgoing items remain drawn at their previous bounds
+without receiving input until exit completes. Each event accepts an optional
+`callback(self)` delivered after completion, outside rendering. `self` is the
+owning custom/component instance, or nil outside a component.
+For independently controlled custom cards, put `enter`/`exit` on each card's
+root and use only `displaced` on the list.
 
 #### `iced.markdown(content, props)`
 
@@ -1181,33 +1170,71 @@ Buttons: `left`, `right`, `middle`, `back`, `forward`, or `other`.
 
 ### Property transitions
 
-For widgets other than `list_view`, `transition` animates property changes
-instead of jumping. Animatable props are `width`, `height`, `padding`, `size`
-(text), `spacing` (row/column), `color` (text), and `value` (progress_bar).
+`transition` is a table keyed by event. Omit it to disable animations.
+`change` interpolates `width`, `height`, scalar `padding`, `size`/`color` (text),
+`spacing` (row/column), and `value` (progress_bar).
 
 ```lua
-iced.container(child, { width = self.width, padding = 16, transition = true })
+iced.container(child, {
+    width = self.width,
+    transition = { change = { props = { "width" }, duration = 150 } },
+})
 ```
 
-`transition = true` uses a smooth spring over every animatable prop present on
-the element. The table form accepts:
+Each event has independent timing. `change` accepts:
 
 | Key        | Values                                                                        |
 | ---------- | ----------------------------------------------------------------------------- |
 | `props`    | array of animatable prop names                                                |
 | `duration` | whole milliseconds from 1 to 86400000                                         |
 | `easing`   | `linear`, `ease`, `in`, `out`, `in_out`, `ease_in`, `ease_out`, `ease_in_out` |
-| `spring`   | `smooth` (default), `snappy`, `bouncy`, `instant`                             |
+| `spring`   | `smooth`, `snappy`, `bouncy`, `instant` |
+| `callback` | Optional `function(self)` called once after completion; may return tasks |
 
-`easing` and `spring` are mutually exclusive. All selected props share one
-timing. `"fill"`, `"shrink"`, and fill portions are not interpolated. The
-element is rebuilt from its Lua table on every animation frame, so keep
-animated subtrees cheap.
+Default timing is 200 ms with `out` easing. `easing` and `spring` are mutually
+exclusive. `"fill"`, `"shrink"`, fill portions, and per-side padding stay static.
+Property animation rebuilds the subtree each frame; keep animated subtrees cheap.
 
 ```lua
-transition = { props = { "width", "padding" }, duration = 300, easing = "out" }
-transition = { spring = "bouncy" }
+transition = {
+    enter = { from = { x = 20, scale = 0.9 }, duration = 180 },
+    exit = {
+        to = { x = 20, scale = 0.9 }, duration = 120,
+        callback = function(self) self.closed = true end,
+    },
+    press = { callback = function(self) self.animate.exit() end },
+    pointer_enter = { to = { scale = 1.05 }, duration = 80 },
+    pointer_exit = { to = { scale = 1 }, duration = 80 },
+}
 ```
+
+`enter`, `exit`, `pointer_enter`, `pointer_exit`, `press`, `release`, and custom
+event names accept `from`/`to` tables containing `x`, `y`, and `scale`. Defaults
+are zero offsets and scale 1. These are drawing transforms, not layout changes.
+Offsets must be finite; scale must also be non-negative. A callback-only event
+completes on the next animation frame. Keep native controls for keyboard actions;
+pointer animation triggers do not make a container keyboard-focusable.
+
+Custom widgets and `iced.component` receive instance-local `self.animate` and
+`self.props`. Call `self.animate.exit()` to start exit early, `self.animate.enter()`
+to show it again, or `self.animate.<event>()` to run a configured custom event.
+Repeated exit calls are ignored. Exit leaves the instance hidden and noninteractive
+until removal or re-entry. In `list_view`, a completed exit also releases the item's
+layout slot and spacing, letting surviving items displace without changing the
+source data. `self.animate.enter()` restores the item to its source position.
+The optional exit callback can update parent/shared state when data removal is wanted.
+An interrupted animation retargets from its displayed values and cancels the old
+completion callback. Reload and window closure also cancel pending callbacks.
+
+Automatic exit on removal retains custom/component roots and native widgets with
+an explicit `id` until completion. Repeated custom widgets require distinct
+`props.id` values; identity is scoped to the widget name and window. Ordinary
+unidentified widgets can animate entry and interactions, but cannot be retained
+after removal. Raw function-valued `on_press` handlers run in update and may call
+`self.animate.exit()` through their captured instance.
+
+Legacy booleans, flat transition options, and list `onAdded`/`onRemoved`/
+`onDisplaced`/`on_item_added`/`on_item_removed` aliases have been removed.
 
 ### Custom widgets
 
@@ -1217,7 +1244,7 @@ transition = { spring = "bouncy" }
 returns the constructor. No top-level `require` and no fixed widget directory
 are needed. Two files with the same name are an error, and the file basename
 must match the widget name (`workspaces.lua` defines `iced.workspaces`). The
-factory runs when that file first loads and must return a table with a `view`
+factory runs when that file first loads and must return a prototype table with a `view`
 method (or a `render` function):
 
 ```lua

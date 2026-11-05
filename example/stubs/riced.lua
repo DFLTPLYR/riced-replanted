@@ -44,19 +44,35 @@ config = {}
 ---@field event string
 ---@field args any
 
----@class iced.Transition
+---@class iced.ChangeTransition
 ---@field props? ("width"|"height"|"padding"|"size"|"spacing"|"color"|"value")[]
 ---@field duration? integer
 ---@field easing? "linear"|"ease"|"in"|"out"|"in_out"|"ease_in"|"ease_out"|"ease_in_out"
 ---@field spring? "smooth"|"snappy"|"bouncy"|"instant"
+---@field callback? fun(self: iced.Instance?): any
 
----@class iced.ListTransition
+---@class iced.EventTransition
 ---@field duration? integer
----@field x? number|{ from: number, to: number }
----@field y? number|{ from: number, to: number }
----@field onAdded? fun(index: integer, item: any)
----@field onRemoved? fun(index: integer, item: any)
----@field onDisplaced? fun(index: integer, item: any)
+---@field easing? "linear"|"ease"|"in"|"out"|"in_out"|"ease_in"|"ease_out"|"ease_in_out"
+---@field spring? "smooth"|"snappy"|"bouncy"|"instant"
+---@field from? {x?: number, y?: number, scale?: number}
+---@field to? {x?: number, y?: number, scale?: number}
+---@field callback? fun(self: iced.Instance?): any
+
+---@class iced.Transition
+---@field change? iced.ChangeTransition
+---@field enter? iced.EventTransition
+---@field exit? iced.EventTransition
+---@field displaced? iced.EventTransition
+---@field pointer_enter? iced.EventTransition
+---@field pointer_exit? iced.EventTransition
+---@field press? iced.EventTransition
+---@field release? iced.EventTransition
+---@field [string] iced.EventTransition
+
+---@class iced.Instance
+---@field props table
+---@field animate table<string, fun()>
 
 ---@class iced.Font
 ---@field family? string
@@ -200,7 +216,7 @@ config = {}
 ---@field color? string
 ---@field on_press? any
 ---@field content_fit? "contain"|"cover"|"fill"|"none"|"scale_down"
----@field transition? boolean|iced.Transition|iced.ListTransition
+---@field transition? iced.Transition
 ---@field line_height? number|{ pixels: number }
 ---@field wrap? boolean|"none"|"word"|"glyph"|"word_or_glyph"
 ---@field align_x? "left"|"center"|"right"|"justified"
@@ -266,10 +282,6 @@ config = {}
 ---@field columns? iced.TableColumn[]
 ---@field key? string
 ---@field render? fun(item: any, index: integer): iced.Element
----@field on_item_added? fun(index: integer, item: any)
----@field on_item_removed? fun(index: integer, item: any)
----@field onItemAdded? fun(index: integer, item: any)
----@field onItemRemoved? fun(index: integer, item: any)
 ---@field min_size? number
 
 ---@class iced.LayerSettings
