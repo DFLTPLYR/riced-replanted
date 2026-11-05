@@ -305,6 +305,17 @@ config = {}
 ---@field client_side_decorations? boolean
 ---@field content iced.Element
 
+---@class iced.PopupSettings
+---@field id? string
+---@field visible? boolean
+---@field parent string
+---@field width integer
+---@field height integer
+---@field x? number
+---@field y? number
+---@field anchor? { x: number, y: number, width: number, height: number }
+---@field on_closed? fun()
+
 ---@class iced.LayerValues
 ---@field background "background"
 ---@field bottom "bottom"
@@ -559,6 +570,15 @@ function iced.pane_grid(content, props) end
 function iced.region(content, props) end
 
 ---@param content iced.Element
+---@param props { id: string }
+---@return iced.Element
+function iced.measure(content, props) end
+
+---@param id string
+---@return { x: number, y: number, width: number, height: number }|nil
+function iced.bounds(id) end
+
+---@param content iced.Element
 ---@param settings? iced.LayerSettings
 ---@return iced.Element
 function iced.layer(content, settings) end
@@ -566,6 +586,11 @@ function iced.layer(content, settings) end
 ---@param settings iced.WindowSettings
 ---@return iced.Element
 function iced.window(settings) end
+
+---@param content iced.Element
+---@param settings iced.PopupSettings
+---@return iced.Element
+function iced.popup(content, settings) end
 
 ---@param name string
 ---@param factory fun(): table

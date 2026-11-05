@@ -2,7 +2,7 @@ use iced_exwlshell::reexport::{
     Anchor, BlurOption, BlurRegion, Extent, KeyboardInteractivity, Layer, LayerSize,
     NewLayerShellSettings, OutputOption, PixelSize,
 };
-use mlua::{Table, Value};
+use mlua::{Function, Table, Value};
 
 use crate::runtime::keys;
 
@@ -25,26 +25,159 @@ fn sequence(table: &Table) -> mlua::Result<()> {
 pub fn nodes(node: Table) -> mlua::Result<Vec<Table>> {
     match node.get::<Option<String>>("kind")?.as_deref() {
         Some("layer" | "window") => Ok(vec![node]),
+        Some("popup") => Ok(if surface_visible(&node)? {
+            vec![node]
+        } else {
+            Vec::new()
+        }),
         Some(_) => Ok(Vec::new()),
         None => {
-            sequence(&node)?;
-            let nodes = node
-                .sequence_values::<Table>()
-                .collect::<mlua::Result<Vec<_>>>()?;
-            if nodes.is_empty()
-                || nodes.iter().any(|node| {
-                    !matches!(
-                        node.get::<String>("kind").as_deref(),
-                        Ok("layer" | "window")
-                    )
-                })
-            {
+            let mut nodes = Vec::new();
+            collect_list(node, &mut nodes)?;
+            if nodes.is_empty() {
                 return Err(mlua::Error::runtime(
-                    "view must return an iced element, iced.layer, iced.window, or a nonempty list of surfaces",
+                    "view must return an iced element, iced.layer, iced.window, iced.popup, or a nonempty list of surfaces",
                 ));
             }
             Ok(nodes)
         }
+    }
+}
+
+fn collect_list(node: Table, nodes: &mut Vec<Table>) -> mlua::Result<()> {
+    sequence(&node)?;
+    for node in node.sequence_values::<Table>() {
+        let node = node?;
+        match node.get::<Option<String>>("kind")?.as_deref() {
+            Some("layer" | "window") => nodes.push(node),
+            Some("popup") => {
+                if surface_visible(&node)? {
+                    nodes.push(node);
+                }
+            }
+            Some(_) => {
+                return Err(mlua::Error::runtime(
+                    "view must return an iced element, iced.layer, iced.window, iced.popup, or a nonempty list of surfaces",
+                ));
+            }
+            None => collect_list(node, nodes)?,
+        }
+    }
+    Ok(())
+}
+
+fn surface_visible(node: &Table) -> mlua::Result<bool> {
+    if node.get::<Option<String>>("kind")?.as_deref() == Some("popup") {
+        Ok(popup(node.get("settings")?)?.visible)
+    } else {
+        Ok(true)
+    }
+}
+
+#[derive(Debug)]
+pub struct PopupSettings {
+    pub visible: bool,
+    pub parent: String,
+    pub size: PixelSize,
+    pub position: (i32, i32),
+    pub anchor: Option<(i32, i32, PixelSize)>,
+    pub on_closed: Option<Function>,
+}
+
+pub fn popup(table: Table) -> mlua::Result<PopupSettings> {
+    keys(
+        &table,
+        &[
+            "id",
+            "visible",
+            "parent",
+            "width",
+            "height",
+            "x",
+            "y",
+            "anchor",
+            "on_closed",
+        ],
+    )?;
+    let parent = table
+        .get::<Option<String>>("parent")?
+        .filter(|parent| !parent.is_empty() && !parent.contains('\0'))
+        .ok_or_else(|| {
+            mlua::Error::runtime("popup parent must be a nonempty layer id without NUL")
+        })?;
+    let width = popup_dimension(table.get("width")?, "width")?;
+    let height = popup_dimension(table.get("height")?, "height")?;
+    let size = PixelSize::try_px(width, height)
+        .ok_or_else(|| mlua::Error::runtime("popup size must be nonzero"))?;
+    let anchor = match table.get::<Option<Table>>("anchor")? {
+        Some(anchor) => {
+            keys(&anchor, &["x", "y", "width", "height"])?;
+            let width = popup_dimension(anchor.get("width")?, "anchor width")?;
+            let height = popup_dimension(anchor.get("height")?, "anchor height")?;
+            Some((
+                popup_coordinate(anchor.get("x")?, "anchor x")?,
+                popup_coordinate(anchor.get("y")?, "anchor y")?,
+                PixelSize::try_px(width, height)
+                    .ok_or_else(|| mlua::Error::runtime("popup anchor size must be nonzero"))?,
+            ))
+        }
+        None => None,
+    };
+    let visible = match table.get::<Value>("visible")? {
+        Value::Nil => true,
+        Value::Boolean(visible) => visible,
+        _ => {
+            return Err(mlua::Error::runtime("popup visible must be a boolean"));
+        }
+    };
+    let position = (
+        match table.get::<Value>("x")? {
+            Value::Nil => 0,
+            value => popup_coordinate(value, "x")?,
+        },
+        match table.get::<Value>("y")? {
+            Value::Nil => 0,
+            value => popup_coordinate(value, "y")?,
+        },
+    );
+    Ok(PopupSettings {
+        visible,
+        parent,
+        size,
+        position,
+        anchor,
+        on_closed: table.get::<Option<Function>>("on_closed")?,
+    })
+}
+
+fn popup_dimension(value: Value, name: &str) -> mlua::Result<u32> {
+    match value {
+        Value::Integer(n) if (1..=32768).contains(&n) => Ok(n as u32),
+        Value::Number(n) if n.is_finite() => {
+            let rounded = n.round();
+            if (1.0..=32768.0).contains(&rounded) {
+                Ok(rounded as u32)
+            } else {
+                Err(mlua::Error::runtime(format!(
+                    "popup {name} must be an integer in 1..32768"
+                )))
+            }
+        }
+        _ => Err(mlua::Error::runtime(format!(
+            "popup {name} must be an integer in 1..32768"
+        ))),
+    }
+}
+
+fn popup_coordinate(value: Value, name: &str) -> mlua::Result<i32> {
+    match value {
+        Value::Integer(n) if (i32::MIN as i64..=i32::MAX as i64).contains(&n) => Ok(n as i32),
+        Value::Number(n) if n.is_finite() && n >= i32::MIN as f64 && n <= i32::MAX as f64 => {
+            Ok(n.round() as i32)
+        }
+        _ => Err(mlua::Error::runtime(format!(
+            "popup {name} must be a finite integer"
+        ))),
     }
 }
 
@@ -114,7 +247,7 @@ pub fn id(settings: &Table, index: usize) -> mlua::Result<String> {
         .get::<Option<String>>("id")?
         .unwrap_or_else(|| format!("#{}", index + 1));
     if id.is_empty() {
-        return Err(mlua::Error::runtime("layer id must not be empty"));
+        return Err(mlua::Error::runtime("surface id must not be empty"));
     }
     Ok(id)
 }
@@ -273,6 +406,57 @@ pub fn settings(table: Table) -> mlua::Result<NewLayerShellSettings> {
 mod tests {
     use super::*;
     use mlua::Lua;
+
+    #[test]
+    fn parses_and_validates_popup_settings() {
+        let lua = Lua::new();
+        let table = lua
+            .load("{parent='bar',width=200.0,height=120.4,x=4.6,y=-8.2,visible=false,anchor={x=10.2,y=20.8,width=30.4,height=40.0}}")
+            .eval()
+            .unwrap();
+        let settings = popup(table).unwrap();
+        assert_eq!(settings.parent, "bar");
+        assert_eq!(settings.size.to_set(), (200, 120));
+        assert_eq!(settings.position, (5, -8));
+        assert!(!settings.visible);
+        assert_eq!(
+            settings.anchor.map(|(x, y, size)| (x, y, size.to_set())),
+            Some((10, 21, (30, 40)))
+        );
+
+        for source in [
+            "{width=200,height=120}",
+            "{parent='',width=200,height=120}",
+            "{parent='bar',width=0,height=120}",
+            "{parent='bar',width=200,height=32769}",
+            "{parent='bar',width=200,height=120,x=0/0}",
+            "{parent='bar',width=200,height=120,visible=1}",
+            "{parent='bar',width=200,height=120,anchor={x=0,y=0,width=0,height=1}}",
+            "{parent='bar',width=200,height=120,anchor={x=0,y=0}}",
+            "{parent='bar',width=200,height=120,on_closed='nope'}",
+            "{parent='bar',width=200,height=120,extra=true}",
+        ] {
+            let table = lua.load(source).eval().unwrap();
+            assert!(popup(table).is_err(), "{source}");
+        }
+
+        let visible: Table = lua
+            .load("{kind='popup',settings={parent='bar',width=10,height=10}}")
+            .eval()
+            .unwrap();
+        assert_eq!(nodes(visible).unwrap().len(), 1);
+        let hidden: Table = lua
+            .load("{kind='popup',settings={parent='bar',width=10,height=10,visible=false}}")
+            .eval()
+            .unwrap();
+        assert!(nodes(hidden).unwrap().is_empty());
+
+        let nested: Table = lua
+            .load("{{kind='layer'}, {kind='popup',settings={parent='bar',width=10,height=10}}}")
+            .eval()
+            .unwrap();
+        assert_eq!(nodes(nested).unwrap().len(), 2);
+    }
 
     #[test]
     fn helpers_produce_the_existing_layer_settings() {

@@ -6,6 +6,7 @@ mod enums;
 mod input;
 mod keyed;
 mod layout;
+pub(crate) mod measure;
 mod media;
 mod region;
 mod scale;
@@ -607,6 +608,7 @@ fn build(
             "on_drag",
             "style",
         ],
+        "measure" => &[],
         _ => {
             return Err(mlua::Error::runtime(format!(
                 "unsupported iced element: {kind}"
@@ -656,6 +658,14 @@ fn build(
         "region" => {
             let content = element(node.get::<Table>("content")?, ctx)?;
             region::Region::new(content, ctx.window()).into()
+        }
+        "measure" => {
+            let id = node
+                .get::<Option<String>>("id")?
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| mlua::Error::runtime("measure requires a nonempty id"))?;
+            let content = element(node.get::<Table>("content")?, ctx)?;
+            measure::Measured::new(content, id, ctx.window()).into()
         }
         "markdown" => advanced::markdown(node, ctx)?,
         "responsive" => advanced::responsive(node, ctx, layout)?,
@@ -772,6 +782,7 @@ mod tests {
             "{kind='text',content='x',width=-1}",
             "{kind='text',content='x',color='invalid'}",
             "{kind='column',content={false}}",
+            "{kind='measure',content={kind='text',content='x'}}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_err(),
@@ -1189,6 +1200,7 @@ mod tests {
             "{kind='mouse_area',content={kind='text',content='x'}}",
             "{kind='sensor',content={kind='text',content='x'}}",
             "{kind='region',content={kind='text',content='x'}}",
+            "{kind='measure',id='target',content={kind='text',content='x'}}",
             "{kind='scrollable',content={kind='text',content='x'}}",
             "{kind='text_input'}",
             "{kind='pick_list',options={}}",

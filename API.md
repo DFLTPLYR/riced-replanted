@@ -32,6 +32,7 @@ stub when this document changes.
   - [Custom widgets](#custom-widgets)
   - [Components](#components)
   - [Layer surfaces](#layer-surfaces)
+  - [Popup surfaces](#popup-surfaces)
   - [Native windows](#native-windows)
   - [Input regions](#input-regions)
 - [Known limits](#known-limits)
@@ -46,8 +47,8 @@ stub when this document changes.
 - Colors are ASCII strings in `#RRGGBB` or `#RRGGBBAA` form.
 - Widget indices in `render` and widget callbacks are zero-based.
 - A widget constructor returns an opaque element table. Pass elements back to
-  `iced` constructors, `iced.layer`, `iced.component`, or return them from
-  `app:view`.
+  `iced` constructors, `iced.layer`, `iced.popup`, `iced.component`, or return them
+  from `app:view`.
 - `update` may return `nil`, one task table, or a list of task tables. See
   [Tasks](#tasks).
 
@@ -165,7 +166,7 @@ Every callback except `update` and `view` is optional.
 | Callback       | Signature                  | Return                                                              |
 | -------------- | -------------------------- | ------------------------------------------------------------------- |
 | `update`       | `(self, event, component)` | `nil`, a task, or a list of tasks                                   |
-| `view`         | `(self, props)`            | element, `iced.layer`/`iced.window`, or a nonempty list of surfaces |
+| `view`         | `(self, props)`            | element, `iced.layer`/`iced.window`/`iced.popup`, or a nonempty list of surfaces |
 | `title`        | `(self, window)`           | string or `nil`                                                     |
 | `subscription` | `(self, active)`           | subscription, list of subscriptions, or `nil`                       |
 | `theme`        | `(self, window)`           | palette table or `nil`                                              |
@@ -729,6 +730,45 @@ iced.region(iced.container(iced.component("panel", "components.panel"), {
     width = 320,
     height = 40,
 }))
+```
+
+#### `iced.measure(content, props)`
+
+Wraps content and records its laid-out rectangle. `props.id` is a required
+nonempty string. Layout is unchanged.
+
+```lua
+local close = iced.measure(
+    iced.button(iced.text("x"), { on_press = "close" }),
+    { id = "close_button" }
+)
+
+local bounds = iced.bounds("close_button")
+-- { x, y, width, height } in surface-local logical pixels, or nil
+```
+
+`iced.bounds(id)` returns the last measured rectangle for the current surface.
+If that surface has no measurement for `id`, it falls back to the most recent
+measurement of that id on another surface. This matters because `app:view` runs
+once per layer/window/popup. It is `nil` before the first layout/draw, so call
+it from `view` and handle nil. The rectangle is relative to the layer or window
+where the measured widget lives, which is the coordinate space popup anchors
+use.
+
+There is no `z` coordinate. Iced layouts are two-dimensional; draw order comes
+from tree order, overlays, and layer levels. Output-global coordinates are also
+not exposed; bounds are surface-local.
+
+Use it to anchor a popup to a widget:
+
+```lua
+local bounds = iced.bounds("close_button")
+local anchor = bounds and {
+    x = bounds.x,
+    y = bounds.y + bounds.height,
+    width = bounds.width,
+    height = bounds.height,
+}
 ```
 
 #### `iced.table(content, props)`
@@ -1334,6 +1374,88 @@ end
 `view` also runs once for surface discovery, so keep it free of side effects.
 `props.window` identifies the surface currently being rendered, not every layer
 in the list.
+
+### Popup surfaces
+
+`iced.popup(content, settings)` declares a native XDG popup parented to a layer
+surface. Keep it in `app:view` and set `visible = false` to hide it, or omit it
+to close it. The parent must be an `iced.layer` declared in the same view.
+
+```lua
+function app:view()
+    return {
+        iced.layer(iced.text("bar"), { id = "bar", size = { width = 200, height = 30 } }),
+        iced.popup(iced.text("menu"), {
+            id = "menu",
+            visible = self.menu_open,
+            parent = "bar",
+            width = 180,
+            height = 120,
+            anchor = { x = 12, y = 30, width = 40, height = 30 },
+        }),
+    }
+end
+```
+
+| Key              | Values                                       | Default        |
+| ---------------- | -------------------------------------------- | -------------- |
+| `id`             | nonempty string                              | position-based |
+| `visible`        | boolean                                      | true           |
+| `parent`         | `iced.layer` id                              | required       |
+| `width`, `height`| number in 1..32768, rounded                  | required       |
+| `x`, `y`         | finite number, rounded                       | 0, 0           |
+| `anchor`         | `{ x, y, width, height }`, rounded            | none           |
+| `on_closed`      | function                                     | none           |
+
+`width`, `height`, `x`, `y`, and anchor values are logical pixels. `x` and `y`
+are relative to the parent layer surface and are used when `anchor` is absent.
+`anchor` attaches the popup to a rectangle in the parent surface; the compositor
+may flip or slide it to stay on screen. To anchor to a widget, wrap it with
+`iced.measure` and pass `iced.bounds(id)` as shown in
+[`iced.measure`](#icedmeasurecontent-props). Popup ids share the surface-id namespace
+with layers and windows. The size is fixed; the popup does not measure or resize
+itself. Changing `width`, `height`, `x`, `y`, or `anchor` repositions the open
+popup; changing `parent` recreates it. Popups are created after their parent
+layer.
+
+`visible = false` removes the native popup but keeps the declaration in place.
+Setting it back to true opens a fresh popup. This is equivalent to omitting and
+re-adding the declaration.
+
+`on_closed` runs when the compositor dismisses the popup or a window-close task
+closes it:
+
+```lua
+on_closed = function()
+    shell.menu = false
+end
+```
+
+The usual `{ type = "window_closed", id = "menu" }` update event is still sent.
+Use either path, not both, or make both idempotent. `on_closed` is not called
+when the view itself hides or removes the popup, because that state change has
+already happened.
+
+The popup can contain components and ordinary widgets, but it cannot contain
+another surface root. The popup surface paints only its content; wrap it in a
+styled `iced.container` for a background, border, radius, or padding. The
+compositor may flip or slide it to stay on screen.
+
+Closing works like native windows:
+
+- Omitting the popup from `app:view` removes it. Inside the popup,
+  `props.window` is its window handle, so a
+  `{ type = "window", window = props.window, action = "close" }` task closes it.
+- When the compositor dismisses it, `update` receives
+  `{ type = "window_closed", id = "menu" }`. Set your state to false there.
+- If the view keeps declaring the popup after it was closed, it stays closed
+  until `visible` is set to false and true again, or the declaration is removed
+  and added again.
+- Removing the parent layer while a popup is still declared rejects the surface
+  change and keeps the previous surfaces.
+
+Popups have no open/close animation or lifecycle callbacks. Return a different
+`id` or remove and re-add the declaration to reopen one.
 
 ### Native windows
 

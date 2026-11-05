@@ -71,6 +71,12 @@ function iced.window(settings)
 	return node
 end
 
+function iced.popup(content, settings)
+	assert(type(content) == "table", "popup content must be an iced element")
+	assert(settings == nil or type(settings) == "table", "popup settings must be a table")
+	return { kind = "popup", content = content, settings = settings or {} }
+end
+
 -- Custom widgets: define a named constructor once, then use iced.name(props).
 -- Files under components/widgets/ are loaded automatically; redefining a name
 -- replaces the previous constructor so edits reload.
@@ -319,6 +325,14 @@ end
 function animations.remove(key)
 	if records[key] then records[key].control:cancel() end
 	records[key] = nil
+end
+
+function iced.measure(content, props)
+	assert(type(content) == "table", "measure content must be an iced element")
+	assert(props == nil or type(props) == "table", "measure props must be a table")
+	local id = props and props.id
+	assert(type(id) == "string" and id ~= "", "measure requires a nonempty id")
+	return { kind = "measure", content = content, id = id }
 end
 
 function iced.define(name, factory)

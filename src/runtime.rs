@@ -18,7 +18,12 @@ use iced_exwlshell::{
 use mlua::{Function, Lua, LuaSerdeExt, Table, UserData, Value};
 use riced_extension_sdk::log;
 
-use crate::{layers, modules, plugins, update, update::Layer, widgets, widgets::Ctx};
+use crate::{
+    layers, modules, plugins, update,
+    update::{Layer, Popup, popup_settings},
+    widgets,
+    widgets::Ctx,
+};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -293,6 +298,7 @@ pub struct App {
     windows: Rc<RefCell<Vec<window::Id>>>,
     layers: Vec<Layer>,
     toplevels: Vec<update::Window>,
+    popups: Vec<Popup>,
     surfaces_dirty: Cell<bool>,
     pending: Vec<ExwlShellCustomActionWithId>,
     modules: Rc<RefCell<modules::Modules>>,
@@ -454,6 +460,7 @@ pub fn load_with_plugins(
         windows: Rc::new(RefCell::new(Vec::new())),
         layers: Vec::new(),
         toplevels: Vec::new(),
+        popups: Vec::new(),
         surfaces_dirty: Cell::new(false),
         pending: Vec::new(),
         modules: Rc::new(RefCell::new(modules::Modules::default())),
@@ -763,18 +770,26 @@ impl App {
     }
 
     fn window_closed(&mut self, id: window::Id) -> mlua::Result<Task<Message>> {
-        let Some(index) = self
+        let (surface, on_closed) = if let Some(toplevel) = self
             .toplevels
-            .iter()
-            .position(|toplevel| toplevel.window == id)
-        else {
+            .iter_mut()
+            .find(|toplevel| toplevel.window == id)
+        {
+            toplevel.closed = true;
+            (toplevel.id.clone(), None)
+        } else if let Some(popup) = self.popups.iter_mut().find(|popup| popup.window == id) {
+            if popup.closed {
+                return Ok(Task::none());
+            }
+            popup.closed = true;
+            (popup.id.clone(), popup.on_closed.clone())
+        } else {
             return Ok(Task::none());
         };
-        self.toplevels[index].closed = true;
+        self.forget_window(id)?;
         let event = self.lua.create_table()?;
         event.set("type", "window_closed")?;
-        event.set("id", self.toplevels[index].id.as_str())?;
-        self.forget_window(id)?;
+        event.set("id", surface.as_str())?;
         let task = match self.update.call::<Value>((self.state.clone(), event)) {
             Ok(value) => match self.tasks(value) {
                 Ok(task) => task,
@@ -788,6 +803,11 @@ impl App {
                 Task::none()
             }
         };
+        if let Some(callback) = on_closed
+            && let Err(error) = callback.call::<()>(())
+        {
+            log::error!(target: "popup.close", "popup on_closed callback failed: {error}");
+        }
         if let Err(error) = self.reconcile_layers() {
             log::error!(target: "window.close", "window close changed surfaces but the view is invalid: {error}");
         }
@@ -826,7 +846,9 @@ impl App {
             props.set("width", size.width)?;
             props.set("height", size.height)?;
         }
-        let node = self.view.call((self.state.clone(), props))?;
+        let node = widgets::measure::with_window(Some(id), || {
+            self.view.call((self.state.clone(), props))
+        })?;
         self.modules.borrow_mut().watch_all(&self.lua)?;
         Ok(node)
     }
@@ -1026,6 +1048,7 @@ impl App {
         let node = self.view_node(window::Id::unique())?;
         let mut layers = Vec::new();
         let mut toplevels = Vec::new();
+        let mut popups = Vec::new();
         let mut ids = HashSet::new();
         for (index, node) in layers::nodes(node)?.into_iter().enumerate() {
             let settings = node.get("settings")?;
@@ -1049,6 +1072,19 @@ impl App {
                     client_side_decorations: window.client_side_decorations,
                     closed: false,
                 });
+            } else if kind == "popup" {
+                let popup = layers::popup(settings)?;
+                popups.push(Popup {
+                    id,
+                    window: window::Id::unique(),
+                    parent: popup.parent,
+                    parent_window: None,
+                    size: popup.size,
+                    position: popup.position,
+                    anchor: popup.anchor,
+                    on_closed: popup.on_closed,
+                    closed: false,
+                });
             } else {
                 layers.push(Layer {
                     id,
@@ -1057,46 +1093,89 @@ impl App {
                 });
             }
         }
+        let layer_ids = layers
+            .iter()
+            .map(|layer| layer.id.as_str())
+            .collect::<HashSet<_>>();
+        for popup in &mut popups {
+            if !layer_ids.contains(popup.parent.as_str()) {
+                return Err(mlua::Error::runtime(format!(
+                    "popup {} parent {:?} must be an iced.layer declared in the same view",
+                    popup.id, popup.parent
+                )));
+            }
+            popup.parent_window = layers
+                .iter()
+                .find(|layer| layer.id == popup.parent)
+                .map(|layer| layer.window);
+        }
         self.layers = layers;
         self.toplevels = toplevels;
+        self.popups = popups;
         Ok(())
     }
 
     fn layer_tasks(&self) -> Task<Message> {
-        let mut tasks = self
-            .layers
-            .iter()
-            .map(|layer| {
-                Task::done(Message::Surface(ExwlShellCustomActionWithId::new(
+        let mut tasks = Task::none();
+        for layer in &self.layers {
+            tasks = tasks.chain(Task::done(Message::Surface(
+                ExwlShellCustomActionWithId::new(
                     None,
                     ExwlShellCustomAction::NewLayerShell {
                         id: layer.window,
                         settings: layer.settings.clone(),
                     },
-                )))
-            })
-            .collect::<Vec<_>>();
-        tasks.extend(self.toplevels.iter().map(|window| {
-            Task::done(Message::Surface(ExwlShellCustomActionWithId::new(
-                None,
-                ExwlShellCustomAction::NewBaseWindow {
-                    settings: IcedXdgWindowSettings {
-                        size: Some(window.size),
-                        client_side_decorations: window.client_side_decorations,
+                ),
+            )));
+        }
+        for window in &self.toplevels {
+            tasks = tasks.chain(Task::done(Message::Surface(
+                ExwlShellCustomActionWithId::new(
+                    None,
+                    ExwlShellCustomAction::NewBaseWindow {
+                        settings: IcedXdgWindowSettings {
+                            size: Some(window.size),
+                            client_side_decorations: window.client_side_decorations,
+                        },
+                        id: window.window,
                     },
-                    id: window.window,
-                },
-            )))
-        }));
-        Task::batch(tasks)
+                ),
+            )));
+        }
+        for popup in &self.popups {
+            if popup.closed {
+                continue;
+            }
+            let Some(parent) = self
+                .layers
+                .iter()
+                .find(|layer| layer.id == popup.parent)
+                .map(|layer| layer.window)
+            else {
+                continue;
+            };
+            tasks = tasks.chain(Task::done(Message::Surface(
+                ExwlShellCustomActionWithId::new(
+                    None,
+                    ExwlShellCustomAction::NewPopUp {
+                        settings: popup_settings(popup, parent),
+                        id: popup.window,
+                    },
+                ),
+            )));
+        }
+        tasks
     }
 
     fn reconcile_layers(&mut self) -> mlua::Result<()> {
         let previous = self.layers.clone();
         let previous_toplevels = self.toplevels.clone();
-        let had_surfaces = !previous.is_empty() || !previous_toplevels.is_empty();
+        let previous_popups = self.popups.clone();
+        let had_surfaces =
+            !previous.is_empty() || !previous_toplevels.is_empty() || !previous_popups.is_empty();
         self.prepare_layers()?;
-        let has_surfaces = !self.layers.is_empty() || !self.toplevels.is_empty();
+        let has_surfaces =
+            !self.layers.is_empty() || !self.toplevels.is_empty() || !self.popups.is_empty();
         if !previous.is_empty() && !has_surfaces {
             let has_base = self.windows.borrow().iter().any(|id| {
                 !previous.iter().any(|layer| layer.window == *id)
@@ -1116,6 +1195,16 @@ impl App {
             &previous_toplevels,
             &mut self.toplevels,
         ));
+        let parents = self
+            .layers
+            .iter()
+            .map(|layer| (layer.id.clone(), layer.window))
+            .collect::<HashMap<_, _>>();
+        self.pending.extend(update::reconcile_popups(
+            &previous_popups,
+            &mut self.popups,
+            &parents,
+        ));
         if had_surfaces {
             let mut live = self
                 .layers
@@ -1126,6 +1215,12 @@ impl App {
                         .iter()
                         .filter(|window| !window.closed)
                         .map(|window| window.window),
+                )
+                .chain(
+                    self.popups
+                        .iter()
+                        .filter(|popup| !popup.closed)
+                        .map(|popup| popup.window),
                 )
                 .collect::<HashSet<_>>();
             if !has_surfaces {
@@ -1158,6 +1253,7 @@ impl App {
             !windows.is_empty()
         });
         self.sizes.borrow_mut().remove(&id);
+        widgets::measure::forget_window(id);
         widgets::forget_window(self.generation, id);
         let mounts = self
             .mounts
@@ -1202,6 +1298,10 @@ impl App {
             .toplevels
             .iter()
             .any(|window| window.window == id && window.closed)
+            || self
+                .popups
+                .iter()
+                .any(|popup| popup.window == id && popup.closed)
         {
             return Ok(iced::widget::Space::new().into());
         }
@@ -1215,9 +1315,9 @@ impl App {
             self.windows.borrow_mut().push(id);
         }
         let mut node = self.view_node(id)?;
-        if !self.layers.is_empty() || !self.toplevels.is_empty() {
+        if !self.layers.is_empty() || !self.toplevels.is_empty() || !self.popups.is_empty() {
             let nodes = layers::nodes(node)?;
-            if nodes.len() != self.layers.len() + self.toplevels.len() {
+            if nodes.len() != self.layers.len() + self.toplevels.len() + self.popups.len() {
                 self.surfaces_dirty.set(true);
             }
             let mut by_id = HashMap::new();
@@ -1232,6 +1332,16 @@ impl App {
                                 && window.title == toplevel.title
                                 && window.client_side_decorations
                                     == toplevel.client_side_decorations => {}
+                        _ => self.surfaces_dirty.set(true),
+                    }
+                } else if node.get::<String>("kind")? == "popup" {
+                    let popup = layers::popup(settings)?;
+                    match self.popups.iter().find(|current| current.id == id) {
+                        Some(current)
+                            if popup.parent == current.parent
+                                && popup.size == current.size
+                                && popup.position == current.position
+                                && popup.anchor == current.anchor => {}
                         _ => self.surfaces_dirty.set(true),
                     }
                 } else if let Some(layer) = self.layers.iter().find(|layer| layer.id == id) {
@@ -1255,6 +1365,12 @@ impl App {
                         .iter()
                         .find(|toplevel| toplevel.window == id)
                         .map(|toplevel| toplevel.id.as_str())
+                })
+                .or_else(|| {
+                    self.popups
+                        .iter()
+                        .find(|popup| popup.window == id)
+                        .map(|popup| popup.id.as_str())
                 });
             // A replaced surface can receive a final render before its close action runs.
             let Some(surface) = surface else {
@@ -1566,6 +1682,7 @@ impl App {
         candidate.generation = self.generation + 1;
         candidate.layers = self.layers.clone();
         candidate.toplevels = self.toplevels.clone();
+        candidate.popups = self.popups.clone();
         *candidate.windows.borrow_mut() = self.windows.borrow().clone();
         *candidate.sizes.borrow_mut() = self.sizes.borrow().clone();
         candidate.reconcile_layers()?;
@@ -1574,6 +1691,9 @@ impl App {
         }
         for toplevel in &candidate.toplevels {
             candidate.view(toplevel.window)?;
+        }
+        for popup in &candidate.popups {
+            candidate.view(popup.window)?;
         }
         for &id in candidate.windows.borrow().clone().iter() {
             candidate.view(id)?;
@@ -1625,6 +1745,7 @@ impl App {
         }
         let previous_layers = self.layers.clone();
         let previous_toplevels = self.toplevels.clone();
+        let previous_popups = self.popups.clone();
         let previous_mounts = self.mounts.borrow().clone();
         let previous_owners = self.windows_of.borrow().clone();
         let previous_windows = self.windows.borrow().clone();
@@ -1676,6 +1797,12 @@ impl App {
                     affected.push(toplevel.window);
                 }
             }
+            for popup in &self.popups {
+                self.view(popup.window)?;
+                if !affected.contains(&popup.window) {
+                    affected.push(popup.window);
+                }
+            }
             for &id in &affected {
                 self.view(id)?;
             }
@@ -1696,6 +1823,7 @@ impl App {
             }
             self.layers = previous_layers;
             self.toplevels = previous_toplevels;
+            self.popups = previous_popups;
             *self.mounts.borrow_mut() = previous_mounts;
             *self.windows_of.borrow_mut() = previous_owners;
             *self.windows.borrow_mut() = previous_windows;
@@ -2350,6 +2478,157 @@ mod tests {
         end
         return riced.daemon(app, 'test', app.update, app.view):run()
     "#;
+
+    #[test]
+    fn popup_surfaces_open_reposition_and_close() {
+        let source = r#"
+            open, px, py, pw, ph = true, 4, 30, 120, 80
+            local app = {}
+            function app:update(event)
+                if type(event) == 'table' and event.type == 'window_closed' then
+                    open = false
+                end
+            end
+            function app:view()
+                local surfaces = {
+                    iced.layer(iced.text('bar'), {
+                        id = 'bar',
+                        size = { width = 200, height = 30 },
+                        anchor = { 'top', 'left', 'right' },
+                    }),
+                }
+                if open then
+                    surfaces[#surfaces + 1] = iced.popup(iced.text('menu'), {
+                        id = 'menu',
+                        parent = 'bar',
+                        width = pw,
+                        height = ph,
+                        x = px,
+                        y = py,
+                        on_closed = function() closed_callback = true end,
+                    })
+                end
+                return surfaces
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let mut app = load(source, Path::new("shell.lua")).unwrap();
+        app.reconcile_layers().unwrap();
+        assert_eq!(app.layers.len(), 1);
+        assert_eq!(app.popups.len(), 1);
+        let popup = app.popups[0].clone();
+        assert_eq!(popup.parent, "bar");
+        assert!(
+            app.pending
+                .iter()
+                .any(|action| matches!(&action.1, ExwlShellCustomAction::NewPopUp { id, .. } if *id == popup.window))
+        );
+        app.view(popup.window).unwrap();
+
+        app.pending.clear();
+        app.lua.globals().set("px", 8).unwrap();
+        app.reconcile_layers().unwrap();
+        assert_eq!(app.popups[0].window, popup.window);
+        assert!(app.pending.iter().any(|action| matches!(
+            &action.1,
+            ExwlShellCustomAction::PopUpReposition { settings }
+                if settings.placement == iced_exwlshell::reexport::PopupPlacement::Position((8, 30))
+        )));
+
+        app.pending.clear();
+        app.lua.globals().set("open", false).unwrap();
+        app.reconcile_layers().unwrap();
+        assert!(app.popups.is_empty());
+        assert!(app.pending.iter().any(|action| {
+            matches!(&action.1, ExwlShellCustomAction::RemoveWindow)
+                && action.0 == Some(popup.window)
+        }));
+
+        app.pending.clear();
+        app.lua.globals().set("open", true).unwrap();
+        app.reconcile_layers().unwrap();
+        let reopened = app.popups[0].clone();
+        assert_ne!(reopened.window, popup.window);
+        app.view(reopened.window).unwrap();
+        let _ = app.update(Message::WindowClosed(reopened.window)).unwrap();
+        assert!(!app.lua.globals().get::<bool>("open").unwrap());
+        assert!(app.lua.globals().get::<bool>("closed_callback").unwrap());
+        assert!(app.popups.is_empty());
+    }
+
+    #[test]
+    fn measured_widgets_publish_surface_local_bounds() {
+        let source = r#"
+            local app = {}
+            function app:update() end
+            function app:view()
+                seen = iced.bounds("target")
+                return iced.layer(
+                    iced.container(
+                        iced.measure(iced.button(iced.text("x"), { on_press = "noop" }), {
+                            id = "target",
+                        }),
+                        { padding = 10 }
+                    ),
+                    { id = "top", size = { width = 200, height = 50 } }
+                )
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let mut app = load(source, Path::new("shell.lua")).unwrap();
+        app.prepare_layers().unwrap();
+        let window = app.layers[0].window;
+        let mut tree = iced::advanced::widget::Tree::empty();
+        animation_frame(&mut app, window, &mut tree, std::time::Instant::now());
+        app.view(window).unwrap();
+        let seen: Table = app.lua.globals().get("seen").unwrap();
+        assert_eq!(seen.get::<f32>("x").unwrap(), 10.0);
+        assert_eq!(seen.get::<f32>("y").unwrap(), 10.0);
+        assert!(seen.get::<f32>("width").unwrap() > 0.0);
+        assert!(seen.get::<f32>("height").unwrap() > 0.0);
+    }
+
+    #[test]
+    fn hidden_popups_are_not_opened() {
+        let source = r#"
+            visible = false
+            return riced.daemon({}, 'test', function() end, function()
+                return {
+                    iced.layer(iced.text('bar'), { id = 'bar', size = { width = 200, height = 30 } }),
+                    iced.popup(iced.text('menu'), {
+                        id = 'menu', visible = visible, parent = 'bar',
+                        width = 120, height = 80, x = 4, y = 30,
+                    }),
+                }
+            end):run()
+        "#;
+        let mut app = load(source, Path::new("shell.lua")).unwrap();
+        app.reconcile_layers().unwrap();
+        assert_eq!(app.layers.len(), 1);
+        assert!(app.popups.is_empty());
+
+        app.lua.globals().set("visible", true).unwrap();
+        app.reconcile_layers().unwrap();
+        assert_eq!(app.popups.len(), 1);
+        app.view(app.popups[0].window).unwrap();
+    }
+
+    #[test]
+    fn popup_parent_must_be_a_layer() {
+        let source = r#"
+            return riced.daemon({}, 'test', function() end, function()
+                return {
+                    iced.window({ id = 'settings', content = iced.text('settings') }),
+                    iced.popup(iced.text('menu'), {
+                        id = 'menu', parent = 'settings', width = 100, height = 50,
+                    }),
+                }
+            end):run()
+        "#;
+        let mut app = load(source, Path::new("shell.lua")).unwrap();
+        let error = app.prepare_layers().unwrap_err().to_string();
+        assert!(error.contains("parent \"settings\" must be an iced.layer"));
+    }
 
     #[test]
     fn layers_create_distinct_surfaces_and_render_after_updates() {

@@ -1,10 +1,14 @@
+use std::collections::HashMap;
+
 use iced::window;
 use iced_exwlshell::{
     actions::{
-        ExwlShellCustomAction as Action, ExwlShellCustomActionWithId, IcedXdgWindowSettings,
+        ExwlShellCustomAction as Action, ExwlShellCustomActionWithId, IcedNewPopupSettings,
+        IcedXdgWindowSettings,
     },
     reexport::{NewLayerShellSettings, PixelSize},
 };
+use mlua::Function;
 
 #[derive(Clone)]
 pub struct Layer {
@@ -20,6 +24,19 @@ pub struct Window {
     pub title: String,
     pub size: PixelSize,
     pub client_side_decorations: bool,
+    pub closed: bool,
+}
+
+#[derive(Clone)]
+pub struct Popup {
+    pub id: String,
+    pub window: window::Id,
+    pub parent: String,
+    pub parent_window: Option<window::Id>,
+    pub size: PixelSize,
+    pub position: (i32, i32),
+    pub anchor: Option<(i32, i32, PixelSize)>,
+    pub on_closed: Option<Function>,
     pub closed: bool,
 }
 
@@ -151,6 +168,83 @@ pub fn reconcile_windows(
     actions
 }
 
+pub fn reconcile_popups(
+    previous: &[Popup],
+    next: &mut [Popup],
+    parents: &HashMap<String, window::Id>,
+) -> Vec<ExwlShellCustomActionWithId> {
+    let mut actions = Vec::new();
+    let mut used = Vec::new();
+    for popup in next.iter_mut() {
+        let Some(old) = previous.iter().find(|old| old.id == popup.id) else {
+            if let Some(parent) = parents.get(&popup.parent).copied() {
+                popup.parent_window = Some(parent);
+                actions.push(open_popup(popup, parent));
+            } else {
+                popup.closed = true;
+            }
+            continue;
+        };
+        used.push(old.window);
+        popup.closed = old.closed;
+        if old.closed {
+            popup.window = old.window;
+            popup.parent_window = old.parent_window;
+            continue;
+        }
+        let Some(parent) = parents.get(&popup.parent).copied() else {
+            actions.push(remove_popup(old.window));
+            popup.window = old.window;
+            popup.closed = true;
+            continue;
+        };
+        if old.parent != popup.parent || old.parent_window != Some(parent) {
+            actions.push(remove_popup(old.window));
+            popup.window = window::Id::unique();
+            popup.parent_window = Some(parent);
+            actions.push(open_popup(popup, parent));
+            continue;
+        }
+        popup.window = old.window;
+        popup.parent_window = Some(parent);
+        if old.size != popup.size || old.position != popup.position || old.anchor != popup.anchor {
+            actions.push(ExwlShellCustomActionWithId::new(
+                Some(old.window),
+                Action::PopUpReposition {
+                    settings: popup_settings(popup, parent),
+                },
+            ));
+        }
+    }
+    for old in previous {
+        if !used.contains(&old.window) {
+            actions.push(remove_popup(old.window));
+        }
+    }
+    actions
+}
+
+pub fn popup_settings(popup: &Popup, parent: window::Id) -> IcedNewPopupSettings {
+    match popup.anchor {
+        Some((x, y, size)) => IcedNewPopupSettings::new(parent, popup.size, (x, y), size),
+        None => IcedNewPopupSettings::at_position(parent, popup.size, popup.position),
+    }
+}
+
+fn open_popup(popup: &Popup, parent: window::Id) -> ExwlShellCustomActionWithId {
+    ExwlShellCustomActionWithId::new(
+        None,
+        Action::NewPopUp {
+            settings: popup_settings(popup, parent),
+            id: popup.window,
+        },
+    )
+}
+
+fn remove_popup(window: window::Id) -> ExwlShellCustomActionWithId {
+    ExwlShellCustomActionWithId::new(Some(window), Action::RemoveWindow)
+}
+
 fn open_window(window: &Window) -> ExwlShellCustomActionWithId {
     ExwlShellCustomActionWithId::new(
         None,
@@ -276,6 +370,91 @@ mod tests {
         let mut next = vec![window("settings")];
         next[0].size = PixelSize::px(800, 600);
         assert!(reconcile_windows(std::slice::from_ref(&old), &mut next).is_empty());
+        assert_eq!(next[0].window, old.window);
+        assert!(next[0].closed);
+    }
+
+    fn popup(id: &str, parent: &str) -> Popup {
+        Popup {
+            id: id.into(),
+            window: window::Id::unique(),
+            parent: parent.into(),
+            parent_window: None,
+            size: PixelSize::px(200, 120),
+            position: (4, 32),
+            anchor: None,
+            on_closed: None,
+            closed: false,
+        }
+    }
+
+    fn parents() -> HashMap<String, window::Id> {
+        HashMap::from([("bar".to_owned(), window::Id::unique())])
+    }
+
+    #[test]
+    fn reconciles_native_popups() {
+        let parents = parents();
+        let mut next = vec![popup("menu", "bar")];
+        let actions = reconcile_popups(&[], &mut next, &parents);
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].0.is_none());
+        assert!(matches!(&actions[0].1, Action::NewPopUp { id, settings }
+                if *id == next[0].window
+                    && settings.parent == Some(parents["bar"])
+                    && settings.size.to_set() == (200, 120)));
+
+        let old = next[0].clone();
+        assert!(reconcile_popups(std::slice::from_ref(&old), &mut next, &parents).is_empty());
+        assert_eq!(next[0].window, old.window);
+
+        let mut anchored = popup("anchored", "bar");
+        anchored.anchor = Some((10, 20, PixelSize::px(30, 40)));
+        let actions = reconcile_popups(&[], &mut [anchored], &parents);
+        assert!(matches!(
+            &actions[0].1,
+            Action::NewPopUp { settings, .. }
+                if settings.placement == iced_exwlshell::reexport::PopupPlacement::Anchored {
+                    position: (10, 20),
+                    size: PixelSize::px(30, 40),
+                }
+        ));
+
+        next[0].size = PixelSize::px(240, 160);
+        next[0].position = (8, 40);
+        let actions = reconcile_popups(std::slice::from_ref(&old), &mut next, &parents);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].0, Some(old.window));
+        assert!(matches!(
+            &actions[0].1,
+            Action::PopUpReposition { settings }
+                if settings.size.to_set() == (240, 160)
+                    && settings.placement == iced_exwlshell::reexport::PopupPlacement::Position((8, 40))
+        ));
+        assert_eq!(next[0].window, old.window);
+
+        next[0].parent = "other".to_owned();
+        let mut other = parents.clone();
+        other.insert("other".to_owned(), window::Id::unique());
+        let actions = reconcile_popups(std::slice::from_ref(&old), &mut next, &other);
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0].1, Action::RemoveWindow));
+        assert!(matches!(actions[1].1, Action::NewPopUp { .. }));
+        assert_ne!(next[0].window, old.window);
+
+        let old = next[0].clone();
+        let removed = reconcile_popups(std::slice::from_ref(&old), &mut [], &parents);
+        assert!(matches!(removed[0].1, Action::RemoveWindow));
+    }
+
+    #[test]
+    fn closed_popups_do_not_reopen() {
+        let parents = parents();
+        let mut old = popup("menu", "bar");
+        old.closed = true;
+        let mut next = vec![popup("menu", "bar")];
+        next[0].size = PixelSize::px(300, 200);
+        assert!(reconcile_popups(std::slice::from_ref(&old), &mut next, &parents).is_empty());
         assert_eq!(next[0].window, old.window);
         assert!(next[0].closed);
     }
