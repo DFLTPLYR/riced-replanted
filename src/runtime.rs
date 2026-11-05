@@ -1275,6 +1275,7 @@ impl App {
             };
             node = surface_node.get("content")?;
         }
+        node = self.animations()?.get::<Function>("select")?.call(node)?;
         let mut path = Vec::new();
         let mut ids = HashSet::new();
         let node = self.expand(node, id, &mut path, &mut ids)?;
@@ -1644,6 +1645,8 @@ impl App {
                 }
             }
         }
+        let restore_animations: Function =
+            self.animations()?.get::<Function>("checkpoint")?.call(())?;
         let result = (|| {
             self.modules
                 .borrow_mut()
@@ -1680,6 +1683,7 @@ impl App {
         })();
         if let Err(error) = result {
             self.modules.borrow_mut().restore(&self.lua, snapshot)?;
+            restore_animations.call::<()>(())?;
             handlers.clear()?;
             for pair in previous_handlers.pairs::<Value, Value>() {
                 let (name, handler) = pair?;
@@ -3117,6 +3121,70 @@ return m",
     }
 
     #[test]
+    fn native_exit_is_retained_only_on_its_own_surface() {
+        let source = r#"
+            local app={show=true}
+            function app:view()
+                return {
+                    iced.layer(self.show and iced.container(iced.space(), {
+                        id='card',width=50,height=50,transition={exit={to={scale=0}}}
+                    }) or iced.space(),{id='left'}),
+                    iced.layer(iced.space(),{id='right'})
+                }
+            end
+            return riced.daemon(app,'test',function() end,app.view):run()
+        "#;
+        let mut app = load(source, Path::new("shell.lua")).unwrap();
+        app.prepare_layers().unwrap();
+        let left = app.layers[0].window;
+        let right = app.layers[1].window;
+        app.view(left).unwrap();
+        app.view(right).unwrap();
+        app.state.set("show", false).unwrap();
+        let left = app.view(left).unwrap();
+        let right = app.view(right).unwrap();
+        let left = iced::advanced::widget::Tree::new(&left);
+        let right = iced::advanced::widget::Tree::new(&right);
+        assert!(!left.children[0].children.is_empty());
+        assert!(right.children[0].children.is_empty());
+    }
+
+    #[test]
+    fn native_ids_can_be_reused_on_different_surfaces() {
+        let source = r#"
+            local cached = iced.container(iced.space(),{id='cached',transition={exit={to={scale=0}}}})
+            return riced.daemon({},'test',function() end,function()
+                local function card()
+                    return iced.column({cached, iced.container(iced.space(),{id='card',transition={exit={to={scale=0}}}})})
+                end
+                return {iced.layer(card(),{id='left'}),iced.layer(card(),{id='right'})}
+            end):run()
+        "#;
+        let mut app = load(source, Path::new("shell.lua")).unwrap();
+        app.prepare_layers().unwrap();
+        for layer in &app.layers {
+            app.view(layer.window).unwrap();
+        }
+    }
+
+    #[test]
+    fn surface_selection_preserves_list_data_identity() {
+        let source = r#"
+            local item={kind='container',id='data',transition={exit={to={scale=0}}}}
+            return riced.daemon({},'test',function() end,function()
+                return iced.list_view({item},{id='items',render=function(value)
+                    assert(value == item and value.__animation == nil)
+                    return iced.text(value.id)
+                end})
+            end):run()
+        "#;
+        let app = load(source, Path::new("shell.lua")).unwrap();
+        let window = window::Id::unique();
+        app.view(window).unwrap();
+        app.view(window).unwrap();
+    }
+
+    #[test]
     fn update_receives_the_originating_component() {
         let shell = r#"
             local app = { origin = 'none' }
@@ -3543,6 +3611,42 @@ return m";
         assert!(matches!(app.check_reload().unwrap(), Change::Windows(_)));
         app.view(id).unwrap();
         assert_eq!(seen(&app, "seen_left"), "v3:0");
+    }
+
+    #[test]
+    fn rejected_module_reload_restores_instances_and_animation_controls() {
+        let shell = "return riced.daemon({},'test',function() end,function() return iced.component('card','card') end):run()";
+        let original = "return {view=function(self) return iced.text('ok') end, on_visible=function(self) self.count=42 end}";
+        let profile = Profile::new(&[("shell.lua", shell), ("card.lua", original)]);
+        let mut app = load(shell, &profile.shell()).unwrap();
+        let window = window::Id::unique();
+        app.view(window).unwrap();
+        let old = app.mounts.borrow()[&(window, "card".into())].clone();
+        old.control.state().pending_callback = true;
+        profile.write(
+            "card.lua",
+            &original.replace("iced.text('ok')", "iced.text('bad',{bogus=true})"),
+        );
+        assert!(app.reload_modules().is_err());
+        assert!(old.control.state().alive);
+        assert!(old.control.state().pending_callback);
+        app.view(window).unwrap();
+        let current = app.mounts.borrow()[&(window, "card".into())].clone();
+        assert_eq!(current.table, old.table);
+        assert_eq!(current.table.get::<u32>("count").unwrap(), 42);
+        current
+            .table
+            .get::<Table>("animate")
+            .unwrap()
+            .get::<Function>("exit")
+            .unwrap()
+            .call::<()>(())
+            .unwrap();
+        assert_eq!(old.control.state().event, "exit");
+
+        profile.write("card.lua", &original.replace("'ok'", "'updated'"));
+        app.reload_modules().unwrap();
+        assert!(!old.control.state().alive);
     }
 
     #[test]

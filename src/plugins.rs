@@ -1060,6 +1060,35 @@ mod tests {
     }
 
     #[test]
+    fn error_replies_release_callback_slots() {
+        let (tx, mut plugins, lua) = setup();
+        let calls = register(&tx, &["query"]);
+        plugins.poll(&lua).unwrap();
+        for _ in 0..=PENDING_MAX {
+            lua.load("riced.plugins('demo').query(function(result, error) assert(result == nil and error == 'reply exceeds the 256 KiB line limit'); replies=(replies or 0)+1 end)")
+                .exec().unwrap();
+            let ToPlugin::Call { id, .. } = serde_json::from_slice(&calls.recv().unwrap()).unwrap()
+            else {
+                panic!("expected a call");
+            };
+            tx.send(Incoming::Result {
+                conn: 1,
+                id,
+                ok: false,
+                result: Json::Null,
+                error: Some("reply exceeds the 256 KiB line limit".into()),
+            })
+            .unwrap();
+            plugins.poll(&lua).unwrap();
+            assert!(plugins.handles["demo"].pending.lock().unwrap().is_empty());
+        }
+        assert_eq!(
+            lua.globals().get::<usize>("replies").unwrap(),
+            PENDING_MAX + 1
+        );
+    }
+
+    #[test]
     fn disconnect_keeps_the_store_and_marks_the_proxy_dead() {
         let (tx, mut plugins, lua) = setup();
         let _calls = register(&tx, &[]);

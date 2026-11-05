@@ -147,7 +147,7 @@ pub(super) fn parse(node: &Table) -> mlua::Result<Effects> {
     Ok(effects)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Playback {
     pub event: String,
     pub serial: u64,
@@ -245,6 +245,14 @@ impl Control {
 
 impl UserData for Control {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("checkpoint", |lua, this, ()| {
+            let control = this.clone();
+            let playback = this.state().clone();
+            lua.create_function(move |_, ()| {
+                *control.state() = playback.clone();
+                Ok(())
+            })
+        });
         methods.add_method("start", |_, this, event: String| {
             this.request(&event);
             Ok(())

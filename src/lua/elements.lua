@@ -79,10 +79,12 @@ local windows = {}
 local records = {}
 local parent
 local rebuilding = false
+local defer_native = true
 local animations = {}
 riced._animations = animations
 
 function animations.begin(window, tracked)
+	defer_native = true
 	if tracked then
 		windows[window] = windows[window] or {}
 		records = windows[window]
@@ -91,6 +93,41 @@ function animations.begin(window, tracked)
 	end
 	parent = nil
 	for _, record in pairs(records) do record.seen = false end
+end
+
+function animations.checkpoint()
+	local tables, controls = {}, {}
+	local function save(value)
+		local copy = {}
+		for key, field in pairs(value) do copy[key] = field end
+		tables[value] = copy
+	end
+	save(windows)
+	for _, window in pairs(windows) do
+		save(window)
+		for _, record in pairs(window) do
+			save(record)
+			save(record.self)
+			controls[record.control] = record.control:checkpoint()
+		end
+	end
+	local previous_records, previous_parent = records, parent
+	local previous_defer, previous_rebuild = defer_native, rebuilding
+	defer_native = true
+	return function()
+		for _, window in pairs(windows) do
+			for _, record in pairs(window) do
+				if not controls[record.control] then record.control:cancel() end
+			end
+		end
+		for value, copy in pairs(tables) do
+			for key in pairs(value) do value[key] = nil end
+			for key, field in pairs(copy) do value[key] = field end
+		end
+		for _, restore in pairs(controls) do restore() end
+		records, parent = previous_records, previous_parent
+		defer_native, rebuilding = previous_defer, previous_rebuild
+	end
 end
 
 function animations.instance(key, definition, props)
@@ -125,9 +162,46 @@ end
 local native = {}
 function animations.native(node)
 	assert(type(node.id) == "string" and node.id ~= "", "animated widget id must be a nonempty string")
+	if defer_native then return node end
 	local key = "native:" .. (parent or "") .. ":" .. node.kind .. ":" .. node.id
 	animations.instance(key, native, node)
 	return animations.track(key, node)
+end
+
+-- The root view constructs every surface; only register the selected subtree.
+function animations.select(node)
+	defer_native = false
+	local copies = {}
+	local function visit(value)
+		if type(value) ~= "table" then return value end
+		if copies[value] then return copies[value] end
+		local copy = {}
+		copies[value] = value
+		for key, field in pairs(value) do copy[key] = field end
+		local previous = parent
+		if copy.__animation_self then parent = copy.__animation_self.__animation_key end
+		if copy.kind then
+			for _, field in ipairs({ "content", "columns", "header", "tooltip" }) do
+				if not (copy.kind == "list_view" and copy.render and field == "content") then
+					copy[field] = visit(copy[field])
+				end
+			end
+			if copy.transition and copy.id and copy.kind ~= "list_view" and not copy.__animation then
+				copy = animations.native(copy)
+			end
+		else
+			for key, field in pairs(copy) do copy[key] = visit(field) end
+		end
+		parent = previous
+		for key, field in pairs(copy) do
+			if field ~= value[key] then
+				copies[value] = copy
+				return copy
+			end
+		end
+		return value
+	end
+	return visit(node)
 end
 
 function animations.owner(key)

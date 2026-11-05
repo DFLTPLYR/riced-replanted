@@ -315,8 +315,9 @@ Options:
 
 Missing files are created before `onLoaded` runs: `{}` for JSON and an empty
 document for TOML. Missing parent directories are created. Writes are atomic
-(temporary file plus rename). File errors are returned, not raised; `file.error`
-is updated.
+(temporary file plus rename). Existing symbolic links are preserved and their
+destinations are updated; dangling links return an error. File errors are
+returned, not raised; `file.error` is updated.
 
 Callbacks run during construction, so they run before the daemon starts. A file
 created as empty gets `onLoaded`, not `onError`. TOML requires a table at the top
@@ -474,10 +475,14 @@ with a 256 KiB line limit, bounded queues, a `0700` socket directory, and a
 `0600` socket. Extensions run as your user and have the same trust as
 `shell.lua`.
 
+An SDK method reply that exceeds the line limit returns an error to its caller
+instead of leaving the callback pending.
+
 ```sh
 just extension-system
 just extension-wayland
 just extension-dbus
+just extension-themeagen
 ```
 
 ## iced components

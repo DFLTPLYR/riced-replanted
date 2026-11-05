@@ -106,14 +106,17 @@ pub(super) fn progress_bar(
     node: &Table,
     transition: Option<&super::Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
-    let value = transition
-        .and_then(|transition| transition.value("value"))
-        .unwrap_or(node.get::<Option<f32>>("value")?.unwrap_or(0.0));
+    let value = node.get::<Option<f32>>("value")?.unwrap_or(0.0);
     if !(0.0..=1.0).contains(&value) {
         return Err(mlua::Error::runtime(
             "progress_bar value must be from 0 to 1",
         ));
     }
+    // Springs may overshoot valid targets; only the displayed value is bounded.
+    let value = transition
+        .and_then(|transition| transition.value("value"))
+        .unwrap_or(value)
+        .clamp(0.0, 1.0);
     let mut bar = widget::ProgressBar::new(0.0..=1.0, value);
     if let Some(girth) = node.get::<Option<f32>>("girth")? {
         if !girth.is_finite() || girth <= 0.0 {

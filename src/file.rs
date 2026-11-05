@@ -147,6 +147,16 @@ impl File {
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let resolved;
+    let path = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            resolved = fs::canonicalize(path)?;
+            resolved.as_path()
+        }
+        Ok(_) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path,
+        Err(error) => return Err(error),
+    };
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -405,6 +415,44 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn atomic_save_preserves_destination_symlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let (_, dir) = setup("destination-symlink");
+        let target = dir.join("actual.json");
+        fs::write(&target, "old").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        symlink("actual.json", dir.join("relative.json")).unwrap();
+        let link = dir.join("link.json");
+        symlink(dir.join("relative.json"), &link).unwrap();
+        write_atomic(&link, "new").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_link(dir.join("relative.json")).unwrap(),
+            Path::new("actual.json")
+        );
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+
+        fs::remove_file(&target).unwrap();
+        assert!(write_atomic(&link, "lost").is_err());
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!target.exists());
     }
 
     #[test]

@@ -649,10 +649,11 @@ fn axis(node: &Table, key: &str, animated: Option<f32>) -> mlua::Result<Option<L
     if value.is_nil() {
         return Ok(None);
     }
-    match (value.clone(), animated) {
-        (Value::Integer(_) | Value::Number(_), Some(pixels)) => Ok(Some(Length::Fixed(pixels))),
-        _ => length(value).map(Some),
-    }
+    let length = length(value)?;
+    Ok(Some(match (length, animated) {
+        (Length::Fixed(_), Some(pixels)) => Length::Fixed(pixels.max(0.0)),
+        _ => length,
+    }))
 }
 
 #[cfg(test)]
@@ -972,6 +973,49 @@ mod tests {
             .eval()
             .unwrap();
         assert!(Transition::parse(&node).is_err());
+    }
+
+    #[test]
+    fn spring_progress_rebuilds_at_both_boundaries() {
+        let lua = mlua::Lua::new();
+        let node: Table = lua.load("{kind='progress_bar',value=0,transition={change={props={'value'},spring='bouncy',duration=200}}}").eval().unwrap();
+        for (from, to) in [(0.0, 1.0), (1.0, 0.0)] {
+            node.set("value", from).unwrap();
+            let start = Transition::parse(&node).unwrap().unwrap();
+            node.set("value", to).unwrap();
+            let mut target = Transition::parse(&node).unwrap().unwrap();
+            let mut motion =
+                iced_anim::Animated::new(start.motion, target.mode).to(target.motion.clone());
+            let start = std::time::Instant::now();
+            let mut overshot = false;
+            for ms in (10..400).step_by(10) {
+                motion.tick(start + std::time::Duration::from_millis(ms));
+                target.motion = motion.value().clone();
+                overshot |= !(0.0..=1.0).contains(&target.motion.value);
+                build(&node, &Ctx::new(0), Some(&target)).unwrap();
+            }
+            assert!(overshot);
+            for invalid in [-1.0, 2.0, f32::NAN, f32::INFINITY] {
+                node.set("value", invalid).unwrap();
+                assert!(build(&node, &Ctx::new(0), Some(&target)).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn animated_dimensions_still_validate_the_target() {
+        let lua = mlua::Lua::new();
+        for axis in ["width", "height"] {
+            for invalid in ["-1", "0/0", "math.huge", "1e100"] {
+                let node = lua.load(format!("{{kind='space',{axis}={invalid},transition={{change={{props={{'{axis}'}}}}}}}}" )).eval().unwrap();
+                assert!(element(node, &Ctx::new(0)).is_err(), "{axis}={invalid}");
+            }
+        }
+        let node = lua.load("{width=0}").eval().unwrap();
+        assert_eq!(
+            axis(&node, "width", Some(-0.1)).unwrap(),
+            Some(Length::Fixed(0.0))
+        );
     }
 
     #[test]

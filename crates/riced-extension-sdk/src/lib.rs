@@ -290,6 +290,14 @@ fn encode(message: &ToHost) -> io::Result<Vec<u8>> {
     let mut line = serde_json::to_vec(message)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     if line.len() + 1 > protocol::MAX_LINE {
+        if let ToHost::Result { id, .. } = message {
+            return encode(&ToHost::Result {
+                id: *id,
+                ok: false,
+                result: Value::Null,
+                error: Some("reply exceeds the 256 KiB line limit".into()),
+            });
+        }
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "message exceeds the 256 KiB line limit",
@@ -303,6 +311,49 @@ fn encode(message: &ToHost) -> io::Result<Vec<u8>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn oversized_replies_return_a_bounded_error_with_the_original_id() {
+        for oversized in [
+            ToHost::Result {
+                id: 42,
+                ok: true,
+                result: Value::String("x".repeat(protocol::MAX_LINE)),
+                error: None,
+            },
+            ToHost::Result {
+                id: 42,
+                ok: false,
+                result: Value::Null,
+                error: Some("x".repeat(protocol::MAX_LINE)),
+            },
+        ] {
+            let bytes = encode(&oversized).unwrap();
+            assert!(bytes.len() <= protocol::MAX_LINE);
+            let ToHost::Result {
+                id,
+                ok,
+                result,
+                error,
+            } = serde_json::from_slice(&bytes).unwrap()
+            else {
+                panic!("expected a result");
+            };
+            assert_eq!(id, 42);
+            assert!(!ok);
+            assert!(result.is_null());
+            assert_eq!(
+                error.as_deref(),
+                Some("reply exceeds the 256 KiB line limit")
+            );
+        }
+        assert!(
+            encode(&ToHost::State {
+                store: Value::String("x".repeat(protocol::MAX_LINE))
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn snapshot_budget_counts_escaping_and_keeps_identifiers_intact() {
