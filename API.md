@@ -399,6 +399,7 @@ Extensions may push events. They arrive in `update` as:
 | `wayland`   | `connected`, `capabilities`, `outputs`, `toplevels`, `workspaces`, `workspace_groups`, `focused` | `activate_toplevel`, `close_toplevel`, `activate_workspace`                                                         | none   |
 | `dbus`      | `connected`, `capabilities`, `tray`, `notifications`                                             | `activate_tray`, `secondary_activate_tray`, `context_menu_tray`, `close_notification`, `invoke_notification_action` | none   |
 | `themeagen` | `ready`, `mode`, `source`, `colors`                                                              | `generate`, `populate`, `regenerate`                                                                                | none   |
+| `lucide`    | `count`                                                                                          | `resolve`, `exists`, `list`                                                                                           | none   |
 
 All bundled extensions publish whole snapshots rather than pushing events.
 Each publish replaces the snapshot contents, so re-read a field in `view`
@@ -838,6 +839,7 @@ just extension-system
 just extension-wayland
 just extension-dbus
 just extension-themeagen
+just extension-lucide
 ```
 
 ## iced components
@@ -861,6 +863,37 @@ Widget-specific props are listed below. `transition` on `list_view` means item
 enter/leave/displacement animation instead of property animation.
 
 ### Widget reference
+
+#### `iced.icon(content, props)` and `iced.lucide(content, props)`
+
+`content`: a single unicode char (glyph) from the Lucide font, e.g.
+`"\u{e038}"` for `activity`. The host has **no** lucide-icons lookup;
+resolve a kebab-case name (`"activity"`, `"arrow-right"`) via the
+`lucide` extension process:
+
+```lua
+local lucide = riced.plugins("lucide")
+lucide.resolve("activity", function(result, err)
+    if result then
+        -- result.char is the raw glyph; freeze it in a module table or
+        -- re-resolve every view.
+        glyph = result.char
+    end
+end)
+-- iced.icon(content, props) renders the glyph:
+iced.icon(glyph, { size = 16, color = theme.text })
+-- alias:
+iced.lucide(glyph, { size = 20 })
+```
+
+Props: `size` (positive, default 16), `color`, `center` (boolean), `align_x` (`"left"`, `"center"`, `"right"`, `"justified"`), `align_y` (`"top"`, `"center"`, `"bottom"`). `center`/`align_*` only take effect with a constrained `width`/`height`. The icon renders as a
+text glyph in the bundled `lucide` font family (vendored `src/fonts/lucide.ttf`,
+loaded at startup via `Settings.fonts`), so `size`/`color` animate like
+`text` via `transition.change.props`.
+
+The extension owns all `lucide-icons` logic (`extensions/lucide`); the
+host only embeds the TTF, so `lucide-icons` appears **only** in
+`extensions/lucide/Cargo.toml`.
 
 #### `iced.text(content, props)`
 

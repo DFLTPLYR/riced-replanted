@@ -1,0 +1,13 @@
+[package]
+name = "riced-extension-lucide"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "riced-lucide"
+path = "src/main.rs"
+
+[dependencies]
+lucide-icons = { version = "1", features = ["serde"] }
+riced-extension-sdk = { path = "../../crates/riced-extension-sdk", features = ["process"] }
+serde_json = "1"

@@ -1654,6 +1654,10 @@ impl App {
 
     fn settings(&self) -> mlua::Result<Settings> {
         let mut settings = Settings::default();
+        // Vendored Lucide font for iced.icon / iced.lucide (extension-owned lookup).
+        settings.fonts.push(std::borrow::Cow::Borrowed(
+            include_bytes!("fonts/lucide.ttf") as &[u8],
+        ));
         let Some(table) = self.options.get::<Option<Table>>("settings")? else {
             return Ok(settings);
         };

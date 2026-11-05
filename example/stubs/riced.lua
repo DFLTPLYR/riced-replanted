@@ -472,6 +472,16 @@ function iced.opacity(color, percent) end
 ---@return iced.Element
 function iced.text(content, props) end
 
+---@param content string Single Lucide glyph char (resolve names via riced.plugins("lucide").resolve(name))
+---@param props? iced.Props
+---@return iced.Element
+function iced.icon(content, props) end
+
+---@param content string Single Lucide glyph char (resolve names via riced.plugins("lucide").resolve(name))
+---@param props? iced.Props
+---@return iced.Element
+function iced.lucide(content, props) end
+
 ---@param content iced.Element[]
 ---@param props? iced.Props
 ---@return iced.Element

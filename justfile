@@ -62,3 +62,9 @@ extension-dbus:
 extension-themeagen:
     {{nix}} cargo build --release -p riced-extension-themeagen
     install -Dm755 target/release/riced-themeagen "{{ home_directory() }}/.config/riced/test/extensions/themeagen/riced-themeagen"
+
+# Build the Lucide icon extension and install it into the test profile
+extension-lucide:
+    {{nix}} cargo build --release -p riced-extension-lucide
+    install -Dm755 target/release/riced-lucide "{{ home_directory() }}/.config/riced/test/extensions/lucide/riced-lucide"
+    install -Dm755 extensions/lucide/example/lucide.lua "{{ home_directory() }}/.config/riced/test/lucide.lua"

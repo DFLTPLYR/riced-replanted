@@ -6,6 +6,7 @@ members = [
   "extensions/wayland",
   "extensions/dbus",
   "extensions/themeagen",
+  "extensions/lucide",
 ]
 resolver = "3"
 

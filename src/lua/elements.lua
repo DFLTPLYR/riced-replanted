@@ -2,6 +2,7 @@
 
 for _, kind in ipairs({
 	"text",
+	"icon",
 	"row",
 	"column",
 	"container",
@@ -359,3 +360,6 @@ function iced.component(id, module, props)
 	assert(props == nil or type(props) == "table", "component props must be a table")
 	return { kind = "component", id = id, module = module, props = props or {} }
 end
+
+-- `iced.lucide` is the explicit alias; `iced.icon` is the primary name.
+iced.lucide = iced.icon

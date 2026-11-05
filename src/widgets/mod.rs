@@ -146,7 +146,7 @@ impl Motion {
     fn target(table: &Table) -> mlua::Result<Self> {
         let kind = table.get::<String>("kind")?;
         let color = match kind.as_str() {
-            "text" => match table.get::<Option<String>>("color")? {
+            "text" | "icon" => match table.get::<Option<String>>("color")? {
                 Some(value) => color(&value)?,
                 None => Color::WHITE,
             },
@@ -195,7 +195,7 @@ impl Motion {
 fn animatable(kind: &str) -> Vec<&'static str> {
     let mut props = vec!["width", "height", "padding"];
     match kind {
-        "text" => props.extend(["size", "color"]),
+        "text" | "icon" => props.extend(["size", "color"]),
         "row" | "column" => props.push("spacing"),
         "progress_bar" => props.push("value"),
         _ => {}
@@ -487,6 +487,7 @@ fn build(
             "center",
             "font",
         ],
+        "icon" => &["size", "color", "center", "align_x", "align_y"],
         "image" => &["content_fit"],
         "svg" => &["content_fit", "opacity"],
         "rule" => &["direction", "thickness", "style"],
@@ -628,6 +629,7 @@ fn build(
     };
     let element = match kind.as_str() {
         "text" => text::build(node, transition, layout)?,
+        "icon" => text::icon(node, transition, layout)?,
         "image" => media::image(node, layout)?,
         "svg" => media::svg(node, layout)?,
         "rule" => media::rule(node)?,
@@ -712,7 +714,7 @@ fn finish(
 /// Which axes a widget's own builder accepts as `Length` (see `iced_widget`).
 fn direct_size(kind: &str) -> (bool, bool) {
     match kind {
-        "text" | "image" | "svg" | "row" | "column" | "container" | "button" | "space"
+        "text" | "icon" | "image" | "svg" | "row" | "column" | "container" | "button" | "space"
         | "stack" | "pin" | "scrollable" => (true, true),
         "checkbox" | "radio" | "toggler" | "slider" | "text_input" | "pick_list" => (true, false),
         "table" => (true, false),
@@ -888,6 +890,8 @@ mod tests {
             "{kind='progress_bar',value=0.5,style={background='#111111',bar='#22ff22',border={color='#333333',width=1,radius=2}}}",
             "{kind='qr_code',content='hello'}",
             "{kind='qr_code',content='hello',cell_size=4,style={cell='#000000',background='#ffffff'}}",
+            "{kind='icon',content='1'}",
+            "{kind='icon',content='a',size=20,color='#ff0000',width=24,height=24}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_ok(),
@@ -917,6 +921,11 @@ mod tests {
             "{kind='qr_code',content=''}",
             "{kind='qr_code',content='x',cell_size=0}",
             "{kind='qr_code',content='x',style={cell='bogus'}}",
+            "{kind='icon',content=''}",
+            "{kind='icon',content='ab'}",
+            "{kind='icon',content='a',font='monospace'}",
+            "{kind='icon',content='a',size=0}",
+            "{kind='icon',content='a',color='nope'}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_err(),
@@ -1177,6 +1186,7 @@ mod tests {
         let lua = mlua::Lua::new();
         for kind in [
             "{kind='text',content='x'}",
+            "{kind='icon',content='1'}",
             "{kind='image',content='/tmp/x.png'}",
             "{kind='svg',content='/tmp/x.svg'}",
             "{kind='rule'}",
@@ -1237,6 +1247,7 @@ mod tests {
     fn direct_size_matches_widget_capabilities() {
         for kind in [
             "text",
+            "icon",
             "image",
             "svg",
             "row",

@@ -2198,6 +2198,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lucide-icons"
+version = "1.69.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d93e72dcffec599173ccbb74785509fcffcd6d30718de7145c5b6994825b54b"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "lyon"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3622,6 +3631,15 @@ dependencies = [
  "riced-extension-sdk",
  "serde_json",
  "zbus",
+]
+
+[[package]]
+name = "riced-extension-lucide"
+version = "0.1.0"
+dependencies = [
+ "lucide-icons",
+ "riced-extension-sdk",
+ "serde_json",
 ]
 
 [[package]]
