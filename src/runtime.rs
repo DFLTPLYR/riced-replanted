@@ -316,6 +316,14 @@ pub(crate) fn checked<T>(result: mlua::Result<T>) -> T {
     })
 }
 
+// Degrade one render/theme/title/subscription into its fallback instead of exiting.
+pub(crate) fn checked_fallback<T>(result: mlua::Result<T>, fallback: T, integer: &str) -> T {
+    result.unwrap_or_else(|error| {
+        log::error!(target: "runtime.error", "falling back after {integer} error: {error}");
+        fallback
+    })
+}
+
 // `iced.<name>` lazily loads the first `<name>.lua` under the profile. Widgets can
 // live anywhere; the shell file is never treated as one. A missing name stays nil.
 fn install_widget_loader(lua: &Lua, profile: &Path, shell: &Path) -> mlua::Result<()> {
@@ -1895,34 +1903,42 @@ impl App {
                     return reload.chain(surfaces).chain(ipc);
                 }
                 if matches!(message, Message::PollPlugins) {
-                    let (changed, tasks) = checked(app.poll_plugins());
+                    let (changed, tasks) = checked_fallback(
+                        app.poll_plugins(),
+                        (false, Task::none()),
+                        "poll_plugins",
+                    );
                     return if changed {
                         tasks.chain(Task::done(Message::Reloaded))
                     } else {
                         tasks
                     };
                 }
-                checked(app.update(message))
+                checked_fallback(app.update(message), Task::none(), "update")
             },
             App::render,
         )
-        .title(|app: &Rc<RefCell<App>>, id| checked(app.borrow().title(id)))
+        .title(|app: &Rc<RefCell<App>>, id| checked_fallback(app.borrow().title(id), None, "title"))
         .subscription(|app| {
             Subscription::batch([
-                checked(app.borrow().subscription()),
+                checked_fallback(app.borrow().subscription(), Subscription::none(), "subscription"),
                 iced::time::every(Duration::from_millis(250)).map(|_| Message::CheckReload),
                 iced::time::every(Duration::from_millis(100)).map(|_| Message::PollPlugins),
             ])
         })
-        .theme(|app: &Rc<RefCell<App>>, id| checked(app.borrow().theme(id)))
-        .style(|app, theme| checked(app.borrow().style(theme)))
-        .redraw_scope(move |message| checked(redraw.borrow().redraw(message)))
+        .theme(|app: &Rc<RefCell<App>>, id| checked_fallback(app.borrow().theme(id), Theme::Dark, "theme"))
+        .style(|app, theme| checked_fallback(app.borrow().style(theme), theme::Style { background_color: iced::Color::TRANSPARENT, text_color: iced::Color::TRANSPARENT }, "style"))
+        .redraw_scope(move |message| checked_fallback(redraw.borrow().redraw(message), Scope::None, "redraw_scope"))
         .settings(settings)
         .run()
     }
 
     fn render(app: &Rc<RefCell<App>>, id: window::Id) -> Element<'_, Message> {
-        checked(app.borrow().view(id))
+        checked_fallback(
+            app.borrow().view(id),
+            iced::widget::Space::new().into(),
+            "view",
+        )
     }
 }
 
