@@ -1,6 +1,6 @@
 use std::{
     env, fs, io,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process,
@@ -9,6 +9,18 @@ use std::{
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// Directory identity keeps aliases together and equal basenames distinct.
+pub fn profile_id(directory: &Path) -> io::Result<String> {
+    let metadata = fs::metadata(directory)?;
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "config path must be a directory",
+        ));
+    }
+    Ok(format!("config-{:x}-{:x}", metadata.dev(), metadata.ino()))
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Command {
@@ -26,7 +38,7 @@ fn runtime_dir() -> io::Result<PathBuf> {
 fn destination(root: &Path, profile: Option<&str>) -> io::Result<PathBuf> {
     let profile = match profile {
         Some(profile) => {
-            crate::profile_path(Path::new(""), std::ffi::OsStr::new(profile))
+            crate::config_name(profile)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
             UnixStream::connect(root.join(format!("{profile}.sock")))?;
             profile.to_owned()
@@ -45,7 +57,7 @@ fn destination(root: &Path, profile: Option<&str>) -> io::Result<PathBuf> {
             if profiles.len() != 1 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "expected one running profile; use riced ipc -p <profile> <command> [args...]",
+                    "expected one running profile; use riced ipc -c <name> or -p <directory> <command> [args...]",
                 ));
             }
             profiles.remove(0)

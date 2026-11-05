@@ -224,7 +224,8 @@ riced.ipc({
 
 ```sh
 riced ipc settings
-riced ipc -p work add --anchor top --output DP-1
+riced ipc -c work add --anchor top --output DP-1
+riced ipc -p ~/path/config settings
 ```
 
 Handlers receive the daemon's state table as `self` and the command-line
@@ -237,10 +238,14 @@ keeps working. An empty command name is an error.
 
 The CLI only queues the request, so success means it was queued, not that a
 daemon handled it. Each profile has its own queue; starting a new daemon discards
-requests left by the previous instance. Without `-p`, the CLI targets
-the only running profile discovered through
-`$XDG_RUNTIME_DIR/riced/<profile>.sock`; with several running profiles it fails
-and asks for `-p <profile>`.
+requests left by the previous instance. Without `-c` or `-p`, the CLI targets
+the only running profile discovered through `$XDG_RUNTIME_DIR/riced/*.sock`;
+with several running profiles it asks for `-c <name>` or `-p <directory>`.
+Selectors go before the command name; everything after it is passed to the
+handler unchanged. To target the default configuration explicitly, use
+`riced ipc -p ~/.config/riced settings` (adjust for `$XDG_CONFIG_HOME` if set).
+Directory aliases share an IPC destination; directories with equal basenames
+have distinct destinations.
 
 ### `config` and `theme`
 

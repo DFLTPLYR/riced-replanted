@@ -101,7 +101,7 @@ impl Plugins {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR is not set"))?;
         let socket = PathBuf::from(runtime)
             .join("riced")
-            .join(format!("{profile}.sock"));
+            .join(format!("{}.sock", crate::ipc::profile_id(profile_dir)?));
         let (incoming, stop) = listen(&socket)?;
         let dir = profile_dir.join("extensions");
         let supervisor = dir
@@ -115,6 +115,10 @@ impl Plugins {
             supervisor,
             stop,
         })
+    }
+
+    pub fn take_command(&self) -> Option<crate::ipc::Command> {
+        crate::ipc::take(self.socket.as_ref()?.file_stem()?.to_str()?)
     }
 
     /// A registry with no socket or supervisor, used when plugins are not enabled (tests).

@@ -33,7 +33,7 @@ build:
 
 test: build
     if pgrep -x -u "$(id -u)" riced >/dev/null; then pkill -x -u "$(id -u)" riced; fi
-    ./target/release/riced -p test
+    ./target/release/riced -c test
 
 # Build release and install to ~/.local/bin (already on PATH)
 install: build

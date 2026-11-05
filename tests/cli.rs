@@ -1,11 +1,16 @@
-use std::process::Command;
+use std::{os::unix::fs::MetadataExt, path::Path, process::Command};
+
+fn profile_id(directory: &Path) -> String {
+    let metadata = std::fs::metadata(directory).unwrap();
+    format!("config-{:x}-{:x}", metadata.dev(), metadata.ino())
+}
 
 #[test]
 fn missing_profile_reports_shell_path_and_fails() {
     let config = format!("/tmp/opencode/riced-missing-config-{}", std::process::id());
     let output = Command::new(env!("CARGO_BIN_EXE_riced"))
         .env("XDG_CONFIG_HOME", &config)
-        .args(["-p", "test"])
+        .args(["-c", "test"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -45,7 +50,7 @@ fn lua_log_uses_shared_stderr_logging_and_lua_tostring() {
     let output = Command::new(env!("CARGO_BIN_EXE_riced"))
         .env("XDG_CONFIG_HOME", &directory)
         .env("XDG_RUNTIME_DIR", &directory)
-        .args(["-p", "test"])
+        .args(["-c", "test"])
         .output()
         .unwrap();
     std::fs::remove_dir_all(directory).unwrap();
@@ -84,7 +89,7 @@ fn lua_log_table_formats_nested_tables() {
     let output = Command::new(env!("CARGO_BIN_EXE_riced"))
         .env("XDG_CONFIG_HOME", &directory)
         .env("XDG_RUNTIME_DIR", &directory)
-        .args(["-p", "test"])
+        .args(["-c", "test"])
         .output()
         .unwrap();
     std::fs::remove_dir_all(directory).unwrap();
@@ -136,12 +141,21 @@ fn ipc_targets_one_of_several_running_profiles() {
     let runtime = format!("/tmp/opencode/riced-ipc-profiles-{}", std::process::id());
     let _ = std::fs::remove_dir_all(&runtime);
     std::fs::create_dir_all(format!("{runtime}/riced")).unwrap();
-    let _one = std::os::unix::net::UnixListener::bind(format!("{runtime}/riced/one.sock")).unwrap();
-    let _two = std::os::unix::net::UnixListener::bind(format!("{runtime}/riced/two.sock")).unwrap();
+    let one = Path::new(&runtime).join("configs/riced/one");
+    let two = Path::new(&runtime).join("configs/riced/two");
+    std::fs::create_dir_all(&one).unwrap();
+    std::fs::create_dir_all(&two).unwrap();
+    let one_id = profile_id(&one);
+    let two_id = profile_id(&two);
+    let _one =
+        std::os::unix::net::UnixListener::bind(format!("{runtime}/riced/{one_id}.sock")).unwrap();
+    let _two =
+        std::os::unix::net::UnixListener::bind(format!("{runtime}/riced/{two_id}.sock")).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_riced"))
         .env("XDG_RUNTIME_DIR", &runtime)
-        .args(["ipc", "-p", "two", "settings", "x"])
+        .env("XDG_CONFIG_HOME", Path::new(&runtime).join("configs"))
+        .args(["ipc", "-c", "two", "settings", "x"])
         .output()
         .unwrap();
     assert!(
@@ -149,7 +163,7 @@ fn ipc_targets_one_of_several_running_profiles() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let entry = std::fs::read_dir(format!("{runtime}/riced/ipc/two"))
+    let entry = std::fs::read_dir(format!("{runtime}/riced/ipc/{two_id}"))
         .unwrap()
         .next()
         .unwrap()
@@ -181,5 +195,166 @@ fn help_does_not_require_configuration_or_compositor() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("riced -p <profile>"));
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("--config <NAME>"), "{help}");
+    assert!(help.contains("--path <DIRECTORY>"), "{help}");
+}
+
+#[test]
+fn default_named_and_explicit_directories_load_their_own_shells() {
+    let root = std::path::PathBuf::from(format!(
+        "/tmp/opencode/riced-cli-paths-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    for (directory, marker) in [
+        ("xdg/riced", "default config loaded"),
+        ("xdg/riced/test", "named config loaded"),
+        ("home/.config/riced", "home config loaded"),
+        ("custom config", "explicit config loaded"),
+    ] {
+        let directory = root.join(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("shell.lua"), "error((require('marker')))").unwrap();
+        std::fs::write(directory.join("marker.lua"), format!("return '{marker}'")).unwrap();
+    }
+    for (args, xdg, marker) in [
+        (vec![], Some(root.join("xdg")), "default config loaded"),
+        (
+            vec!["-c", "test"],
+            Some(root.join("xdg")),
+            "named config loaded",
+        ),
+        (vec![], None, "home config loaded"),
+        (
+            vec![],
+            Some("relative-xdg-is-ignored".into()),
+            "home config loaded",
+        ),
+        (vec!["-p", "custom config"], None, "explicit config loaded"),
+        (
+            vec!["--path", "custom config/../custom config"],
+            None,
+            "explicit config loaded",
+        ),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_riced"));
+        command
+            .current_dir(&root)
+            .env("HOME", root.join("home"))
+            .env("XDG_RUNTIME_DIR", &root)
+            .env_remove("XDG_CONFIG_HOME")
+            .args(args);
+        if let Some(xdg) = xdg {
+            command.env("XDG_CONFIG_HOME", xdg);
+        }
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(stderr.contains(marker), "{stderr}");
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env("XDG_RUNTIME_DIR", &root)
+        .arg("-p")
+        .arg(root.join("custom config"))
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output.stderr).contains("explicit config loaded"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn clap_rejects_invalid_selectors_and_reports_version() {
+    for args in [
+        vec!["-c", "test", "-p", "/other"],
+        vec!["-c", "../test"],
+        vec!["-c", ""],
+        vec!["-c"],
+        vec!["-p"],
+        vec!["--unknown"],
+        vec!["ipc", "-c", "test", "-p", "/other", "settings"],
+        vec!["ipc"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+            .env_remove("HOME")
+            .env_remove("XDG_CONFIG_HOME")
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let empty = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .args(["ipc", ""])
+        .output()
+        .unwrap();
+    assert!(!empty.status.success());
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("IPC command must not be empty"));
+    let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        concat!("riced ", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn ipc_paths_distinguish_equal_basenames_and_follow_aliases() {
+    let root = std::path::PathBuf::from(format!(
+        "/tmp/opencode/riced-ipc-paths-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("riced")).unwrap();
+    let one = root.join("one/config");
+    let two = root.join("two/config");
+    std::fs::create_dir_all(&one).unwrap();
+    std::fs::create_dir_all(&two).unwrap();
+    std::os::unix::fs::symlink(&two, root.join("alias")).unwrap();
+    let one_id = profile_id(&one);
+    let two_id = profile_id(&two);
+    let _one =
+        std::os::unix::net::UnixListener::bind(root.join(format!("riced/{one_id}.sock"))).unwrap();
+    let _two =
+        std::os::unix::net::UnixListener::bind(root.join(format!("riced/{two_id}.sock"))).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .current_dir(&root)
+        .env("XDG_RUNTIME_DIR", &root)
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .args([
+            "ipc", "-p", "alias", "settings", "-c", "payload", "--help", "",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let entry = std::fs::read_dir(root.join(format!("riced/ipc/{two_id}")))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap();
+    assert_eq!(
+        value["args"],
+        serde_json::json!(["-c", "payload", "--help", ""])
+    );
+    assert!(!root.join(format!("riced/ipc/{one_id}")).exists());
+    std::fs::remove_dir_all(root).unwrap();
 }

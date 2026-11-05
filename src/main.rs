@@ -16,85 +16,107 @@ use std::{
     rc::Rc,
 };
 
-fn profile_path(config: &Path, profile: &std::ffi::OsStr) -> Result<PathBuf, String> {
-    let mut components = Path::new(profile).components();
-    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
-        return Err("profile must be a single directory name".into());
-    }
-    Ok(config.join("riced").join(profile).join("shell.lua"))
+use clap::{Args, Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "riced",
+    version,
+    about = "Lua-driven Wayland desktop shell",
+    after_help = "Without -c or -p, loads $XDG_CONFIG_HOME/riced/shell.lua (or ~/.config/riced/shell.lua).",
+    args_conflicts_with_subcommands = true
+)]
+struct Cli {
+    #[command(flatten)]
+    config: ConfigArgs,
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args_os().skip(1);
-    let flag = args.next();
-    if flag.as_deref() == Some(std::ffi::OsStr::new("--help")) {
-        println!(
-            "Usage: riced -p <profile>\n       riced ipc [-p <profile>] <command> [args...]\nLoads $XDG_CONFIG_HOME/riced/<profile>/shell.lua (or ~/.config/riced/...).\nIPC selects the only running profile unless -p is given."
-        );
-        return Ok(());
+#[derive(Args)]
+#[group(multiple = false)]
+struct ConfigArgs {
+    /// Load a named configuration under $XDG_CONFIG_HOME/riced (or ~/.config/riced)
+    #[arg(short, long, value_name = "NAME", value_parser = config_name)]
+    config: Option<String>,
+    /// Load shell.lua from this directory (relative to the current directory)
+    #[arg(short, long, value_name = "DIRECTORY")]
+    path: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Queue a command for a running daemon; without a selector, require exactly one
+    Ipc {
+        #[command(flatten)]
+        config: ConfigArgs,
+        /// Command name followed by arguments passed unchanged to its Lua handler
+        #[arg(required = true, num_args = 1.., trailing_var_arg = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
+}
+
+fn config_name(value: &str) -> Result<String, String> {
+    let mut components = Path::new(value).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err("config must be a single directory name".into());
     }
-    if flag.as_deref() == Some(std::ffi::OsStr::new("ipc")) {
-        let mut command = args.next();
-        let profile = if matches!(
-            command.as_deref().and_then(|s| s.to_str()),
-            Some("-p" | "--profile")
-        ) {
-            let profile = args
-                .next()
-                .ok_or("missing profile after -p")?
-                .into_string()
-                .map_err(|_| "IPC profile must be valid UTF-8")?;
-            command = args.next();
-            Some(profile)
+    Ok(value.to_owned())
+}
+
+impl ConfigArgs {
+    fn directory(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        if let Some(path) = &self.path {
+            if path.as_os_str().is_empty() {
+                return Err("config path must not be empty".into());
+            }
+            return Ok(std::path::absolute(path)?);
+        }
+        let root = env::var_os("XDG_CONFIG_HOME")
+            .filter(|p| Path::new(p).is_absolute())
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::var_os("HOME")
+                    .filter(|p| !p.is_empty())
+                    .map(|p| PathBuf::from(p).join(".config"))
+            })
+            .ok_or("neither XDG_CONFIG_HOME nor HOME is set")?;
+        Ok(std::path::absolute(
+            root.join("riced")
+                .join(self.config.as_deref().unwrap_or("")),
+        )?)
+    }
+}
+
+fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(Command::Ipc { config, command }) = cli.command {
+        let (command, args) = command.split_first().ok_or("missing IPC command")?;
+        if command.is_empty() {
+            return Err("IPC command must not be empty".into());
+        }
+        let profile = if config.path.is_some() || config.config.is_some() {
+            Some(ipc::profile_id(&config.directory()?)?)
         } else {
             None
         };
-        let command = command
-            .ok_or("usage: riced ipc <command> [args...]")?
-            .into_string()
-            .map_err(|_| "IPC command must be valid UTF-8")?;
-        if command.is_empty() {
-            return Err("usage: riced ipc <command> [args...]".into());
-        }
-        let args = args
-            .map(|arg| {
-                arg.into_string()
-                    .map_err(|_| "IPC arguments must be valid UTF-8")
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        ipc::queue(profile.as_deref(), &command, &args)?;
+        ipc::queue(profile.as_deref(), command, args)?;
         return Ok(());
     }
-    if !matches!(
-        flag.as_deref().and_then(|s| s.to_str()),
-        Some("-p" | "--profile")
-    ) {
-        return Err("Usage: riced -p <profile> | riced ipc <command> [args...]".into());
-    }
-    let profile = args.next().ok_or("missing profile after -p")?;
-    if args.next().is_some() {
-        return Err("unexpected argument; usage: riced -p <profile>".into());
-    }
-    let config = env::var_os("XDG_CONFIG_HOME")
-        .filter(|p| Path::new(p).is_absolute())
-        .map(PathBuf::from)
-        .or_else(|| {
-            env::var_os("HOME")
-                .filter(|p| !p.is_empty())
-                .map(|p| PathBuf::from(p).join(".config"))
-        })
-        .ok_or("neither XDG_CONFIG_HOME nor HOME is set")?;
-    let path = profile_path(&config, &profile)?;
+    let directory = cli.config.directory()?;
+    let path = directory.join("shell.lua");
     let source = std::fs::read_to_string(&path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    // Extensions and module reloads must keep resolving from this directory.
+    let path = directory.canonicalize()?.join("shell.lua");
     let plugins = Rc::new(RefCell::new(plugins::Plugins::start(&path)?));
     runtime::load_with_plugins(&source, &path, plugins)?.run()?;
     Ok(())
 }
 
 fn main() -> ExitCode {
+    let cli = Cli::parse();
     let _ = riced_extension_sdk::logging::init();
-    match run() {
+    match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             riced_extension_sdk::log::error!(target: "startup.error", "{error}");
@@ -106,23 +128,18 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
-
-    #[test]
-    fn resolves_profile_shell() {
-        assert_eq!(
-            profile_path(Path::new("/config"), &OsString::from("test")).unwrap(),
-            Path::new("/config/riced/test/shell.lua")
-        );
-    }
 
     #[test]
     fn rejects_paths_outside_profile() {
         for profile in ["", ".", "..", "../test", "/test", "a/b"] {
-            assert!(
-                profile_path(Path::new("/config"), &OsString::from(profile)).is_err(),
-                "{profile}"
-            );
+            assert!(config_name(profile).is_err(), "{profile}");
         }
+        assert_eq!(config_name("test").unwrap(), "test");
+    }
+
+    #[test]
+    fn cli_definition_is_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
     }
 }

@@ -12,12 +12,23 @@ Copy the example profile, then run it:
 ```sh
 mkdir -p ~/.config/riced/test
 cp -r example/. ~/.config/riced/test/
-cargo run -- -p test
+cargo run -- -c test
 ```
 
-`riced -p test` loads `$XDG_CONFIG_HOME/riced/test/shell.lua`, falling back to
-`$HOME/.config`. Profile names must be a single directory name. `require` also
-searches the profile directory.
+```sh
+riced                         # ~/.config/riced/shell.lua
+riced -c test                 # ~/.config/riced/test/shell.lua
+riced -p ~/path/config        # ~/path/config/shell.lua
+```
+
+An absolute `$XDG_CONFIG_HOME` replaces `$HOME/.config` for the default directory
+and named configurations. `-c` / `--config` accepts a single directory name;
+`-p` / `--path` accepts a configuration directory, with relative paths resolved
+from the current directory. The shell expands `~` in unquoted paths. The two
+selectors cannot be combined. `require` also searches the selected directory.
+Use `riced --help`, `riced ipc --help`, or `riced --version` for CLI information.
+
+Previously, `-p test` selected a named profile; use `-c test` for that now.
 
 Missing files, Lua errors, and invalid settings exit with a nonzero status.
 Profiles have access to Lua's standard libraries, including filesystem and
@@ -75,10 +86,13 @@ the Lua API changes.
 ## Extensions
 
 Extensions are separate executables that connect back to `riced` over a Unix
-socket. `riced` binds `$XDG_RUNTIME_DIR/riced/<profile>.sock` and spawns every
-executable in `<profile>/extensions/` (an executable file, or a directory
+socket. `riced` binds `$XDG_RUNTIME_DIR/riced/config-<device>-<inode>.sock` and
+spawns every executable in `<profile>/extensions/` (an executable file, or a directory
 containing one). A crashed extension is restarted with backoff; removing the
 file stops it. Extensions can also be started manually with `RICED_SOCKET` set.
+Socket IDs use the configuration directory's device and inode in hexadecimal:
+directory aliases share an instance, while directories with equal names stay distinct.
+Restart existing daemons after upgrading to use the new IPC socket names.
 
 Each extension publishes a watched snapshot (`store`) and may declare methods.
 Lua reads the store synchronously, so `view` stays side-effect free:

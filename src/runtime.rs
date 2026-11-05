@@ -768,14 +768,10 @@ impl App {
     fn poll_ipc(&mut self) -> mlua::Result<Task<Message>> {
         let mut tasks = Vec::new();
         let mut handled = false;
-        let profile = self
-            .path
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            .unwrap_or("")
-            .to_owned();
-        while let Some(command) = crate::ipc::take(&profile) {
+        loop {
+            let Some(command) = self.plugins.borrow().take_command() else {
+                break;
+            };
             handled = true;
             tasks.push(self.run_ipc(&command.command, &command.args)?);
         }
