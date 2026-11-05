@@ -10,9 +10,9 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
-    time::{Duration, Instant},
 };
 
+use super::animation::Control;
 use iced::widget::{combo_box, pane_grid, text_editor};
 use mlua::Value;
 
@@ -29,8 +29,6 @@ thread_local! {
     static MARKDOWN: RefCell<HashMap<String, Rc<Vec<iced::widget::markdown::Item>>>> =
         RefCell::new(HashMap::new());
     static LISTS: RefCell<HashMap<ListKey, ListEntry>> = RefCell::new(HashMap::new());
-    static LIST_BOUNDS: RefCell<HashMap<(Option<iced::window::Id>, u64), iced::Rectangle>> =
-        RefCell::new(HashMap::new());
     static NEXT_LIST_TOKEN: Cell<u64> = const { Cell::new(0) };
 }
 
@@ -38,37 +36,29 @@ pub(crate) fn forget_window(generation: u64, window: iced::window::Id) {
     LISTS.with_borrow_mut(|lists| {
         lists.retain(|(owner, id, _), _| *owner != generation || *id != Some(window))
     });
-    LIST_BOUNDS.with_borrow_mut(|bounds| {
-        bounds.retain(|(id, _), _| *id != Some(window));
-    });
 }
 
 pub(crate) fn forget_generation(generation: u64) {
     LISTS.with_borrow_mut(|lists| lists.retain(|(owner, _, _), _| *owner != generation));
-    LIST_BOUNDS.with_borrow_mut(HashMap::clear);
-}
-
-pub(super) fn set_list_bounds(
-    window: Option<iced::window::Id>,
-    token: u64,
-    bounds: iced::Rectangle,
-) {
-    LIST_BOUNDS.with_borrow_mut(|bounds_map| {
-        bounds_map.insert((window, token), bounds);
-    });
-}
-
-pub(super) fn take_list_bounds(
-    window: Option<iced::window::Id>,
-    token: u64,
-) -> Option<iced::Rectangle> {
-    LIST_BOUNDS.with_borrow_mut(|bounds| bounds.remove(&(window, token)))
 }
 
 #[derive(Default)]
 struct ListEntry {
-    items: Vec<(Value, Value, u64)>,
+    items: Vec<(Value, Value, u64, Control)>,
     leaving: Vec<ListLeaving>,
+    nodes: HashMap<u64, mlua::Table>,
+    owner: Option<Control>,
+}
+
+impl Drop for ListEntry {
+    fn drop(&mut self) {
+        for (_, _, _, control) in &self.items {
+            control.cancel();
+        }
+        for leaving in &self.leaving {
+            leaving.control.cancel();
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -76,17 +66,21 @@ pub(super) struct ListLeaving {
     pub(super) item: Value,
     pub(super) index: usize,
     pub(super) token: u64,
-    pub(super) at: Instant,
-    pub(super) bounds: Option<iced::Rectangle>,
+    pub(super) key: Value,
+    pub(super) control: Control,
+    pub(super) node: Option<mlua::Table>,
 }
 
 pub(super) struct ListState {
     pub(super) tokens: Vec<u64>,
-    pub(super) entering: Vec<bool>,
-    pub(super) added: Vec<(usize, Value)>,
-    pub(super) removed: Vec<(usize, Value)>,
-    pub(super) displaced: Vec<(usize, Value)>,
     pub(super) leaving: Vec<ListLeaving>,
+    pub(super) controls: Vec<Control>,
+}
+
+pub(crate) fn sweep_animations() {
+    LISTS.with_borrow_mut(|lists| {
+        lists.retain(|_, entry| entry.owner.as_ref().is_none_or(|owner| owner.state().alive))
+    });
 }
 
 /// Stable editor content. `value` wins when it differs from the stored text, so
@@ -176,10 +170,7 @@ pub(super) fn markdown(content: &str) -> Rc<Vec<iced::widget::markdown::Item>> {
 
 /// Previous rendered items for a list view, plus items still animating out.
 ///
-/// Items are matched by `keys` so a middle insert/removal keeps the surviving
-/// widgets and animations. When nothing matches at all, index matching keeps
-/// the old count-based behavior for lists whose Lua values are rebuilt every
-/// render.
+/// Keys preserve both widget state and in-flight animations across reorders.
 pub(super) fn list(
     generation: u64,
     window: Option<iced::window::Id>,
@@ -187,96 +178,101 @@ pub(super) fn list(
     items: Vec<Value>,
     keys: &[Value],
     animate: bool,
-    duration: Duration,
+    owner: Option<Control>,
 ) -> ListState {
     LISTS.with(|lists| {
         let mut lists = lists.borrow_mut();
         let entry = lists
             .entry((generation, window, id.to_owned()))
             .or_default();
+        entry.owner = owner;
         let previous = std::mem::take(&mut entry.items);
         let mut old_used = vec![false; previous.len()];
         let mut tokens = Vec::with_capacity(items.len());
-        let mut entering = Vec::with_capacity(items.len());
-        let mut added = Vec::new();
-        let mut displaced = Vec::new();
+        let mut controls = Vec::with_capacity(items.len());
         let mut next_items = Vec::with_capacity(items.len());
 
-        let positional = !previous.is_empty()
-            && !keys.is_empty()
-            && !previous
-                .iter()
-                .any(|(_, old_key, _)| keys.iter().any(|key| key == old_key));
-
-        for (index, (item, key)) in items.iter().zip(keys).enumerate() {
-            let matched = if positional {
-                (index < previous.len()).then(|| (index, previous[index].2))
-            } else {
+        for (item, key) in items.iter().zip(keys) {
+            let matched =
                 previous
                     .iter()
                     .enumerate()
-                    .find_map(|(old_index, (_, old_key, token))| {
+                    .find_map(|(old_index, (_, old_key, token, _))| {
                         (!old_used[old_index] && old_key == key).then_some((old_index, *token))
-                    })
-            };
-            let (token, old_index) = match matched {
-                Some((old_index, token)) => {
+                    });
+            let returning = entry.leaving.iter().position(|leaving| leaving.key == *key);
+            let (token, control) = match (matched, returning) {
+                (Some((old_index, token)), _) => {
                     old_used[old_index] = true;
-                    (token, Some(old_index))
+                    (token, previous[old_index].3.clone())
                 }
-                None => {
+                (None, Some(index)) => {
+                    let leaving = entry.leaving.remove(index);
+                    leaving.control.request("enter");
+                    (leaving.token, leaving.control)
+                }
+                (None, None) => {
                     let token = NEXT_LIST_TOKEN.with(|next| {
                         let token = next.get();
                         next.set(token + 1);
                         token
                     });
-                    added.push((index, item.clone()));
-                    (token, None)
+                    (token, Control::default())
                 }
             };
-            if let Some(old_index) = old_index
-                && old_index != index
-            {
-                displaced.push((index, item.clone()));
-            }
             tokens.push(token);
-            entering.push(old_index.is_none());
-            next_items.push((item.clone(), key.clone(), token));
+            controls.push(control.clone());
+            next_items.push((item.clone(), key.clone(), token, control));
         }
 
-        let mut removed = Vec::new();
         let mut leaving = Vec::new();
-        for (index, (item, _, token)) in previous.iter().enumerate() {
+        for (index, (item, key, token, control)) in previous.iter().enumerate() {
             if !old_used[index] {
-                removed.push((index, item.clone()));
                 leaving.push(ListLeaving {
                     item: item.clone(),
                     index,
                     token: *token,
-                    at: Instant::now(),
-                    bounds: take_list_bounds(window, *token),
+                    key: key.clone(),
+                    control: control.clone(),
+                    node: entry.nodes.remove(token),
                 });
+                control.request("exit");
             }
         }
 
         entry.items = next_items;
         if animate {
-            entry
-                .leaving
-                .retain(|leaving| leaving.at.elapsed() < duration);
+            entry.leaving.retain(|leaving| !leaving.control.removable());
             entry.leaving.extend(leaving);
         } else {
+            for leaving in &entry.leaving {
+                leaving.control.cancel();
+            }
+            for leaving in &leaving {
+                leaving.control.cancel();
+            }
             entry.leaving.clear();
         }
         ListState {
             tokens,
-            entering,
-            added,
-            removed,
-            displaced,
             leaving: entry.leaving.clone(),
+            controls,
         }
     })
+}
+
+pub(super) fn list_node(
+    generation: u64,
+    window: Option<iced::window::Id>,
+    id: &str,
+    token: u64,
+    node: mlua::Table,
+) {
+    LISTS.with_borrow_mut(|lists| {
+        if let Some(entry) = lists.get_mut(&(generation, window, id.to_owned())) {
+            entry.nodes.insert(token, node);
+        }
+    });
 }
 
 /// Stable pane layout; rebuilt when the pane count changes.
@@ -331,27 +327,11 @@ mod tests {
             width: 320.0,
             height: 80.0,
         };
-        let first = list(
-            77,
-            None,
-            "bounds",
-            vec![item.clone()],
-            &[item],
-            true,
-            Duration::from_millis(100),
-        );
-        set_list_bounds(None, first.tokens[0], bounds);
-        let removed = list(
-            77,
-            None,
-            "bounds",
-            Vec::new(),
-            &[],
-            true,
-            Duration::from_millis(100),
-        );
+        let first = list(77, None, "bounds", vec![item.clone()], &[item], true, None);
+        first.controls[0].state().bounds = Some(bounds);
+        let removed = list(77, None, "bounds", Vec::new(), &[], true, None);
         assert_eq!(removed.leaving.len(), 1);
-        assert_eq!(removed.leaving[0].bounds, Some(bounds));
+        assert_eq!(removed.leaving[0].control.state().bounds, Some(bounds));
     }
 
     #[test]
@@ -361,19 +341,26 @@ mod tests {
             let items = (0..count)
                 .map(|_| Value::Table(lua.create_table().unwrap()))
                 .collect::<Vec<_>>();
-            let result = list(
-                991,
-                None,
-                "grow",
-                items.clone(),
-                &items,
-                false,
-                Duration::ZERO,
-            );
+            let result = list(991, None, "grow", items.clone(), &items, false, None);
             assert_eq!(result.tokens.len(), count);
-            assert_eq!(result.added.len(), 1);
         }
         forget_generation(991);
+    }
+
+    #[test]
+    fn stable_keys_preserve_tokens_on_reorder_and_reentry() {
+        let items = vec![Value::Integer(1), Value::Integer(2)];
+        let initial = list(992, None, "keys", items.clone(), &items, true, None);
+        let reordered = vec![Value::Integer(2), Value::Integer(1)];
+        let next = list(992, None, "keys", reordered.clone(), &reordered, true, None);
+        assert_eq!(next.tokens, [initial.tokens[1], initial.tokens[0]]);
+        list(992, None, "keys", vec![], &[], true, None);
+        let restored = list(992, None, "keys", items.clone(), &items, true, None);
+        assert_eq!(restored.tokens, initial.tokens);
+        assert!(restored.leaving.is_empty());
+        assert_eq!(restored.controls[0].state().event, "enter");
+        forget_generation(992);
+        assert!(!initial.controls[0].state().alive);
     }
 
     #[test]
@@ -403,7 +390,7 @@ mod tests {
                 vec![Value::Integer(1)],
                 &[Value::Integer(1)],
                 false,
-                Duration::ZERO,
+                None,
             );
         }
         forget_window(0, a);

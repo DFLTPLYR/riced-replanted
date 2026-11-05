@@ -1,71 +1,110 @@
-use std::time::{Duration, Instant};
-
 use iced::advanced::layout;
 use iced::advanced::widget::{Operation, Tree, tree};
 use iced::advanced::{Clipboard, Layout, Renderer, Shell, Widget, mouse, overlay, renderer};
 use iced::{Element, Event, Length, Rectangle, Size, Theme, Transformation, Vector, window};
+use iced_anim::Animated;
+use mlua::{Table, Value};
 
+use super::animation::{Control, Effects, Transform};
+use super::{Ctx, Motion, Transition};
 use crate::runtime::Message;
 
-#[derive(Debug, Clone)]
-struct ScaleState {
-    start: Instant,
-    scale: f32,
-    x: f32,
-    y: f32,
-    done: bool,
-    entering: bool,
-    duration: Duration,
-    x_range: (f32, f32),
-    y_range: (f32, f32),
-    leave_token: Option<Instant>,
-    window: Option<window::Id>,
-    last_bounds: Option<Rectangle>,
-    shift: (f32, f32),
-    shift_from: (f32, f32),
-    shift_start: Instant,
-    shift_done: bool,
+struct State {
+    control: Control,
+    hovered: bool,
+    pressed: bool,
+    shift: Animated<Vector>,
+    shift_control: Control,
+    change: Option<Animated<Motion>>,
+    change_control: Control,
+    owns_control: bool,
 }
 
-/// Scales content in or out. Layout is unchanged; only drawing is transformed.
+impl Drop for State {
+    fn drop(&mut self) {
+        if self.owns_control {
+            self.control.cancel();
+        }
+        self.shift_control.cancel();
+        self.change_control.cancel();
+    }
+}
+
+impl State {
+    fn cursor(&self, cursor: mouse::Cursor, bounds: Rectangle) -> mouse::Cursor {
+        let playback = self.control.state();
+        let transform = playback.motion.value();
+        let Some(point) = cursor.position().filter(|_| transform.scale > 0.0) else {
+            return mouse::Cursor::Unavailable;
+        };
+        let center = bounds.center();
+        let shift = self.shift.value();
+        mouse::Cursor::Available(iced::Point::new(
+            center.x + (point.x - center.x - transform.x - shift.x) / transform.scale,
+            center.y + (point.y - center.y - transform.y - shift.y) / transform.scale,
+        ))
+    }
+}
+
+/// Event animation shared by ordinary widgets, component roots, and keyed items.
 pub(super) struct ScaleItem<'a> {
     content: Element<'a, Message>,
-    entering: bool,
-    duration: Duration,
-    x_range: (f32, f32),
-    y_range: (f32, f32),
-    leave_token: Option<Instant>,
-    displace: bool,
-    window: Option<window::Id>,
-    token: u64,
-    leaving_bounds: Option<Rectangle>,
+    effects: Effects,
+    control: Option<Control>,
+    ctx: Ctx,
+    owner: Value,
+    retained: bool,
+    property: Option<(Table, Transition)>,
 }
 
 impl<'a> ScaleItem<'a> {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         content: Element<'a, Message>,
-        entering: bool,
-        duration: Duration,
-        x_range: (f32, f32),
-        y_range: (f32, f32),
-        leave_token: Option<Instant>,
-        displace: bool,
-        window: Option<window::Id>,
-        token: u64,
-        leaving_bounds: Option<Rectangle>,
+        effects: Effects,
+        control: Option<Control>,
+        ctx: Ctx,
+        owner: Value,
+        retained: bool,
     ) -> Self {
         Self {
             content,
-            entering,
-            duration,
-            x_range,
-            y_range,
-            leave_token,
-            displace,
-            window,
-            token,
-            leaving_bounds,
+            effects,
+            control,
+            ctx,
+            owner,
+            retained,
+            property: None,
+        }
+    }
+
+    pub(super) fn property(mut self, node: Table, transition: Option<Transition>) -> Self {
+        self.property = transition.map(|transition| (node, transition));
+        self
+    }
+
+    fn callback(
+        &self,
+        control: &Control,
+        callback: Option<&mlua::Function>,
+        shell: &mut Shell<'_, Message>,
+    ) {
+        let mut state = control.state();
+        if state.completed {
+            return;
+        }
+        state.completed = true;
+        state.pending_callback = callback.is_some();
+        if let Some(callback) = callback {
+            shell.publish(Message::Animation {
+                generation: self.ctx.generation,
+                component: self.ctx.component.clone(),
+                window: self.ctx.window(),
+                control: control.clone(),
+                serial: state.serial,
+                callback: callback.clone(),
+                owner: self.owner.clone(),
+                lifetime: self.ctx.lifetime.clone(),
+            });
         }
     }
 }
@@ -76,42 +115,30 @@ impl<'a> From<ScaleItem<'a>> for Element<'a, Message> {
     }
 }
 
-fn ease_out(t: f32) -> f32 {
-    let inverse = 1.0 - t.clamp(0.0, 1.0);
-    1.0 - inverse * inverse * inverse
-}
-
 impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
     fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<ScaleState>()
+        tree::Tag::of::<State>()
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(ScaleState {
-            start: Instant::now(),
-            scale: if self.entering { 0.0 } else { 1.0 },
-            x: if self.entering {
-                self.x_range.0
-            } else {
-                self.x_range.1
-            },
-            y: if self.entering {
-                self.y_range.0
-            } else {
-                self.y_range.1
-            },
-            done: !self.entering && self.leave_token.is_none(),
-            entering: self.entering,
-            duration: self.duration,
-            x_range: self.x_range,
-            y_range: self.y_range,
-            leave_token: self.leave_token,
-            window: self.window,
-            last_bounds: self.leaving_bounds,
-            shift: (0.0, 0.0),
-            shift_from: (0.0, 0.0),
-            shift_start: Instant::now(),
-            shift_done: true,
+        let control = self.control.clone().unwrap_or_default();
+        control.sync(&self.effects);
+        let change_control = Control::default();
+        change_control.state().completed = true;
+        let shift_control = Control::default();
+        shift_control.state().completed = true;
+        tree::State::new(State {
+            control,
+            hovered: false,
+            pressed: false,
+            shift: Animated::new(Vector::ZERO, iced_anim::transition::Easing::LINEAR),
+            shift_control,
+            change: self
+                .property
+                .as_ref()
+                .map(|(_, t)| Animated::new(t.motion.clone(), t.mode)),
+            change_control,
+            owns_control: self.control.is_none(),
         })
     }
 
@@ -120,41 +147,30 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
     }
 
     fn diff(&self, tree: &mut Tree) {
-        tree.diff_children(&[&self.content]);
-        let state = tree.state.downcast_mut::<ScaleState>();
-        let reset = match (self.leave_token, state.leave_token) {
-            (Some(new), Some(old)) => new != old,
-            (Some(_), None) | (None, Some(_)) => true,
-            (None, None) => self.entering && !state.entering,
-        };
-        if reset {
-            *state = ScaleState {
-                start: Instant::now(),
-                scale: if self.entering { 0.0 } else { 1.0 },
-                x: if self.entering {
-                    self.x_range.0
-                } else {
-                    self.x_range.1
-                },
-                y: if self.entering {
-                    self.y_range.0
-                } else {
-                    self.y_range.1
-                },
-                done: !self.entering && self.leave_token.is_none(),
-                entering: self.entering,
-                duration: self.duration,
-                x_range: self.x_range,
-                y_range: self.y_range,
-                leave_token: self.leave_token,
-                window: self.window,
-                last_bounds: self.leaving_bounds,
-                shift: (0.0, 0.0),
-                shift_from: (0.0, 0.0),
-                shift_start: Instant::now(),
-                shift_done: true,
-            };
+        let state = tree.state.downcast_mut::<State>();
+        if let Some(control) = &self.control {
+            state.control = control.clone();
+            state.owns_control = false;
         }
+        state.control.sync(&self.effects);
+        match (&mut state.change, &self.property) {
+            (Some(change), Some((_, transition))) if change.target() != &transition.motion => {
+                *change = Animated::new(change.value().clone(), transition.mode)
+                    .to(transition.motion.clone());
+                state.change_control.request("change");
+            }
+            (None, Some((_, transition))) => {
+                state.change = Some(Animated::new(transition.motion.clone(), transition.mode));
+                state.change_control = Control::default();
+                state.change_control.state().completed = true;
+            }
+            (_, None) => {
+                state.change = None;
+                state.change_control.cancel();
+            }
+            _ => {}
+        }
+        tree.diff_children(std::slice::from_ref(&self.content));
     }
 
     fn size(&self) -> Size<Length> {
@@ -167,9 +183,33 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
+        let state = tree.state.downcast_ref::<State>();
+        if let (Some(change), Some((node, transition))) = (&state.change, &self.property) {
+            let mut transition = transition.clone();
+            transition.motion = change.value().clone();
+            self.content = crate::runtime::checked(super::build(
+                node,
+                &Ctx {
+                    rebuilding: true,
+                    ..self.ctx.clone()
+                },
+                Some(&transition),
+            ));
+            tree.children[0].diff(&self.content);
+        }
+        let bounds = state.control.state().bounds;
+        let limits = if self.retained
+            && let Some(bounds) = bounds
+        {
+            layout::Limits::new(Size::ZERO, limits.max())
+                .width(bounds.width)
+                .height(bounds.height)
+        } else {
+            *limits
+        };
         self.content
             .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits)
+            .layout(&mut tree.children[0], renderer, &limits)
     }
 
     fn operate(
@@ -179,6 +219,11 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         renderer: &iced::Renderer,
         operation: &mut dyn Operation,
     ) {
+        let state = tree.state.downcast_ref::<State>().control.state();
+        if !state.alive || state.hidden || state.event == "exit" {
+            return;
+        }
+        drop(state);
         self.content
             .as_widget_mut()
             .operate(&mut tree.children[0], layout, renderer, operation);
@@ -195,86 +240,128 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget_mut().update(
-            &mut tree.children[0],
-            event,
-            layout,
-            cursor,
-            renderer,
-            clipboard,
-            shell,
-            viewport,
-        );
+        let state = tree.state.downcast_mut::<State>();
+        state.control.sync(&self.effects);
+        let interactive = {
+            let playback = state.control.state();
+            playback.alive && !playback.hidden && playback.event != "exit" && !self.retained
+        };
+        if interactive {
+            let local_cursor = state.cursor(cursor, layout.bounds());
+            let inside = local_cursor.is_over(layout.bounds()) && cursor.is_over(*viewport);
+            if matches!(event, Event::Mouse(_)) {
+                if inside != state.hovered {
+                    state.hovered = inside;
+                    let name = if inside {
+                        "pointer_enter"
+                    } else {
+                        "pointer_exit"
+                    };
+                    if self.effects.contains_key(name) {
+                        state.control.request(name);
+                    }
+                }
+                let trigger = match event {
+                    Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if inside => {
+                        state.pressed = true;
+                        Some("press")
+                    }
+                    Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                        if state.pressed =>
+                    {
+                        state.pressed = false;
+                        Some("release")
+                    }
+                    _ => None,
+                };
+                if let Some(name) = trigger.filter(|name| self.effects.contains_key(*name)) {
+                    state.control.request(name);
+                }
+                state.control.sync(&self.effects);
+                shell.request_redraw();
+            }
+            self.content.as_widget_mut().update(
+                &mut tree.children[0],
+                event,
+                layout,
+                local_cursor,
+                renderer,
+                clipboard,
+                shell,
+                viewport,
+            );
+        }
         let Event::Window(window::Event::RedrawRequested(now)) = event else {
             return;
         };
-        let state = tree.state.downcast_mut::<ScaleState>();
-        if self.leave_token.is_none() {
-            // Absolute bounds come from `layout.bounds()`, not the item's own layout node,
-            // which is always relative to its parent.
+        let mut playback = state.control.state();
+        if !playback.alive {
+            return;
+        }
+        if !self.retained {
             let bounds = layout.bounds();
-            if self.displace
-                && let Some(previous) = state.last_bounds
+            if let Some(effect) = self.effects.get("displaced")
+                && let Some(previous) = playback.bounds
                 && (previous.x != bounds.x || previous.y != bounds.y)
             {
-                let shift = (
-                    state.shift.0 + previous.x - bounds.x,
-                    state.shift.1 + previous.y - bounds.y,
-                );
-                state.shift = shift;
-                state.shift_from = shift;
-                state.shift_start = *now;
-                state.shift_done = false;
+                let shift = *state.shift.value()
+                    + Vector::new(previous.x - bounds.x, previous.y - bounds.y);
+                state.shift = Animated::new(shift, effect.mode).to(Vector::ZERO);
+                state.shift_control.request("displaced");
             }
-            state.last_bounds = Some(bounds);
-            crate::widgets::state::set_list_bounds(self.window, self.token, bounds);
+            playback.bounds = Some(bounds);
         }
-        let mut redraw = false;
-        if !state.done {
-            let elapsed = now.saturating_duration_since(state.start);
-            let duration = state.duration.as_secs_f32().max(f32::EPSILON);
-            let t = (elapsed.as_secs_f32() / duration).clamp(0.0, 1.0);
-            let eased = ease_out(t);
-            let progress = if state.entering { eased } else { 1.0 - eased };
-            state.scale = progress;
-            state.x = state.x_range.0 + (state.x_range.1 - state.x_range.0) * progress;
-            state.y = state.y_range.0 + (state.y_range.1 - state.y_range.0) * progress;
-            if t >= 1.0 {
-                state.done = true;
-                state.scale = if state.entering { 1.0 } else { 0.0 };
-                state.x = if state.entering {
-                    state.x_range.1
-                } else {
-                    state.x_range.0
-                };
-                state.y = if state.entering {
-                    state.y_range.1
-                } else {
-                    state.y_range.0
-                };
-                if !state.entering
-                    && let Some(window) = state.window
-                {
-                    shell.publish(Message::RedrawWindow(window));
-                }
-            } else {
-                redraw = true;
+        playback.motion.tick(*now);
+        let animating = playback.motion.is_animating();
+        let name = playback.event.clone();
+        let completed = playback.completed;
+        if !animating && name == "exit" {
+            playback.hidden = true;
+        }
+        drop(playback);
+        if !animating && !completed {
+            self.callback(
+                &state.control,
+                self.effects.get(&name).and_then(|e| e.callback.as_ref()),
+                shell,
+            );
+            if let Some(window) = self.ctx.window() {
+                shell.publish(Message::RedrawWindow(window));
             }
         }
-        if !state.shift_done {
-            let elapsed = now.saturating_duration_since(state.shift_start);
-            let duration = state.duration.as_secs_f32().max(f32::EPSILON);
-            let t = (elapsed.as_secs_f32() / duration).clamp(0.0, 1.0);
-            let progress = 1.0 - ease_out(t);
-            state.shift = (state.shift_from.0 * progress, state.shift_from.1 * progress);
-            if t >= 1.0 {
-                state.shift = (0.0, 0.0);
-                state.shift_done = true;
-            } else {
-                redraw = true;
+        state.shift.tick(*now);
+        if !state.shift.is_animating() {
+            self.callback(
+                &state.shift_control,
+                self.effects
+                    .get("displaced")
+                    .and_then(|e| e.callback.as_ref()),
+                shell,
+            );
+        }
+        let mut changing = false;
+        if let (Some(change), Some((node, transition))) = (&mut state.change, &self.property) {
+            changing = change.is_animating();
+            change.tick(*now);
+            if changing {
+                let mut transition = transition.clone();
+                transition.motion = change.value().clone();
+                self.content = crate::runtime::checked(super::build(
+                    node,
+                    &Ctx {
+                        rebuilding: true,
+                        ..self.ctx.clone()
+                    },
+                    Some(&transition),
+                ));
+                tree.children[0].diff(&self.content);
+                shell.invalidate_layout();
+            }
+            if !change.is_animating() {
+                self.callback(&state.change_control, transition.callback.as_ref(), shell);
             }
         }
-        if redraw {
+        if animating || state.shift.is_animating() || changing {
             shell.request_redraw();
         }
     }
@@ -287,18 +374,19 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         viewport: &Rectangle,
         renderer: &iced::Renderer,
     ) -> mouse::Interaction {
-        let state = tree.state.downcast_ref::<ScaleState>();
-        if state.scale <= 0.01 {
-            mouse::Interaction::None
-        } else {
-            self.content.as_widget().mouse_interaction(
-                &tree.children[0],
-                layout,
-                cursor,
-                viewport,
-                renderer,
-            )
+        let state = tree.state.downcast_ref::<State>();
+        let playback = state.control.state();
+        if !playback.alive || playback.hidden || playback.event == "exit" || self.retained {
+            return mouse::Interaction::None;
         }
+        drop(playback);
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            state.cursor(cursor, layout.bounds()),
+            viewport,
+            renderer,
+        )
     }
 
     fn draw(
@@ -311,38 +399,31 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        let state = tree.state.downcast_ref::<ScaleState>();
-        if state.scale <= 0.0 {
+        let state = tree.state.downcast_ref::<State>();
+        let playback = state.control.state();
+        let Transform { x, y, scale } = *playback.motion.value();
+        if !playback.alive || playback.hidden || scale <= 0.0 {
             return;
         }
         let bounds = layout.bounds();
-        // Only leaving items draw in their old slot; current items can have stale
-        // bounds from an earlier layout pass when a redraw skips layout.
-        let delta = match self.leave_token.and(state.last_bounds) {
-            Some(anchor) => Vector::new(anchor.x - bounds.x, anchor.y - bounds.y),
-            None => Vector::ZERO,
+        let delta = if self.retained {
+            playback
+                .bounds
+                .map(|b| Vector::new(b.x - bounds.x, b.y - bounds.y))
+                .unwrap_or_default()
+        } else {
+            Vector::ZERO
         };
-        let shifted =
-            state.shift.0 != 0.0 || state.shift.1 != 0.0 || delta.x != 0.0 || delta.y != 0.0;
-        if state.scale >= 0.999 && !shifted {
-            self.content.as_widget().draw(
-                &tree.children[0],
-                renderer,
-                theme,
-                style,
-                layout,
-                cursor,
-                viewport,
-            );
-            return;
-        }
+        drop(playback);
+        let cursor = state.cursor(cursor, bounds);
+        let shift = *state.shift.value();
         let center = bounds.center();
-        let transformation = Transformation::translate(
-            delta.x + state.x + state.shift.0 + center.x,
-            delta.y + state.y + state.shift.1 + center.y,
-        ) * Transformation::scale(state.scale)
+        let transform = Transformation::translate(
+            delta.x + x + shift.x + center.x,
+            delta.y + y + shift.y + center.y,
+        ) * Transformation::scale(scale)
             * Transformation::translate(-center.x, -center.y);
-        renderer.with_transformation(transformation, |renderer| {
+        renderer.with_transformation(transform, |renderer| {
             self.content.as_widget().draw(
                 &tree.children[0],
                 renderer,
@@ -363,6 +444,11 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
+        let playback = tree.state.downcast_ref::<State>().control.state();
+        if !playback.alive || playback.hidden || playback.event == "exit" || self.retained {
+            return None;
+        }
+        drop(playback);
         self.content.as_widget_mut().overlay(
             &mut tree.children[0],
             layout,
@@ -370,41 +456,5 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
             viewport,
             translation,
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use iced::widget;
-
-    fn state(entering: bool, leaving: bool) -> ScaleState {
-        let item: Element<'static, Message> = ScaleItem::new(
-            widget::text("x").into(),
-            entering,
-            Duration::from_millis(100),
-            (0.0, 0.0),
-            (0.0, 0.0),
-            leaving.then(Instant::now),
-            true,
-            None,
-            0,
-            None,
-        )
-        .into();
-        let tree = Tree::new(&item);
-        tree.state.downcast_ref::<ScaleState>().clone()
-    }
-
-    #[test]
-    fn fresh_static_items_start_finished() {
-        assert!(state(false, false).done);
-        assert_eq!(state(false, false).scale, 1.0);
-    }
-
-    #[test]
-    fn entering_and_leaving_items_animate() {
-        assert!(!state(true, false).done);
-        assert!(!state(false, true).done);
     }
 }

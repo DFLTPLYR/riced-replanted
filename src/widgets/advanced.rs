@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use iced::Element;
 use iced::widget;
 use iced::widget::{markdown as markdown_widget, text_editor as text_editor_widget};
@@ -217,6 +215,11 @@ pub(super) fn list_view(
         .get::<Option<String>>("id")?
         .filter(|id| !id.is_empty())
         .ok_or_else(|| mlua::Error::runtime("list_view requires a non-empty id"))?;
+    let id = if let Value::Table(owner) = &ctx.owner {
+        format!("{}:{id}", owner.get::<String>("__animation_key")?)
+    } else {
+        id
+    };
     let items = node
         .get::<Table>("content")?
         .sequence_values::<Value>()
@@ -232,53 +235,28 @@ pub(super) fn list_view(
         .map(|item| list_key(item, key.as_deref()))
         .collect::<mlua::Result<Vec<_>>>()?;
 
-    let transition = list_transition(node)?;
-    let animate = transition.is_some();
-    let duration = transition
-        .as_ref()
-        .map(|transition| transition.duration)
-        .unwrap_or(Duration::ZERO);
+    let effects = super::animation::parse(node)?;
+    if node
+        .get::<Option<Table>>("transition")?
+        .is_some_and(|table| table.contains_key("change").unwrap_or(false))
+    {
+        return Err(mlua::Error::runtime(
+            "list_view transitions animate items; change belongs on the rendered widget",
+        ));
+    }
+    let animate = !effects.is_empty();
+    let exiting = effects.contains_key("exit");
 
-    let added = match node.get::<Option<Function>>("on_item_added")? {
-        Some(callback) => Some(callback),
-        None => match node.get::<Option<Function>>("onItemAdded")? {
-            Some(callback) => Some(callback),
-            None => transition.as_ref().and_then(|t| t.added.clone()),
-        },
-    };
-    let removed = match node.get::<Option<Function>>("on_item_removed")? {
-        Some(callback) => Some(callback),
-        None => match node.get::<Option<Function>>("onItemRemoved")? {
-            Some(callback) => Some(callback),
-            None => transition.as_ref().and_then(|t| t.removed.clone()),
-        },
-    };
-    let displaced = transition.as_ref().and_then(|t| t.displaced.clone());
-
+    state::sweep_animations();
     let previous = state::list(
         ctx.generation,
         ctx.window(),
         &id,
         items.clone(),
         &keys,
-        animate,
-        duration,
+        exiting,
+        ctx.lifetime.clone(),
     );
-    if let Some(callback) = &added {
-        for (index, item) in &previous.added {
-            callback.call::<()>((*index, item.clone()))?;
-        }
-    }
-    if let Some(callback) = &removed {
-        for (index, item) in &previous.removed {
-            callback.call::<()>((*index, item.clone()))?;
-        }
-    }
-    if let Some(callback) = &displaced {
-        for (index, item) in &previous.displaced {
-            callback.call::<()>((*index, item.clone()))?;
-        }
-    }
 
     let horizontal = match node.get::<Option<String>>("direction")?.as_deref() {
         None | Some("vertical") => false,
@@ -291,32 +269,29 @@ pub(super) fn list_view(
     };
 
     let render = node.get::<Option<Function>>("render")?;
-    let x = transition
-        .as_ref()
-        .map(|transition| transition.x)
-        .unwrap_or((0.0, 0.0));
-    let y = transition
-        .as_ref()
-        .map(|transition| transition.y)
-        .unwrap_or((0.0, 0.0));
     let mut children: Vec<Element<'static, Message>> =
         Vec::with_capacity(items.len() + previous.leaving.len());
     let mut keyed: Vec<(u64, Element<'static, Message>)> =
         Vec::with_capacity(items.len() + previous.leaving.len());
     for (index, item) in items.into_iter().enumerate() {
-        let child = list_item(item, index, render.as_ref(), ctx)?;
+        let Some(child) = list_item(
+            item,
+            index,
+            render.as_ref(),
+            ctx,
+            exiting.then(|| (id.as_str(), previous.tokens[index])),
+        )?
+        else {
+            continue;
+        };
         if animate {
             let child = ScaleItem::new(
                 child,
-                previous.entering[index],
-                duration,
-                x,
-                y,
-                None,
-                true,
-                ctx.window(),
-                previous.tokens[index],
-                None,
+                effects.clone(),
+                Some(previous.controls[index].clone()),
+                ctx.clone(),
+                ctx.owner.clone(),
+                false,
             )
             .into();
             keyed.push((previous.tokens[index], child));
@@ -324,19 +299,35 @@ pub(super) fn list_view(
             children.push(child);
         }
     }
+    let live_len = keyed.len();
     for leaving in previous.leaving {
-        let child = list_item(leaving.item, leaving.index, render.as_ref(), ctx)?;
+        let child = if let Some(node) = leaving.node {
+            if let Some(lua) = &ctx.lua {
+                lua.globals()
+                    .get::<Table>("riced")?
+                    .get::<Table>("_animations")?
+                    .get::<Function>("retain")?
+                    .call::<()>((
+                        node.clone(),
+                        leaving.control.clone(),
+                        ctx.window().map(|id| format!("{id:?}")),
+                    ))?;
+            }
+            list_item(Value::Table(node), leaving.index, None, ctx, None)?
+        } else {
+            list_item(leaving.item, leaving.index, None, ctx, None)?
+        };
+        let Some(child) = child else {
+            // Hidden, but a queued exit callback may still need its control alive.
+            continue;
+        };
         let child = ScaleItem::new(
             child,
-            false,
-            duration,
-            x,
-            y,
-            Some(leaving.at),
-            false,
-            ctx.window(),
-            leaving.token,
-            leaving.bounds,
+            effects.clone(),
+            Some(leaving.control),
+            ctx.clone(),
+            ctx.owner.clone(),
+            true,
         )
         .into();
         keyed.push((leaving.token, child));
@@ -344,7 +335,7 @@ pub(super) fn list_view(
 
     let spacing = number(node, "spacing", 0.0)?;
     let content = if animate {
-        let mut list = super::keyed::KeyedList::new(keyed, spacing, horizontal);
+        let mut list = super::keyed::KeyedList::new(keyed, spacing, horizontal).live_len(live_len);
         if let Some(width) = layout.width {
             list = list.width(width);
         }
@@ -394,94 +385,65 @@ fn list_key(item: &Value, key: Option<&str>) -> mlua::Result<Value> {
     }
 }
 
-struct ListTransition {
-    duration: Duration,
-    x: (f32, f32),
-    y: (f32, f32),
-    added: Option<Function>,
-    removed: Option<Function>,
-    displaced: Option<Function>,
-}
-
-fn slide_range(table: &Table, key: &str) -> mlua::Result<(f32, f32)> {
-    match table.get::<Value>(key)? {
-        Value::Nil => Ok((0.0, 0.0)),
-        Value::Integer(value) => Ok((value as f32, 0.0)),
-        Value::Number(value) if value.is_finite() => Ok((value as f32, 0.0)),
-        Value::Table(range) => {
-            crate::runtime::keys(&range, &["from", "to"])?;
-            let from = range.get::<Option<f32>>("from")?.unwrap_or(0.0);
-            let to = range.get::<Option<f32>>("to")?.unwrap_or(0.0);
-            if !from.is_finite() || !to.is_finite() {
-                return Err(mlua::Error::runtime(format!(
-                    "list_view transition {key} values must be finite"
-                )));
-            }
-            Ok((from, to))
-        }
-        _ => Err(mlua::Error::runtime(format!(
-            "list_view transition {key} must be a pixel offset or {{from, to}}"
-        ))),
-    }
-}
-
-fn list_transition(node: &Table) -> mlua::Result<Option<ListTransition>> {
-    match node.get::<Value>("transition")? {
-        Value::Nil | Value::Boolean(false) => Ok(None),
-        Value::Boolean(true) => Ok(Some(ListTransition {
-            duration: Duration::from_millis(200),
-            x: (0.0, 0.0),
-            y: (0.0, 0.0),
-            added: None,
-            removed: None,
-            displaced: None,
-        })),
-        Value::Table(table) => {
-            crate::runtime::keys(
-                &table,
-                &["duration", "x", "y", "onAdded", "onRemoved", "onDisplaced"],
-            )?;
-            let duration = table.get::<Option<f64>>("duration")?.unwrap_or(200.0);
-            if !(1.0..=86_400_000.0).contains(&duration) || duration.fract() != 0.0 {
-                return Err(mlua::Error::runtime(
-                    "list_view transition duration must be a whole number from 1 to 86400000 ms",
-                ));
-            }
-            Ok(Some(ListTransition {
-                duration: Duration::from_millis(duration as u64),
-                x: slide_range(&table, "x")?,
-                y: slide_range(&table, "y")?,
-                added: table.get::<Option<Function>>("onAdded")?,
-                removed: table.get::<Option<Function>>("onRemoved")?,
-                displaced: table.get::<Option<Function>>("onDisplaced")?,
-            }))
-        }
-        _ => Err(mlua::Error::runtime(
-            "list_view transition must be true, false, or a table",
-        )),
-    }
-}
-
 fn list_item(
     item: Value,
     index: usize,
     render: Option<&Function>,
     ctx: &Ctx,
-) -> mlua::Result<Element<'static, Message>> {
-    match (render, item) {
-        (Some(render), item) => {
-            let node: Table = render.call((item, index))?;
-            element(node, ctx)
+    snapshot: Option<(&str, u64)>,
+) -> mlua::Result<Option<Element<'static, Message>>> {
+    let item = if let Some(render) = render {
+        let node: Table = if let Some(lua) = &ctx.lua {
+            lua.globals()
+                .get::<Table>("riced")?
+                .get::<Table>("_animations")?
+                .get::<Function>("render_item")?
+                .call((
+                    render.clone(),
+                    item,
+                    index,
+                    ctx.owner.clone(),
+                    ctx.rebuilding,
+                    ctx.window().map(|id| format!("{id:?}")),
+                ))?
+        } else {
+            render.call((item, index))?
+        };
+        Value::Table(node)
+    } else {
+        item
+    };
+    let child = match item {
+        Value::Table(node) => {
+            if let Some((id, token)) = snapshot {
+                state::list_node(ctx.generation, ctx.window(), id, token, node.clone());
+            }
+            let hidden =
+                if let Some(control) = node.get::<Option<mlua::AnyUserData>>("__animation")? {
+                    let control = control.borrow::<super::animation::Control>()?;
+                    let playback = control.state();
+                    // Keep the source item and instance, but release its slot after exit.
+                    !playback.alive || (playback.hidden && playback.applied == playback.serial)
+                } else {
+                    false
+                };
+            let child = element(node, ctx)?;
+            if hidden {
+                return Ok(None);
+            }
+            child
         }
-        (None, Value::Table(node)) => element(node, ctx),
-        (None, Value::String(text)) => Ok(widget::text(text.to_str()?.to_owned()).into()),
-        (None, Value::Integer(number)) => Ok(widget::text(number.to_string()).into()),
-        (None, Value::Number(number)) => Ok(widget::text(number.to_string()).into()),
-        (None, Value::Nil) => Ok(widget::Space::new().into()),
-        (None, _) => Err(mlua::Error::runtime(
-            "list_view items must be elements, text, numbers, or nil",
-        )),
-    }
+        Value::String(text) => widget::text(text.to_str()?.to_owned()).into(),
+        Value::Integer(number) => widget::text(number.to_string()).into(),
+        Value::Number(number) => widget::text(number.to_string()).into(),
+        Value::Nil => widget::Space::new().into(),
+        _ => {
+            return Err(mlua::Error::runtime(
+                "list_view items must be elements, text, numbers, or nil",
+            ));
+        }
+    };
+    Ok(Some(child))
 }
 
 pub(super) fn table(

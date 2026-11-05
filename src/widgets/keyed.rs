@@ -8,6 +8,7 @@ use crate::runtime::Message;
 #[derive(Debug)]
 struct State {
     keys: Vec<u64>,
+    size: Size,
 }
 
 /// Row or column that moves widget state with its key. Unlike iced's
@@ -20,6 +21,7 @@ pub(super) struct KeyedList<'a> {
     width: Length,
     height: Length,
     horizontal: bool,
+    live_len: usize,
 }
 
 impl<'a> KeyedList<'a> {
@@ -28,6 +30,7 @@ impl<'a> KeyedList<'a> {
         spacing: f32,
         horizontal: bool,
     ) -> Self {
+        let live_len = children.len();
         let (keys, children) = children.into_iter().unzip();
         Self {
             keys,
@@ -36,6 +39,7 @@ impl<'a> KeyedList<'a> {
             width: Length::Shrink,
             height: Length::Shrink,
             horizontal,
+            live_len,
         }
     }
 
@@ -46,6 +50,11 @@ impl<'a> KeyedList<'a> {
 
     pub(super) fn height(mut self, height: Length) -> Self {
         self.height = height;
+        self
+    }
+
+    pub(super) fn live_len(mut self, count: usize) -> Self {
+        self.live_len = count;
         self
     }
 }
@@ -78,6 +87,7 @@ impl Widget<Message, Theme, iced::Renderer> for KeyedList<'_> {
     fn state(&self) -> tree::State {
         tree::State::new(State {
             keys: self.keys.clone(),
+            size: Size::ZERO,
         })
     }
 
@@ -122,7 +132,7 @@ impl Widget<Message, Theme, iced::Renderer> for KeyedList<'_> {
         limits: &layout::Limits,
     ) -> layout::Node {
         let limits = limits.width(self.width).height(self.height);
-        flex::resolve(
+        let node = flex::resolve(
             if self.horizontal {
                 flex::Axis::Horizontal
             } else {
@@ -135,9 +145,27 @@ impl Widget<Message, Theme, iced::Renderer> for KeyedList<'_> {
             Padding::ZERO,
             self.spacing,
             Alignment::Start,
-            &mut self.children,
-            &mut tree.children,
-        )
+            &mut self.children[..self.live_len],
+            &mut tree.children[..self.live_len],
+        );
+        let state = tree.state.downcast_mut::<State>();
+        let mut size = node.size();
+        let mut children = node.children().to_vec();
+        if self.live_len < self.children.len() {
+            // Keep ancestors from culling the last outgoing item while live items reflow.
+            size = Size::new(
+                size.width.max(state.size.width),
+                size.height.max(state.size.height),
+            );
+            for (child, tree) in self.children[self.live_len..]
+                .iter_mut()
+                .zip(&mut tree.children[self.live_len..])
+            {
+                children.push(child.as_widget_mut().layout(tree, renderer, &limits));
+            }
+        }
+        state.size = size;
+        layout::Node::with_children(size, children)
     }
 
     fn operate(

@@ -46,6 +46,9 @@ for _, kind in ipairs({
 		end
 		node.kind = kind
 		node.content = content
+		if node.transition and node.id and kind ~= "list_view" then
+			return riced._animations.native(node)
+		end
 		return node
 	end
 end
@@ -72,6 +75,178 @@ end
 -- Files under components/widgets/ are loaded automatically; redefining a name
 -- replaces the previous constructor so edits reload.
 local defined = {}
+local windows = {}
+local records = {}
+local parent
+local rebuilding = false
+local animations = {}
+riced._animations = animations
+
+function animations.begin(window, tracked)
+	if tracked then
+		windows[window] = windows[window] or {}
+		records = windows[window]
+	else
+		records = {}
+	end
+	parent = nil
+	for _, record in pairs(records) do record.seen = false end
+end
+
+function animations.instance(key, definition, props)
+	local record = records[key]
+	if record and record.definition ~= definition then
+		record.control:cancel()
+		record = nil
+	end
+	if not record then
+		local control = riced._new_animation()
+		local instance = setmetatable({}, { __index = definition })
+		record = { definition = definition, self = instance, control = control, key = key }
+		instance.__animation_key = key
+		instance.animate = setmetatable({}, { __index = function(_, event)
+			assert(type(event) == "string", "animation event must be a string")
+			return function()
+				assert(event == "enter" or event == "exit" or
+					(record.node and record.node.transition and record.node.transition[event]),
+					"unknown animation event: " .. event)
+				control:start(event)
+			end
+		end })
+		records[key] = record
+	end
+	assert(not record.seen or rebuilding, "duplicate widget instance: " .. key .. "; provide a distinct props.id")
+	if record.leaving then record.control:start("enter") end
+	record.seen, record.leaving, record.parent, record.external = true, false, parent, nil
+	record.self.props = props
+	return record.self
+end
+
+local native = {}
+function animations.native(node)
+	assert(type(node.id) == "string" and node.id ~= "", "animated widget id must be a nonempty string")
+	local key = "native:" .. (parent or "") .. ":" .. node.kind .. ":" .. node.id
+	animations.instance(key, native, node)
+	return animations.track(key, node)
+end
+
+function animations.owner(key)
+	local previous = parent
+	parent = key
+	return previous
+end
+
+function animations.render_item(render, item, index, owner, rebuild, window)
+	local previous = parent
+	local previous_rebuild = rebuilding
+	local previous_records = records
+	if window and windows[window] then records = windows[window] end
+	rebuilding = rebuild or false
+	parent = owner and owner.__animation_key or parent
+	local ok, node = pcall(render, item, index)
+	parent = previous
+	rebuilding = previous_rebuild
+	records = previous_records
+	if not ok then error(node, 0) end
+	return node
+end
+
+function animations.track(key, node)
+	local record = records[key]
+	assert(type(node) == "table", "component view must return an iced element")
+	local copy = {}
+	for field, value in pairs(node) do copy[field] = value end
+	node = copy
+	-- A component owns its root animation; nested roots retain their own controls.
+	local native_key = node.__animation_self and node.__animation_self.__animation_key
+	if native_key and native_key:sub(1, 7) == "native:" and records[native_key] and records[native_key].parent == key then
+		animations.remove(native_key)
+	elseif (node.__animation and node.__animation_self ~= record.self) or node.kind == "list_view" then
+		node = iced.container(node)
+	end
+	node.__animation, node.__animation_self = record.control, record.self
+	record.node = node
+	return node
+end
+
+function animations.render(key, definition, props, window)
+	local instance = animations.instance(key, definition, props)
+	local previous = parent
+	parent = key
+	local ok, node = pcall(definition.view or definition.render, instance, props, window)
+	parent = previous
+	if not ok then error(node, 0) end
+	return animations.track(key, node), instance
+end
+
+function animations.finish()
+	local leaving = {}
+	local roots = {}
+	for key, record in pairs(records) do
+		local ancestor = record.parent and records[record.parent]
+		if not record.seen and (not ancestor or ancestor.seen) then roots[#roots + 1] = key end
+	end
+	local function remove(key)
+		for child, record in pairs(records) do
+			if record.parent == key then remove(child) end
+		end
+		animations.remove(key)
+	end
+	for _, key in ipairs(roots) do
+		local record = records[key]
+		if record then
+			local exit = record.node and record.node.transition and record.node.transition.exit
+            if record.external or not exit or record.control:removable() then
+				remove(key)
+			else
+				record.leaving = true
+				record.control:start("exit")
+				local node = {}
+				for field, value in pairs(record.node) do node[field] = value end
+				node.__retained = true
+				leaving[#leaving + 1] = node
+			end
+		end
+	end
+	return leaving
+end
+
+function animations.retain(node, control, window)
+	local retained = window and windows[window] or records
+	local function mark(key)
+		local record = retained[key]
+		if not record then return end
+		record.seen, record.external = true, control
+		for child, value in pairs(retained) do
+			if value.parent == key then mark(child) end
+		end
+	end
+	local seen = {}
+	local function visit(value)
+		if type(value) ~= "table" or seen[value] then return end
+		seen[value] = true
+		if value.__animation_self then mark(value.__animation_self.__animation_key) end
+		if value.kind then visit(value.content) else
+			for _, child in ipairs(value) do visit(child) end
+		end
+	end
+	visit(node)
+end
+
+function animations.snapshot(key, node)
+	if records[key] then records[key].node = node end
+end
+
+function animations.forget(window)
+	for _, record in pairs(windows[window] or {}) do record.control:cancel() end
+	windows[window] = nil
+end
+
+function animations.remove(key)
+	if records[key] then records[key].control:cancel() end
+	records[key] = nil
+end
+
 function iced.define(name, factory)
 	assert(type(name) == "string" and name:match("^[%a_][%w_]*$"), "widget name must be a valid identifier")
 	assert(type(factory) == "function", "widget factory must be a function")
@@ -83,7 +258,9 @@ function iced.define(name, factory)
 	defined[name] = true
 	iced[name] = function(props)
 		assert(props == nil or type(props) == "table", "widget props must be a table")
-		return view(widget, props or {})
+		props = props or {}
+		local node = animations.render("widget:" .. name .. ":" .. tostring(props.id or name), widget, props)
+		return node
 	end
 end
 

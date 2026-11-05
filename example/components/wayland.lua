@@ -11,7 +11,11 @@ function wayland.view()
 		key = "id",
 		spacing = 4,
 		direction = "horizontal",
-		transition = { duration = 180, x = { from = -180, to = 0 } },
+		transition = {
+			enter = { duration = 180, from = { x = -180, scale = 0 } },
+			exit = { duration = 120, to = { x = -180, scale = 0 } },
+			displaced = { duration = 180 },
+		},
 		render = function(workspace, index)
 			local can_activate = false
 			for _, capability in ipairs(workspace.capabilities or {}) do

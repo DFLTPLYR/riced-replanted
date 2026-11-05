@@ -1,4 +1,5 @@
 mod advanced;
+pub(crate) mod animation;
 mod canvas;
 mod containers;
 mod enums;
@@ -12,20 +13,15 @@ mod state;
 mod style;
 mod text;
 
-use std::time::Duration;
-
-use iced::widget::Space;
 use iced::{Color, Element, Length, Padding, widget};
+use iced_anim::Animate;
 use iced_anim::animated::Mode;
-use iced_anim::spring::Motion as SpringMotion;
-use iced_anim::transition::Easing;
-use iced_anim::{Animate, AnimationBuilder};
 use mlua::{Table, Value};
 
 use crate::runtime::Message;
 
 pub(crate) use region::root as with_input_regions;
-pub(crate) use state::{forget_generation, forget_window};
+pub(crate) use state::{forget_generation, forget_window, sweep_animations};
 
 pub fn color(value: &str) -> mlua::Result<Color> {
     if !value.is_ascii() {
@@ -130,7 +126,7 @@ fn children(node: &Table, ctx: &Ctx) -> mlua::Result<Vec<Element<'static, Messag
         .collect()
 }
 
-#[derive(Clone, PartialEq, Animate)]
+#[derive(Debug, Clone, PartialEq, Animate)]
 struct Motion {
     width: f32,
     height: f32,
@@ -170,12 +166,13 @@ impl Motion {
     }
 }
 
-const ANIMATABLE: [&str; 6] = ["width", "height", "padding", "spacing", "size", "color"];
-
 fn animatable(kind: &str) -> Vec<&'static str> {
-    let mut props = ANIMATABLE.to_vec();
-    if kind == "progress_bar" {
-        props.push("value");
+    let mut props = vec!["width", "height", "padding"];
+    match kind {
+        "text" => props.extend(["size", "color"]),
+        "row" | "column" => props.push("spacing"),
+        "progress_bar" => props.push("value"),
+        _ => {}
     }
     props
 }
@@ -186,94 +183,62 @@ struct Transition {
     motion: Motion,
     props: Vec<String>,
     mode: Mode,
+    callback: Option<mlua::Function>,
 }
 
 impl Transition {
     fn parse(node: &Table) -> mlua::Result<Option<Self>> {
-        let config = match node.get::<Value>("transition")? {
-            Value::Nil | Value::Boolean(false) => return Ok(None),
-            Value::Boolean(true) => None,
-            Value::Table(table) => Some(table),
-            _ => {
-                return Err(mlua::Error::runtime(
-                    "transition must be true, false, or a table",
-                ));
-            }
+        let Some(events) = node.get::<Option<Table>>("transition")? else {
+            return Ok(None);
+        };
+        let Some(config) = events.get::<Option<Table>>("change")? else {
+            return Ok(None);
         };
         let allowed = animatable(&node.get::<String>("kind")?);
         let mut props = allowed
             .iter()
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
-        let mut easing = None;
-        let mut spring = None;
-        let mut duration = None;
-        if let Some(config) = &config {
-            crate::runtime::keys(config, &["props", "easing", "spring", "duration"])?;
-            if let Some(list) = config.get::<Option<Table>>("props")? {
-                props = list
-                    .sequence_values::<String>()
-                    .collect::<mlua::Result<Vec<_>>>()?;
-                if let Some(name) = props.iter().find(|name| !allowed.contains(&name.as_str())) {
-                    return Err(mlua::Error::runtime(format!(
-                        "unknown transition prop: {name}"
-                    )));
-                }
-            }
-            easing = config
-                .get::<Option<String>>("easing")?
-                .map(|name| match name.as_str() {
-                    "linear" => Ok(Easing::LINEAR),
-                    "ease" => Ok(Easing::EASE),
-                    "in" | "ease_in" => Ok(Easing::EASE_IN),
-                    "out" | "ease_out" => Ok(Easing::EASE_OUT),
-                    "in_out" | "ease_in_out" => Ok(Easing::EASE_IN_OUT),
-                    _ => Err(mlua::Error::runtime(format!("unknown easing: {name}"))),
-                })
-                .transpose()?;
-            spring = config
-                .get::<Option<String>>("spring")?
-                .map(|name| match name.as_str() {
-                    "smooth" => Ok(SpringMotion::SMOOTH),
-                    "snappy" => Ok(SpringMotion::SNAPPY),
-                    "bouncy" => Ok(SpringMotion::BOUNCY),
-                    "instant" => Ok(SpringMotion::INSTANT),
-                    _ => Err(mlua::Error::runtime(format!("unknown spring: {name}"))),
-                })
-                .transpose()?;
-            if let Some(ms) = config.get::<Option<f64>>("duration")? {
-                if !(1.0..=86_400_000.0).contains(&ms) || ms.fract() != 0.0 {
-                    return Err(mlua::Error::runtime(
-                        "transition duration must be a whole number from 1 to 86400000 ms",
-                    ));
-                }
-                duration = Some(Duration::from_millis(ms as u64));
+        crate::runtime::keys(
+            &config,
+            &["props", "easing", "spring", "duration", "callback"],
+        )?;
+        if let Some(list) = config.get::<Option<Table>>("props")? {
+            props = list
+                .sequence_values::<String>()
+                .collect::<mlua::Result<Vec<_>>>()?;
+            if let Some(name) = props.iter().find(|name| !allowed.contains(&name.as_str())) {
+                return Err(mlua::Error::runtime(format!(
+                    "unknown transition prop: {name}"
+                )));
             }
         }
         if matches!(node.get::<Value>("padding")?, Value::Table(_)) {
             // Per-side padding is static; scalar transitions keep animating.
             props.retain(|prop| prop != "padding");
         }
-        let mode = match (spring, easing) {
-            (Some(_), Some(_)) => {
-                return Err(mlua::Error::runtime(
-                    "transition takes easing or spring, not both",
-                ));
+        let mode = animation::mode(&config)?;
+        let mut motion = Motion::target(node)?;
+        for (name, value) in [
+            ("width", &mut motion.width),
+            ("height", &mut motion.height),
+            ("padding", &mut motion.padding),
+            ("spacing", &mut motion.spacing),
+            ("size", &mut motion.size),
+            ("value", &mut motion.value),
+        ] {
+            if !props.iter().any(|prop| prop == name) {
+                *value = 0.0;
             }
-            (Some(motion), None) => {
-                Mode::Spring(duration.map_or(motion, |d| motion.with_duration(d)))
-            }
-            (None, Some(easing)) => {
-                Mode::Transition(duration.map_or(easing, |d| easing.with_duration(d)))
-            }
-            (None, None) => Mode::Spring(duration.map_or(SpringMotion::SMOOTH, |d| {
-                SpringMotion::SMOOTH.with_duration(d)
-            })),
-        };
+        }
+        if !props.iter().any(|prop| prop == "color") {
+            motion.color = Color::WHITE;
+        }
         Ok(Some(Self {
-            motion: Motion::target(node)?,
+            motion,
             props,
             mode,
+            callback: config.get("callback")?,
         }))
     }
 
@@ -306,6 +271,9 @@ pub struct Ctx {
     pub component: Option<(String, u64, Option<iced::window::Id>)>,
     lua: Option<mlua::Lua>,
     window: Option<iced::window::Id>,
+    owner: Value,
+    rebuilding: bool,
+    lifetime: Option<animation::Control>,
 }
 
 impl Ctx {
@@ -315,6 +283,9 @@ impl Ctx {
             component: None,
             lua: None,
             window: None,
+            owner: Value::Nil,
+            rebuilding: false,
+            lifetime: None,
         }
     }
 
@@ -348,31 +319,58 @@ pub fn element(node: Table, ctx: &Ctx) -> mlua::Result<Element<'static, Message>
                 component: Some((id, node.get::<u64>("__component_revision")?, ctx.window)),
                 lua: ctx.lua.clone(),
                 window: ctx.window,
+                owner: ctx.owner.clone(),
+                rebuilding: ctx.rebuilding,
+                lifetime: ctx.lifetime.clone(),
             };
             &tagged
         }
         None => ctx,
     };
-    // list_view owns its transition table for item enter/leave; do not treat it
-    // as the generic whole-widget property transition.
+    let owned;
+    let ctx = if let Value::Table(owner) = node.get::<Value>("__animation_self")? {
+        owned = Ctx {
+            owner: Value::Table(owner),
+            lifetime: node
+                .get::<Option<mlua::AnyUserData>>("__animation")?
+                .map(|value| {
+                    value
+                        .borrow::<animation::Control>()
+                        .map(|control| control.clone())
+                })
+                .transpose()?,
+            ..ctx.clone()
+        };
+        &owned
+    } else {
+        ctx
+    };
+    let effects = animation::parse(&node)?;
     if node.get::<Option<String>>("kind")?.as_deref() == Some("list_view") {
         return build(&node, ctx, None);
     }
-    let Some(transition) = Transition::parse(&node)? else {
-        return build(&node, ctx, None);
-    };
-    // Build once so Lua errors reach the caller; the builder closure cannot report them.
-    build(&node, ctx, Some(&transition))?;
-    let ctx = ctx.clone();
-    let target = transition.motion.clone();
-    let mode = transition.mode;
-    Ok(AnimationBuilder::new(target, move |motion| {
-        let mut transition = transition.clone();
-        transition.motion = motion;
-        build(&node, &ctx, Some(&transition)).unwrap_or_else(|_| Space::new().into())
-    })
-    .animation(mode)
-    .animates_layout(true)
+    let transition = Transition::parse(&node)?;
+    let content = build(&node, ctx, transition.as_ref())?;
+    let control = node
+        .get::<Option<mlua::AnyUserData>>("__animation")?
+        .map(|value| {
+            value
+                .borrow::<animation::Control>()
+                .map(|control| control.clone())
+        })
+        .transpose()?;
+    if effects.is_empty() && transition.is_none() && control.is_none() {
+        return Ok(content);
+    }
+    Ok(scale::ScaleItem::new(
+        content,
+        effects,
+        control,
+        ctx.clone(),
+        ctx.owner.clone(),
+        node.get::<Option<bool>>("__retained")?.unwrap_or(false),
+    )
+    .property(node, transition)
     .into())
 }
 
@@ -390,6 +388,7 @@ fn build(
 ) -> mlua::Result<Element<'static, Message>> {
     const COMMON: &[&str] = &[
         "kind",
+        "id",
         "content",
         "width",
         "height",
@@ -397,6 +396,9 @@ fn build(
         "transition",
         "__component_id",
         "__component_revision",
+        "__animation",
+        "__animation_self",
+        "__retained",
     ];
     let kind: String = node.get("kind")?;
     let extra: &[&str] = match kind.as_str() {
@@ -517,17 +519,7 @@ fn build(
             "style",
         ],
         "table" => &["columns", "spacing"],
-        "list_view" => &[
-            "id",
-            "key",
-            "direction",
-            "spacing",
-            "render",
-            "on_item_added",
-            "on_item_removed",
-            "onItemAdded",
-            "onItemRemoved",
-        ],
+        "list_view" => &["id", "key", "direction", "spacing", "render"],
         "region" => &[],
         "markdown" => &["text_size", "spacing", "on_link_click", "style"],
         "responsive" => &[],
@@ -718,16 +710,16 @@ mod tests {
     fn transitions_animate_listed_props_and_keep_fill_static() {
         let lua = mlua::Lua::new();
         for source in [
-            "{kind='container',content={kind='text',content='x'},transition=true,padding=8,width=120}",
-            "{kind='container',content={kind='text',content='x'},transition={props={'width'}},width=120}",
-            "{kind='container',content={kind='text',content='x'},transition={duration=300,easing='out'},width=120}",
-            "{kind='container',content={kind='text',content='x'},transition={spring='bouncy'},width=120}",
-            "{kind='container',content={kind='text',content='x'},transition=true,width='fill'}",
-            "{kind='row',content={},transition=true,spacing=4}",
-            "{kind='text',content='x',color='#ff0000',transition=true}",
-            "{kind='text',content='x',color='#ff0000',transition={props={'color'}}}",
-            "{kind='progress_bar',value=0.5,transition=true}",
-            "{kind='progress_bar',value=0.5,transition={props={'value'},duration=300}}",
+            "{kind='container',content={kind='text',content='x'},transition={change={}},padding=8,width=120}",
+            "{kind='container',content={kind='text',content='x'},transition={change={props={'width'}}},width=120}",
+            "{kind='container',content={kind='text',content='x'},transition={change={duration=300,easing='out'}},width=120}",
+            "{kind='container',content={kind='text',content='x'},transition={change={spring='bouncy'}},width=120}",
+            "{kind='container',content={kind='text',content='x'},transition={change={}},width='fill'}",
+            "{kind='row',content={},transition={change={}},spacing=4}",
+            "{kind='text',content='x',color='#ff0000',transition={change={}}}",
+            "{kind='text',content='x',color='#ff0000',transition={change={props={'color'}}}}",
+            "{kind='progress_bar',value=0.5,transition={change={}}}",
+            "{kind='progress_bar',value=0.5,transition={change={props={'value'},duration=300}}}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_ok(),
@@ -735,15 +727,18 @@ mod tests {
             );
         }
         for source in [
-            "{kind='text',content='x',transition={props={'nope'}}}",
-            "{kind='text',content='x',transition={easing='nope'}}",
-            "{kind='text',content='x',transition={spring='nope'}}",
-            "{kind='text',content='x',transition={easing='linear',spring='smooth'}}",
-            "{kind='text',content='x',transition={duration=0}}",
+            "{kind='text',content='x',transition={change={props={'nope'}}}}",
+            "{kind='text',content='x',transition={change={easing='nope'}}}",
+            "{kind='text',content='x',transition={change={spring='nope'}}}",
+            "{kind='text',content='x',transition={change={easing='linear',spring='smooth'}}}",
+            "{kind='text',content='x',transition={change={duration=0}}}",
             "{kind='text',content='x',transition={bogus=true}}",
             "{kind='text',content='x',transition='yes'}",
-            "{kind='text',content='x',transition={props={'value'}}}",
-            "{kind='progress_bar',value=2,transition=true}",
+            "{kind='text',content='x',transition={change={props={'value'}}}}",
+            "{kind='progress_bar',value=2,transition={change={}}}",
+            "{kind='text',content='x',transition=true}",
+            "{kind='text',content='x',transition=false}",
+            "{kind='text',content='x',transition={props={'color'}}}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_err(),
@@ -758,7 +753,7 @@ mod tests {
         for source in [
             "{kind='container',content={kind='text',content='x'},padding={left=1,right=2,top=3,bottom=4}}",
             "{kind='container',content={kind='text',content='x'},padding={left=1}}",
-            "{kind='container',content={kind='text',content='x'},padding={left=1},transition=true}",
+            "{kind='container',content={kind='text',content='x'},padding={left=1},transition={change={}}}",
             "{kind='rule',style={radius={top_left=1,top_right=2,bottom_right=3,bottom_left=4}}}",
             "{kind='progress_bar',value=0.5,style={border={radius={top_left=1}}}}",
             "{kind='container',content={kind='text',content='x'},style={border={radius={top_left=1}}}}",
@@ -880,8 +875,8 @@ mod tests {
             "{kind='text_editor',id='editor',value='text',placeholder='p',size=14,font={family='monospace'},wrapping='word',on_action='edit',style={background='#111111',text_color='#ffffff'}}",
             "{kind='combo_box',id='combo',options={'a','b'},value='a',placeholder='pick',on_select='select',on_input='input',style={background='#111111',text_color='#ffffff'}}",
             "{kind='table',columns={{header='a',width=100,align_x='left'},{header='b',align_y='center'}},content={{'1','2'},{'3','4'}},spacing=1}",
-            "{kind='list_view',id='list',content={{kind='text',content='x'}},spacing=4,render=function(item,index) return item end,on_item_added=function() end,on_item_removed=function() end}",
-            "{kind='list_view',id='list-animated',content={{kind='text',content='x'}},transition={duration=200,x={from=-180,to=0},onAdded=function() end,onRemoved=function() end,onDisplaced=function() end}}",
+            "{kind='list_view',id='list',content={{kind='text',content='x'}},spacing=4,render=function(item,index) return item end}",
+            "{kind='list_view',id='list-animated',content={{kind='text',content='x'}},transition={enter={duration=200,from={x=-180},callback=function() end},exit={to={scale=0}},displaced={callback=function() end}}}",
             "{kind='region',content={kind='text',content='x'}}",
             "{kind='markdown',content='# hi',text_size=14,spacing=8,on_link_click='link',style={link_color='#22ff22',inline_code_color='#ffffff'}}",
             "{kind='responsive',content=function(size) return {kind='text',content=tostring(size.width)} end}",
@@ -946,7 +941,7 @@ mod tests {
     fn transitions_interpolate_text_color() {
         let lua = mlua::Lua::new();
         let node: Table = lua
-            .load("{kind='text',content='x',color='#ff0000',transition={props={'color'}}}")
+            .load("{kind='text',content='x',color='#ff0000',transition={change={props={'color'}}}}")
             .eval()
             .unwrap();
         let transition = Transition::parse(&node).unwrap().unwrap();
@@ -954,7 +949,7 @@ mod tests {
         assert_eq!(transition.value("width"), None);
 
         let node: Table = lua
-            .load("{kind='text',content='x',color='#ff0000',transition={props={'width'}}}")
+            .load("{kind='text',content='x',color='#ff0000',transition={change={props={'width'}}}}")
             .eval()
             .unwrap();
         let transition = Transition::parse(&node).unwrap().unwrap();
@@ -965,7 +960,7 @@ mod tests {
     fn transitions_interpolate_progress_bar_value() {
         let lua = mlua::Lua::new();
         let node: Table = lua
-            .load("{kind='progress_bar',value=0.4,transition={props={'value'},easing='linear'}}")
+            .load("{kind='progress_bar',value=0.4,transition={change={props={'value'},easing='linear'}}}")
             .eval()
             .unwrap();
         let transition = Transition::parse(&node).unwrap().unwrap();
@@ -973,7 +968,7 @@ mod tests {
         assert_eq!(transition.value("width"), None);
 
         let node: Table = lua
-            .load("{kind='text',content='x',transition={props={'value'}}}")
+            .load("{kind='text',content='x',transition={change={props={'value'}}}}")
             .eval()
             .unwrap();
         assert!(Transition::parse(&node).is_err());
@@ -1083,33 +1078,33 @@ mod tests {
     }
 
     #[test]
-    fn list_view_reports_appended_and_removed_items() {
+    fn list_view_callbacks_do_not_run_during_view_construction() {
         let lua = mlua::Lua::new();
         lua.load("added = 0; removed = 0").exec().unwrap();
         let ctx = Ctx::new(7);
         let first: Table = lua
             .load(
                 "{kind='list_view',id='list-test',content={{kind='text',content='a'},{kind='text',content='b'}},\
-                 on_item_added=function() added = added + 1 end,\
-                 on_item_removed=function() removed = removed + 1 end}",
+                 transition={enter={callback=function() added = added + 1 end},\
+                 exit={to={scale=0},callback=function() removed = removed + 1 end}}}",
             )
             .eval()
             .unwrap();
         element(first, &ctx).unwrap();
-        assert_eq!(lua.globals().get::<u32>("added").unwrap(), 2);
+        assert_eq!(lua.globals().get::<u32>("added").unwrap(), 0);
         assert_eq!(lua.globals().get::<u32>("removed").unwrap(), 0);
 
         let second: Table = lua
             .load(
                 "{kind='list_view',id='list-test',content={{kind='text',content='a'}},\
-                 on_item_added=function() added = added + 1 end,\
-                 on_item_removed=function() removed = removed + 1 end}",
+                 transition={enter={callback=function() added = added + 1 end},\
+                 exit={to={scale=0},callback=function() removed = removed + 1 end}}}",
             )
             .eval()
             .unwrap();
         element(second, &ctx).unwrap();
-        assert_eq!(lua.globals().get::<u32>("added").unwrap(), 2);
-        assert_eq!(lua.globals().get::<u32>("removed").unwrap(), 1);
+        assert_eq!(lua.globals().get::<u32>("added").unwrap(), 0);
+        assert_eq!(lua.globals().get::<u32>("removed").unwrap(), 0);
     }
 
     #[test]
@@ -1117,16 +1112,16 @@ mod tests {
         let lua = mlua::Lua::new();
         let ctx = Ctx::new(41);
         for source in [
-            "{kind='list_view',id='axis-y',content={{kind='text',content='a'}},transition={duration=180,y={from=-30,to=0}}}",
-            "{kind='list_view',id='axis-num',content={{kind='text',content='a'}},transition={duration=180,y=-30}}",
-            "{kind='list_view',id='axis-both',content={{kind='text',content='a'}},transition={duration=180,x={from=-30,to=0},y={from=-10,to=0}}}",
+            "{kind='list_view',id='axis-y',content={{kind='text',content='a'}},transition={enter={duration=180,from={y=-30}}}}",
+            "{kind='list_view',id='axis-exit',content={{kind='text',content='a'}},transition={exit={duration=80,to={y=30}}}}",
+            "{kind='list_view',id='axis-both',content={{kind='text',content='a'}},transition={enter={duration=180,from={x=-30,y=-10}}}}",
         ] {
             element(lua.load(source).eval().unwrap(), &ctx).unwrap();
         }
         let bad: Table = lua
             .load(
                 "{kind='list_view',id='axis-bad',content={{kind='text',content='a'}},\
-                 transition={duration=180,z={from=-30,to=0}}}",
+                  transition={enter={duration=180,from={z=-30}}}}",
             )
             .eval()
             .unwrap();
@@ -1134,7 +1129,7 @@ mod tests {
     }
 
     #[test]
-    fn list_view_displaces_survivors_and_fires_the_callback() {
+    fn list_view_displacement_callbacks_wait_for_animation_completion() {
         let lua = mlua::Lua::new();
         lua.load("added = ''; removed = ''; moved = ''")
             .exec()
@@ -1143,30 +1138,30 @@ mod tests {
         let first: Table = lua
             .load(
                 "{kind='list_view',id='list-displaced',content={'a','b','c'},\
-                 transition={duration=100,onDisplaced=function(index,item) moved = moved .. item .. index end},\
-                 on_item_added=function(index,item) added = added .. item .. index end,\
-                 on_item_removed=function(index,item) removed = removed .. item .. index end}",
+                  transition={displaced={duration=100,callback=function() moved = moved .. 'm' end},\
+                  enter={callback=function() added = added .. 'a' end},\
+                  exit={callback=function() removed = removed .. 'r' end}}}",
             )
             .eval()
             .unwrap();
         element(first, &ctx).unwrap();
-        assert_eq!(lua.globals().get::<String>("added").unwrap(), "a0b1c2");
+        assert_eq!(lua.globals().get::<String>("added").unwrap(), "");
         assert_eq!(lua.globals().get::<String>("removed").unwrap(), "");
         assert_eq!(lua.globals().get::<String>("moved").unwrap(), "");
 
         let second: Table = lua
             .load(
                 "{kind='list_view',id='list-displaced',content={'b','c'},\
-                 transition={duration=100,onDisplaced=function(index,item) moved = moved .. item .. index end},\
-                 on_item_added=function(index,item) added = added .. item .. index end,\
-                 on_item_removed=function(index,item) removed = removed .. item .. index end}",
+                  transition={displaced={duration=100,callback=function() moved = moved .. 'm' end},\
+                  enter={callback=function() added = added .. 'a' end},\
+                  exit={callback=function() removed = removed .. 'r' end}}}",
             )
             .eval()
             .unwrap();
         element(second, &ctx).unwrap();
-        assert_eq!(lua.globals().get::<String>("added").unwrap(), "a0b1c2");
-        assert_eq!(lua.globals().get::<String>("removed").unwrap(), "a0");
-        assert_eq!(lua.globals().get::<String>("moved").unwrap(), "b0c1");
+        assert_eq!(lua.globals().get::<String>("added").unwrap(), "");
+        assert_eq!(lua.globals().get::<String>("removed").unwrap(), "");
+        assert_eq!(lua.globals().get::<String>("moved").unwrap(), "");
     }
 
     #[test]
@@ -1178,26 +1173,26 @@ mod tests {
             .load(
                 "{kind='list_view',id='list-key',key='id',content={{id='a'},{id='b'}},\
                  render=function(item) return {kind='text',content=item.id} end,\
-                 transition={duration=100,onAdded=function(index,item) added = added .. item.id .. index end,\
-                 onDisplaced=function(index,item) moved = moved .. item.id .. index end}}",
+                  transition={enter={duration=100,callback=function() added = added .. 'a' end},\
+                  displaced={callback=function() moved = moved .. 'm' end}}}",
             )
             .eval()
             .unwrap();
         element(first, &ctx).unwrap();
-        assert_eq!(lua.globals().get::<String>("added").unwrap(), "a0b1");
+        assert_eq!(lua.globals().get::<String>("added").unwrap(), "");
 
         let second: Table = lua
             .load(
                 "{kind='list_view',id='list-key',key='id',content={{id='a'},{id='x'},{id='b'}},\
                  render=function(item) return {kind='text',content=item.id} end,\
-                 transition={duration=100,onAdded=function(index,item) added = added .. item.id .. index end,\
-                 onDisplaced=function(index,item) moved = moved .. item.id .. index end}}",
+                  transition={enter={duration=100,callback=function() added = added .. 'a' end},\
+                  displaced={callback=function() moved = moved .. 'm' end}}}",
             )
             .eval()
             .unwrap();
         element(second, &ctx).unwrap();
-        assert_eq!(lua.globals().get::<String>("added").unwrap(), "a0b1x1");
-        assert_eq!(lua.globals().get::<String>("moved").unwrap(), "b2");
+        assert_eq!(lua.globals().get::<String>("added").unwrap(), "");
+        assert_eq!(lua.globals().get::<String>("moved").unwrap(), "");
     }
 
     #[test]

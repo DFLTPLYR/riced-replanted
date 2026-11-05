@@ -34,6 +34,16 @@ pub enum Message {
     Mouse(u64, MouseEvent),
     Frame(u64),
     Editor(u64, Option<(String, u64, Option<window::Id>)>, EditorAction),
+    Animation {
+        generation: u64,
+        component: Option<(String, u64, Option<window::Id>)>,
+        window: Option<window::Id>,
+        control: widgets::animation::Control,
+        serial: u64,
+        callback: Function,
+        owner: Value,
+        lifetime: Option<widgets::animation::Control>,
+    },
     Tick,
     CheckReload,
     PollPlugins,
@@ -250,6 +260,7 @@ struct Mount {
     revision: u64,
     props: Table,
     table: Table,
+    control: widgets::animation::Control,
 }
 
 type Mounts = Rc<RefCell<HashMap<(window::Id, String), Mount>>>;
@@ -292,7 +303,7 @@ pub struct App {
 }
 
 // Iced's rendering callbacks cannot return errors; a broken Lua callback is fatal.
-fn checked<T>(result: mlua::Result<T>) -> T {
+pub(crate) fn checked<T>(result: mlua::Result<T>) -> T {
     result.unwrap_or_else(|error| {
         log::error!(target: "runtime.error", "{error}");
         std::process::exit(1);
@@ -498,9 +509,32 @@ impl App {
             return self.window_closed(id);
         }
         let (event, origin) = match message {
+            Message::Animation {
+                generation,
+                component,
+                window,
+                control,
+                serial,
+                callback,
+                owner,
+                lifetime,
+            } if generation == self.generation => {
+                if self.stale(&component)
+                    || lifetime.is_some_and(|control| !control.state().alive)
+                    || window.is_some_and(|id| !self.windows.borrow().contains(&id))
+                    || !control.accept(serial)
+                {
+                    return Ok(Task::none());
+                }
+                let value = callback.call(owner)?;
+                return self.tasks(value);
+            }
             Message::Lua(generation, component, value) if generation == self.generation => {
                 if self.stale(&component) {
                     return Ok(Task::none());
+                }
+                if let Value::Function(callback) = value {
+                    return self.tasks(callback.call(())?);
                 }
                 (value, component.map(|(id, _, _)| id))
             }
@@ -546,6 +580,7 @@ impl App {
                 )
             }
             Message::Lua(..)
+            | Message::Animation { .. }
             | Message::Widget(..)
             | Message::Clipboard(..)
             | Message::Key(..)
@@ -782,6 +817,9 @@ impl App {
     }
 
     fn view_node(&self, id: window::Id) -> mlua::Result<Table> {
+        self.animations()?
+            .get::<Function>("begin")?
+            .call::<()>((format!("{id:?}"), self.windows.borrow().contains(&id)))?;
         let props = self.lua.create_table()?;
         props.set("window", self.window(id)?)?;
         if let Some(size) = self.sizes.borrow().get(&id) {
@@ -791,6 +829,10 @@ impl App {
         let node = self.view.call((self.state.clone(), props))?;
         self.modules.borrow_mut().watch_all(&self.lua)?;
         Ok(node)
+    }
+
+    fn animations(&self) -> mlua::Result<Table> {
+        self.lua.globals().get::<Table>("riced")?.get("_animations")
     }
 }
 
@@ -805,7 +847,7 @@ impl App {
         ids: &mut HashSet<String>,
     ) -> mlua::Result<Table> {
         let node = copy_table(&self.lua, &node)?;
-        match node.get::<Option<String>>("kind")?.as_deref() {
+        let expanded = match node.get::<Option<String>>("kind")?.as_deref() {
             Some("component") => self.expand_component(node, window, path, ids),
             Some("row" | "column" | "stack" | "grid" | "pane_grid") => {
                 let children = node
@@ -858,7 +900,13 @@ impl App {
                 Ok(node)
             }
             _ => Ok(node),
+        }?;
+        if let Some(owner) = expanded.get::<Option<Table>>("__animation_self")? {
+            self.animations()?
+                .get::<Function>("snapshot")?
+                .call::<()>((owner.get::<String>("__animation_key")?, expanded.clone()))?;
         }
+        Ok(expanded)
     }
 
     fn expand_component(
@@ -894,7 +942,26 @@ impl App {
             mlua::Error::runtime(format!("module {module} must define a view function"))
         })?;
         let revision = self.modules.borrow().revision(&module);
-        let child: Table = view.call((table.clone(), props.clone(), self.window(window)?))?;
+        let _ = view;
+        let key = format!("component:{id}");
+        if self
+            .mounts
+            .borrow()
+            .get(&(window, id.clone()))
+            .is_some_and(|mount| mount.revision != revision)
+        {
+            self.animations()?
+                .get::<Function>("remove")?
+                .call::<()>(key.clone())?;
+        }
+        let (child, instance): (Table, Table) = self
+            .animations()?
+            .get::<Function>("render")?
+            .call((key, table, props.clone(), self.window(window)?))?;
+        let control = child
+            .get::<mlua::AnyUserData>("__animation")?
+            .borrow::<widgets::animation::Control>()?
+            .clone();
         let mut windows_of = self.windows_of.borrow_mut();
         let owners = windows_of.entry(module.clone()).or_default();
         if !owners.contains(&window) {
@@ -902,7 +969,11 @@ impl App {
         }
         drop(windows_of);
         path.push(id.clone());
-        let child = self.expand(child, window, path, ids)?;
+        let owner: Function = self.animations()?.get("owner")?;
+        let previous: Value = owner.call(format!("component:{id}"))?;
+        let child = self.expand(child, window, path, ids);
+        owner.call::<()>(previous)?;
+        let child = child?;
         path.pop();
         // The discovery pass renders with a throwaway window id; only tracked windows
         // get mounts and lifecycle signals.
@@ -915,11 +986,12 @@ impl App {
                     module,
                     revision,
                     props: props.clone(),
-                    table: table.clone(),
+                    table: instance.clone(),
+                    control,
                 },
             );
-            if first && let Some(hook) = table.get::<Option<Function>>("on_visible")? {
-                hook.call::<()>((table, props, self.window(window)?))?;
+            if first && let Some(hook) = instance.get::<Option<Function>>("on_visible")? {
+                hook.call::<()>((instance, props, self.window(window)?))?;
             }
         }
         child.set("__component_id", id)?;
@@ -934,7 +1006,9 @@ impl App {
             .mounts
             .borrow()
             .iter()
-            .filter(|((owner, id), _)| *owner == window && !ids.contains(id))
+            .filter(|((owner, id), mount)| {
+                *owner == window && !ids.contains(id) && mount.control.removable()
+            })
             .map(|(key, mount)| (key.clone(), mount.clone()))
             .collect::<Vec<_>>();
         for (key, mount) in destroyed {
@@ -1075,6 +1149,9 @@ impl App {
     }
 
     fn forget_window(&self, id: window::Id) -> mlua::Result<()> {
+        self.animations()?
+            .get::<Function>("forget")?
+            .call::<()>(format!("{id:?}"))?;
         self.windows.borrow_mut().retain(|window| *window != id);
         self.windows_of.borrow_mut().retain(|_, windows| {
             windows.retain(|window| *window != id);
@@ -1201,13 +1278,33 @@ impl App {
         let mut path = Vec::new();
         let mut ids = HashSet::new();
         let node = self.expand(node, id, &mut path, &mut ids)?;
-        self.destroy_unmounted(id, &ids)?;
         let element = widgets::element(
             node,
             &Ctx::new(self.generation)
                 .with_lua(self.lua.clone())
                 .with_window(id),
         )?;
+        let leaving: Table = self.animations()?.get::<Function>("finish")?.call(())?;
+        self.destroy_unmounted(id, &ids)?;
+        widgets::sweep_animations();
+        let mut elements = vec![element];
+        for node in leaving.sequence_values::<Table>() {
+            let child = widgets::element(
+                node?,
+                &Ctx::new(self.generation)
+                    .with_lua(self.lua.clone())
+                    .with_window(id),
+            )?;
+            elements.push(iced::widget::pin(child).into());
+        }
+        let element = if elements.len() == 1 {
+            elements.remove(0)
+        } else {
+            iced::widget::Stack::with_children(elements)
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .into()
+        };
         Ok(widgets::with_input_regions(element, id, events_transparent))
     }
 
@@ -1340,6 +1437,15 @@ impl App {
 
     fn redraw(&self, message: &Message) -> mlua::Result<Scope> {
         let event = match message {
+            Message::Animation {
+                generation, window, ..
+            } => {
+                return Ok(if *generation == self.generation {
+                    window.map(Scope::Window).unwrap_or(Scope::All)
+                } else {
+                    Scope::None
+                });
+            }
             Message::CheckReload | Message::PollPlugins => return Ok(Scope::None),
             Message::Reloaded => return Ok(Scope::All),
             Message::Noop | Message::Surface(_) => return Ok(Scope::None),
@@ -1374,6 +1480,9 @@ impl App {
                 Value::Table(event)
             }
             Message::Clipboard(..) => return Ok(Scope::None),
+            Message::Lua(generation, _, Value::Function(_)) if *generation == self.generation => {
+                return Ok(Scope::All);
+            }
             Message::Lua(generation, _, value) if *generation == self.generation => value.clone(),
             Message::Lua(..) => return Ok(Scope::None),
             Message::Widget(generation, component, event, value)
@@ -2444,6 +2553,567 @@ return m",
         assert_eq!(seen(&app, "seen_right"), "right");
         assert_eq!(app.mounts.borrow()[&(id, "left".to_owned())].revision, 0);
         assert_eq!(app.windows_of.borrow()["left"], [id]);
+    }
+
+    fn animation_frame(
+        app: &mut App,
+        window: window::Id,
+        tree: &mut iced::advanced::widget::Tree,
+        now: std::time::Instant,
+    ) -> usize {
+        use iced::advanced::{Layout, Renderer as _, renderer::Headless};
+        let mut renderer = iced::futures::executor::block_on(iced::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut element = app.view(window).unwrap();
+        tree.diff(&element);
+        let size = Size::new(640.0, 480.0);
+        let layout = element.as_widget_mut().layout(
+            tree,
+            &renderer,
+            &iced::advanced::layout::Limits::new(Size::ZERO, size),
+        );
+        let mut messages = Vec::new();
+        element.as_widget_mut().update(
+            tree,
+            &iced::Event::Window(window::Event::RedrawRequested(now)),
+            Layout::new(&layout),
+            iced::mouse::Cursor::Unavailable,
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut iced::advanced::Shell::new(&mut messages),
+            &iced::Rectangle::with_size(size),
+        );
+        renderer.reset(iced::Rectangle::with_size(size));
+        element.as_widget().draw(
+            tree,
+            &mut renderer,
+            &Theme::Dark,
+            &iced::advanced::renderer::Style {
+                text_color: iced::Color::WHITE,
+            },
+            Layout::new(&layout),
+            iced::mouse::Cursor::Unavailable,
+            &iced::Rectangle::with_size(size),
+        );
+        let pixels = renderer
+            .screenshot(Size::new(640, 480), 1.0, iced::Color::TRANSPARENT)
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] != 0)
+            .count();
+        for message in messages {
+            let _ = app.update(message).unwrap();
+        }
+        pixels
+    }
+
+    #[test]
+    fn early_exit_completes_once_stays_hidden_and_can_reenter() {
+        let shell = r#"
+            iced.define('card', function()
+                return {view=function(self, props)
+                    instance = self
+                    return iced.container(iced.space(), {width=80,height=40,transition={
+                        enter={from={scale=0},duration=10,easing='linear'},
+                        exit={to={x=80,scale=0},duration=10,easing='linear',callback=function(owner)
+                            assert(owner == instance)
+                            completed = (completed or 0) + 1
+                        end}
+                    }})
+                end}
+            end)
+            local app = {}
+            function app:update() end
+            function app:view() return iced.card({id='one'}) end
+            return riced.daemon(app,'test',app.update,app.view):run()
+        "#;
+        let mut app = load(shell, Path::new("shell.lua")).unwrap();
+        let window = window::Id::unique();
+        let mut tree = iced::advanced::widget::Tree::empty();
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(1),
+        );
+        app.lua
+            .load("instance.animate.exit(); instance.animate.exit()")
+            .exec()
+            .unwrap();
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(1),
+        );
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(2),
+        );
+        assert_eq!(app.lua.globals().get::<u32>("completed").unwrap(), 1);
+        let instance: Table = app.lua.globals().get("instance").unwrap();
+        let node = app.view_node(window).unwrap();
+        let control = node
+            .get::<mlua::AnyUserData>("__animation")
+            .unwrap()
+            .borrow::<widgets::animation::Control>()
+            .unwrap()
+            .clone();
+        assert!(control.state().hidden);
+        app.lua.load("instance.animate.enter()").exec().unwrap();
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(3),
+        );
+        assert_eq!(
+            instance,
+            app.lua.globals().get::<Table>("instance").unwrap()
+        );
+        assert!(!control.state().hidden);
+        app.lua.load("instance.animate.exit()").exec().unwrap();
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(4),
+        );
+        assert_eq!(app.lua.globals().get::<u32>("completed").unwrap(), 2);
+    }
+
+    #[test]
+    fn component_instances_and_animation_controls_are_window_local() {
+        let shell = r#"
+            local app={}
+            function app:update() end
+            function app:view() return iced.row({iced.component('a','card'),iced.component('b','card')}) end
+            return riced.daemon(app,'test',app.update,app.view):run()
+        "#;
+        let profile = Profile::new(&[
+            ("shell.lua", shell),
+            (
+                "card.lua",
+                r#"
+            return {view=function(self)
+                return iced.container(iced.space(),{transition={exit={to={scale=0}}}})
+            end}
+        "#,
+            ),
+        ]);
+        let app = load(shell, &profile.shell()).unwrap();
+        let a = window::Id::unique();
+        let b = window::Id::unique();
+        app.view(a).unwrap();
+        app.view(b).unwrap();
+        let mounts = app.mounts.borrow();
+        let first = &mounts[&(a, "a".into())];
+        first
+            .table
+            .get::<Table>("animate")
+            .unwrap()
+            .get::<Function>("exit")
+            .unwrap()
+            .call::<()>(())
+            .unwrap();
+        assert_eq!(first.control.state().event, "exit");
+        assert_eq!(mounts[&(a, "b".into())].control.state().event, "enter");
+        assert_eq!(mounts[&(b, "a".into())].control.state().event, "enter");
+    }
+
+    #[test]
+    fn removed_component_finishes_exit_before_destruction() {
+        let shell = r#"
+            show=true
+            local app={}
+            function app:update() end
+            function app:view() if show then return iced.component('card','card') end return iced.space() end
+            return riced.daemon(app,'test',app.update,app.view):run()
+        "#;
+        let profile = Profile::new(&[
+            ("shell.lua", shell),
+            (
+                "card.lua",
+                r#"
+            return {view=function(self)
+                return iced.container(iced.space(),{width=80,height=40,transition={
+                    exit={to={scale=0},duration=10,callback=function() finished=true end}
+                }})
+            end,on_destroyed=function() assert(finished); destroyed=(destroyed or 0)+1 end}
+        "#,
+            ),
+        ]);
+        let mut app = load(shell, &profile.shell()).unwrap();
+        let window = window::Id::unique();
+        let mut tree = iced::advanced::widget::Tree::empty();
+        animation_frame(&mut app, window, &mut tree, std::time::Instant::now());
+        app.lua.globals().set("show", false).unwrap();
+        app.view(window).unwrap();
+        assert_eq!(app.mounts.borrow().len(), 1);
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(1),
+        );
+        app.view(window).unwrap();
+        assert!(app.mounts.borrow().is_empty());
+        assert_eq!(app.lua.globals().get::<u32>("destroyed").unwrap(), 1);
+    }
+
+    #[test]
+    fn change_callback_runs_after_interpolation_not_on_first_render() {
+        let shell = r#"
+            width=40
+            local app={}
+            function app:update() end
+            function app:view()
+                return iced.container(iced.space(),{width=width,height=20,transition={change={
+                    props={'width'},duration=10,easing='linear',callback=function() finished=(finished or 0)+1 end
+                }}})
+            end
+            return riced.daemon(app,'test',app.update,app.view):run()
+        "#;
+        let mut app = load(shell, Path::new("shell.lua")).unwrap();
+        let window = window::Id::unique();
+        let mut tree = iced::advanced::widget::Tree::empty();
+        animation_frame(&mut app, window, &mut tree, std::time::Instant::now());
+        assert!(
+            app.lua
+                .globals()
+                .get::<Option<u32>>("finished")
+                .unwrap()
+                .is_none()
+        );
+        app.lua.globals().set("width", 80).unwrap();
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(1),
+        );
+        assert_eq!(app.lua.globals().get::<u32>("finished").unwrap(), 1);
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(2),
+        );
+        assert_eq!(app.lua.globals().get::<u32>("finished").unwrap(), 1);
+    }
+
+    #[test]
+    fn list_events_have_independent_completion_callbacks() {
+        let shell = r#"
+            items={'a','b'}; added=0; removed=0; displaced=0
+            local app={}
+            function app:update() end
+            function app:view()
+                return iced.list_view(items,{id='items',render=function()
+                    return iced.container(iced.space(),{width=80,height=20})
+                end,transition={
+                    enter={from={scale=0},duration=10,callback=function() added=added+1 end},
+                    exit={to={scale=0},duration=20,callback=function() removed=removed+1 end},
+                    displaced={duration=30,callback=function() displaced=displaced+1 end}
+                }})
+            end
+            return riced.daemon(app,'test',app.update,app.view):run()
+        "#;
+        let mut app = load(shell, Path::new("shell.lua")).unwrap();
+        let window = window::Id::unique();
+        let mut tree = iced::advanced::widget::Tree::empty();
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(1),
+        );
+        assert_eq!(app.lua.globals().get::<u32>("added").unwrap(), 2);
+        app.lua.load("items={'b'}").exec().unwrap();
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(2),
+        );
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(3),
+        );
+        assert_eq!(app.lua.globals().get::<u32>("removed").unwrap(), 1);
+        assert_eq!(app.lua.globals().get::<u32>("displaced").unwrap(), 1);
+        assert_eq!(app.lua.globals().get::<u32>("added").unwrap(), 2);
+    }
+
+    #[test]
+    fn parent_exit_retains_nested_component_content_and_cancels_children_on_removal() {
+        let shell = r#"
+            show=true
+            local app={}
+            function app:update() end
+            function app:view() if show then return iced.component('parent','parent') end return iced.space() end
+            return riced.daemon(app,'test',app.update,app.view):run()
+        "#;
+        let profile = Profile::new(&[
+            ("shell.lua", shell),
+            (
+                "parent.lua",
+                r#"
+            return {view=function(self)
+                return iced.container(iced.component('child','child'),{transition={exit={to={scale=0},duration=10}}})
+            end}
+        "#,
+            ),
+            (
+                "child.lua",
+                "return {view=function() return iced.container(iced.space(),{width=80,height=20}) end}",
+            ),
+        ]);
+        let mut app = load(shell, &profile.shell()).unwrap();
+        let window = window::Id::unique();
+        let mut tree = iced::advanced::widget::Tree::empty();
+        animation_frame(&mut app, window, &mut tree, std::time::Instant::now());
+        let child = app.mounts.borrow()[&(window, "child".into())]
+            .control
+            .clone();
+        app.lua.globals().set("show", false).unwrap();
+        app.view(window).unwrap();
+        assert!(child.state().alive);
+        assert_eq!(app.mounts.borrow().len(), 2);
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(1),
+        );
+        app.view(window).unwrap();
+        assert!(!child.state().alive);
+        assert!(app.mounts.borrow().is_empty());
+    }
+
+    #[test]
+    fn closed_window_discards_queued_animation_callbacks() {
+        let shell = r#"
+            local app={}
+            function app:update() end
+            function app:view() return iced.space() end
+            return riced.daemon(app,'test',app.update,app.view):run()
+        "#;
+        let mut app = load(shell, Path::new("shell.lua")).unwrap();
+        let window = window::Id::unique();
+        app.view(window).unwrap();
+        let control = widgets::animation::Control::default();
+        control.state().pending_callback = true;
+        let callback = app
+            .lua
+            .load("function() error('stale callback ran') end")
+            .eval()
+            .unwrap();
+        app.forget_window(window).unwrap();
+        let _ = app
+            .update(Message::Animation {
+                generation: app.generation,
+                component: None,
+                window: Some(window),
+                control,
+                serial: 1,
+                callback,
+                owner: Value::Nil,
+                lifetime: None,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn early_exit_reflows_list_without_removing_source_items_and_can_reenter() {
+        use iced::advanced::renderer::Headless;
+        let shell = r##"
+            notifications={{id=1},{id=2},{id=3}}
+            instances={}; displaced=0; exited=0
+            iced.define('card', function() return {view=function(self, item)
+                instances[item.id]=self
+                return iced.container(iced.space(),{width=80,height=40,
+                    style={background='#ff0000'},transition={
+                        enter={from={x=20},duration=10,easing='linear'},
+                        exit={to={x=20},duration=10,easing='linear',callback=function() exited=exited+1 end}
+                    }})
+            end} end)
+            local app={}
+            function app:update() end
+            function app:view()
+                return iced.list_view(notifications,{id='notifications',key='id',spacing=8,
+                    render=function(item) return iced.card(item) end,
+                    transition={displaced={duration=10,easing='linear',callback=function() displaced=displaced+1 end}}
+                })
+            end
+            return riced.daemon(app,'test',app.update,app.view):run()
+        "##;
+        let mut app = load(shell, Path::new("shell.lua")).unwrap();
+        let window = window::Id::unique();
+        let mut tree = iced::advanced::widget::Tree::empty();
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(1),
+        );
+        app.lua.load("instances[2].animate.exit()").exec().unwrap();
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(1),
+        );
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(2),
+        );
+
+        let renderer = iced::futures::executor::block_on(iced::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let limits = iced::advanced::layout::Limits::new(Size::ZERO, Size::new(640.0, 480.0));
+        let mut element = app.view(window).unwrap();
+        tree.diff(&element);
+        let layout = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert_eq!(layout.children().len(), 2);
+        assert_eq!(layout.size().height, 88.0);
+        assert_eq!(layout.children()[1].bounds().y, 48.0);
+        assert_eq!(app.lua.globals().get::<u32>("displaced").unwrap(), 1);
+        assert_eq!(app.lua.globals().get::<u32>("exited").unwrap(), 1);
+        assert_eq!(
+            app.lua
+                .globals()
+                .get::<Table>("notifications")
+                .unwrap()
+                .raw_len(),
+            3
+        );
+
+        app.lua.load("instances[2].animate.enter()").exec().unwrap();
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(3),
+        );
+        let mut element = app.view(window).unwrap();
+        tree.diff(&element);
+        let layout = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert_eq!(layout.children().len(), 3);
+        assert_eq!(layout.size().height, 136.0);
+        assert_eq!(
+            app.lua
+                .globals()
+                .get::<Table>("notifications")
+                .unwrap()
+                .raw_len(),
+            3
+        );
+
+        app.lua
+            .load("for _, instance in pairs(instances) do instance.animate.exit() end")
+            .exec()
+            .unwrap();
+        animation_frame(
+            &mut app,
+            window,
+            &mut tree,
+            std::time::Instant::now() + Duration::from_secs(4),
+        );
+        let mut element = app.view(window).unwrap();
+        tree.diff(&element);
+        let layout = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert!(layout.children().is_empty());
+        assert_eq!(layout.size().height, 0.0);
+        assert_eq!(
+            app.lua
+                .globals()
+                .get::<Table>("notifications")
+                .unwrap()
+                .raw_len(),
+            3
+        );
+    }
+
+    #[test]
+    fn last_list_item_remains_drawn_until_exit_finishes() {
+        let shell = r##"
+            items={'one'}
+            local app={}
+            function app:update() end
+            function app:view()
+                return iced.list_view(items,{id='items',render=function()
+                    return iced.container(iced.space(),{width=80,height=40,style={background='#ff0000'}})
+                end,transition={exit={to={scale=0},duration=100}}})
+            end
+            return riced.daemon(app,'test',app.update,app.view):run()
+        "##;
+        let mut app = load(shell, Path::new("shell.lua")).unwrap();
+        let window = window::Id::unique();
+        let mut tree = iced::advanced::widget::Tree::empty();
+        assert!(animation_frame(&mut app, window, &mut tree, std::time::Instant::now()) > 0);
+        app.lua.load("items={}").exec().unwrap();
+        assert!(animation_frame(&mut app, window, &mut tree, std::time::Instant::now()) > 0);
+        assert_eq!(
+            animation_frame(
+                &mut app,
+                window,
+                &mut tree,
+                std::time::Instant::now() + Duration::from_secs(1)
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn identified_native_widget_exits_when_removed_from_a_component() {
+        let shell = r##"
+            show=true
+            iced.define('panel', function() return {view=function()
+                return iced.column(show and {iced.container(iced.space(),{id='card',width=80,height=40,
+                    style={background='#ff0000'},transition={exit={to={scale=0},duration=100,callback=function() finished=true end}}
+                })} or {})
+            end} end)
+            local app={}
+            function app:update() end
+            function app:view() return iced.panel() end
+            return riced.daemon(app,'test',app.update,app.view):run()
+        "##;
+        let mut app = load(shell, Path::new("shell.lua")).unwrap();
+        let window = window::Id::unique();
+        let mut tree = iced::advanced::widget::Tree::empty();
+        assert!(animation_frame(&mut app, window, &mut tree, std::time::Instant::now()) > 0);
+        app.lua.globals().set("show", false).unwrap();
+        assert!(animation_frame(&mut app, window, &mut tree, std::time::Instant::now()) > 0);
+        assert_eq!(
+            animation_frame(
+                &mut app,
+                window,
+                &mut tree,
+                std::time::Instant::now() + Duration::from_secs(1)
+            ),
+            0
+        );
+        assert!(app.lua.globals().get::<bool>("finished").unwrap());
     }
 
     #[test]

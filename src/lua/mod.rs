@@ -50,6 +50,7 @@ pub fn load(lua: &mlua::Lua) -> mlua::Result<()> {
             .set_name(format!("riced API: {name}"))
             .exec()?;
     }
+    crate::widgets::animation::install(lua)?;
     let handlers = lua.create_table()?;
     lua.set_named_registry_value("riced.ipc_handlers", handlers.clone())?;
     let riced: mlua::Table = lua.globals().get("riced")?;
