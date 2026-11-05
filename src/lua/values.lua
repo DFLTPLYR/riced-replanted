@@ -21,6 +21,10 @@ function iced.Length.fill_portion(portion)
 	return { fill_portion = portion }
 end
 
+-- Plugin lookup is also reachable from the widget table.
+iced.plugin = riced.plugins
+iced.plugins = riced.plugins
+
 function iced.opacity(color, percent)
 	assert(type(color) == "string", "opacity color must be a string")
 	assert(

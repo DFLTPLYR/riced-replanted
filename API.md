@@ -341,7 +341,8 @@ Extensions are separate executables that connect to `riced` over a Unix socket.
 Both names refer to the same function and always return a proxy table. Before
 an extension registers, `alive` is `false` and `store` is empty. The same proxy
 table is filled when the extension connects, so capturing it at module load is
-safe.
+safe. `iced.plugin(name)` and `iced.plugins(name)` are aliases for the same
+lookup.
 
 ```lua
 local wayland = riced.plugin("wayland")
@@ -389,12 +390,217 @@ Extensions may push events. They arrive in `update` as:
 { type = "plugin", plugin = "system", event = <value> }
 ```
 
+#### Bundled extension APIs
+
+| Extension   | Store fields                                                                                     | Methods                                                                                                             | Events |
+| ----------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- | ------ |
+| `system`    | `host`, `time`, `cpu`, `memory`, `disks`, `gpus`, `processes`                                    | none                                                                                                                | none   |
+| `wayland`   | `connected`, `capabilities`, `outputs`, `toplevels`, `workspaces`, `workspace_groups`, `focused` | `activate_toplevel`, `close_toplevel`, `activate_workspace`                                                         | none   |
+| `dbus`      | `connected`, `capabilities`, `tray`, `notifications`                                             | `activate_tray`, `secondary_activate_tray`, `context_menu_tray`, `close_notification`, `invoke_notification_action` | none   |
+| `themeagen` | `ready`, `mode`, `source`, `colors`                                                              | `generate`, `populate`, `regenerate`                                                                                | none   |
+
+All bundled extensions publish whole snapshots rather than pushing events.
+Each publish replaces the snapshot contents, so re-read a field in `view`
+instead of caching a nested table across updates; the proxy table itself stays
+live. Store reads are synchronous and subscribe to fields the first time Lua
+reads them. Methods are asynchronous and use positional arguments. `system` has no
+methods. Wayland and D-Bus methods return no value on success, so their callback
+receives `(nil, nil)`; themeagen methods return a result table. On failure every
+method calls its callback with `(nil, error)`. Without a callback, method
+failures are not surfaced to Lua. Use a callback when an action can fail. `?`
+below means the field or value may be absent or `nil`.
+
+#### Themeagen extension
+
+`riced-themeagen` builds Material You palettes from a seed color or image and
+renders Matugen-style `[templates.*]` entries. It reads the existing template
+directory by default:
+
+- config: `$XDG_CONFIG_HOME/riced/data/templates/config.toml`
+- state: `$XDG_CONFIG_HOME/riced/data/theme/themeagen.json`
+
+`RICED_THEMEAGEN_CONFIG` and `RICED_THEMEAGEN_STATE` override those paths.
+Relative `input_path` and `output_path` values resolve against the config
+directory; `~/` in `output_path` expands to `$HOME`.
+
+```lua
+local theme = iced.plugins("themeagen") -- same proxy as riced.plugins
+local colors = theme.colors
+
+if colors then
+    local active = colors[theme.mode]
+    iced.text("theme", { color = active.primary })
+end
+```
+
+Published state:
+
+| Field    | Type         | Meaning                                                                                                              |
+| -------- | ------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `ready`  | boolean      | A saved palette loaded and can be used                                                                               |
+| `mode`   | string       | Active mode, `"dark"` or `"light"`                                                                                   |
+| `source` | table or nil | How the palette was produced: `{kind="seed", seed, variant}`, `{kind="image", image, variant}`, or `{kind="manual"}` |
+| `colors` | table or nil | Both palettes, keyed by `dark` and `light`; nil before the first palette exists                                      |
+
+Before a palette exists, `ready` is false, `mode` is `dark`, and `source` and
+`colors` are nil. Methods are asynchronous; the last argument is a callback
+`(result, error)`.
+`result` contains `mode`, `source`, `colors`, `applied`, and `errors`. `applied`
+counts written templates; `errors` lists template or hook failures. `colors` is
+also published as `theme.colors`. Use `result.colors` inside the callback when
+you need the new palette immediately; the published `theme.colors` table is
+replaced on the next snapshot.
+
+| Method                                        | Behavior                                                                             |
+| --------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `generate({seed=..., mode=..., variant=...})` | Build both modes from `#rrggbb`, save, publish, and render templates.                |
+| `generate({image=..., ...})`                  | Same, with the seed sampled from a local image.                                      |
+| `populate({colors=..., mode=...})`            | Apply a supplied `{dark=..., light=...}` palette. Without `colors`, re-render saved. |
+| `populate({mode="light"})`                    | Switch mode and re-render from the saved palette.                                    |
+| `regenerate({mode=...})`                      | Rebuild from the saved seed or image.                                                |
+
+Method arguments:
+
+| Method       | Required arguments               | Optional arguments | Errors                                                                                                |
+| ------------ | -------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------- |
+| `generate`   | exactly one of `seed` or `image` | `mode`, `variant`  | invalid seed/image/variant/mode, unreadable image, or state write failure                             |
+| `populate`   | none                             | `colors`, `mode`   | invalid or incomplete palette, invalid mode, no saved palette, or state write failure                 |
+| `regenerate` | none                             | `mode`             | no saved palette, manual-only palette, unreadable image, invalid saved source, or state write failure |
+
+Every successful call returns a result table:
+
+| Field     | Type            | Meaning                                                          |
+| --------- | --------------- | ---------------------------------------------------------------- |
+| `mode`    | string          | Active mode after the call                                       |
+| `source`  | table           | Saved source, in the same shape as `theme.source`                |
+| `colors`  | table           | Both palettes, in the same shape as `theme.colors`               |
+| `applied` | integer         | Number of template files written                                 |
+| `errors`  | array of string | Template, hook, config, or output errors; empty when all applied |
+
+Template and hook failures are reported in `errors` rather than failing the
+call, because the palette itself was generated and saved. Argument, generation,
+and persistence failures use the callback error. `generate` saves the palette
+before rendering templates, so a template failure does not discard a valid
+palette.
+
+`variant` defaults to `tonalspot`; accepted values are `content`, `tonalspot`,
+`monochrome`, `neutral`, `vibrant`, `expressive`, `fidelity`, `rainbow`, and
+`fruit_salad`. `mode` defaults to the active mode. Image paths may be absolute
+or start with `~/`.
+
+```lua
+theme.generate({ seed = "#39bae6", mode = "dark" }, function(result, error)
+    if error then
+        log(error)
+    end
+end)
+```
+
+The palette has the same shape as the supplied Matugen colors:
+
+```json
+{
+  "dark": {
+    "primary": "#39bae6",
+    "onprimary": "#0b0e14",
+    "terminal": {
+      "normal": { "black": "#171b24", "red": "#ed8274" },
+      "bright": { "black": "#686868", "red": "#f28779" },
+      "foreground": "#d1d1c7",
+      "background": "#1f2430",
+      "selectionfg": "#1f2430",
+      "selectionbg": "#409fff",
+      "cursortext": "#1f2430",
+      "cursor": "#ffcc66"
+    }
+  },
+  "light": { "primary": "#55b4d4" }
+}
+```
+
+Manual palettes may use Matugen snake_case names (`on_primary`,
+`surface_variant`, `on_surface_variant`, `on_hover`); themeagen normalizes them
+to the flat names above. Core roles and terminal colors are required. Extended
+Material roles (`primary_container`, `surface_container_high`, `outline_variant`,
+and so on) are preserved for templates. A manual palette must include any
+extended role a template references; generated palettes include all of them.
+`regenerate` requires a palette produced by `generate`, not one supplied to
+`populate`.
+
+Core roles (flat names):
+
+`primary`, `onprimary`, `secondary`, `onsecondary`, `tertiary`, `ontertiary`,
+`error`, `onerror`, `surface`, `onsurface`, `surfacevariant`,
+`onsurfacevariant`, `outline`, `shadow`, `hover`, `onhover`.
+
+Extended roles (snake_case) are added for templates:
+
+`primary_container`, `on_primary_container`, `inverse_primary`,
+`primary_fixed`, `primary_fixed_dim`, `on_primary_fixed`,
+`on_primary_fixed_variant`, `secondary_container`, `on_secondary_container`,
+`secondary_fixed`, `secondary_fixed_dim`, `on_secondary_fixed`,
+`on_secondary_fixed_variant`, `tertiary_container`, `on_tertiary_container`,
+`tertiary_fixed`, `tertiary_fixed_dim`, `on_tertiary_fixed`,
+`on_tertiary_fixed_variant`, `error_container`, `on_error_container`,
+`surface_dim`, `surface_tint`, `surface_bright`, `surface_container_lowest`,
+`surface_container_low`, `surface_container`, `surface_container_high`,
+`surface_container_highest`, `outline_variant`, `inverse_surface`,
+`inverse_on_surface`, `background`, `on_background`, `scrim`.
+
+`terminal.normal` and `terminal.bright` each contain `black`, `red`, `green`,
+`yellow`, `blue`, `magenta`, `cyan`, and `white`. Terminal scalars are
+`foreground`, `background`, `selectionfg`, `selectionbg`, `cursortext`, and
+`cursor`. Template variables also accept the camelCase spellings
+`selectionFg`, `selectionBg`, and `cursorText`.
+
+Template variables use Matugen syntax. Whitespace is optional:
+
+```conf
+primary {{ colors.primary }}
+hover   {{colors.hover}}
+terminal {{ colors.terminal.normal.red }}
+selection {{ colors.terminal.selectionFg }}
+```
+
+Both `colors.on_primary` and `colors.onprimary` resolve; `.hex` and
+`.default.hex` suffixes are accepted. `{{ mode }}` is the active mode;
+`{{ image }}` is the seed string for seed generation or the image path for
+image generation. Unknown variables fail the apply instead of leaving a
+placeholder in the output. Matugen filters and conditionals are not supported.
+
+`config.toml` uses the existing Matugen layout:
+
+```toml
+[catalog.example]
+name = "Example"
+
+[templates.kitty]
+input_path = "kitty/kitty-colors.conf"
+output_path = "~/.config/kitty/current-theme.conf"
+pre_hook = "optional shell command"
+post_hook = "optional shell command"
+```
+
+| Key           | Type   | Meaning                                                          |
+| ------------- | ------ | ---------------------------------------------------------------- |
+| `input_path`  | string | Template file, relative to the config directory or absolute      |
+| `output_path` | string | Output file; `~/`, absolute, or relative to the config directory |
+| `pre_hook`    | string | Optional `sh -c` command run before writing this template        |
+| `post_hook`   | string | Optional `sh -c` command run after writing this template         |
+
+Unknown sections such as `[catalog.*]` are ignored. Every input is rendered
+before any file is written, so a bad placeholder does not leave a partially
+updated theme. Outputs are written atomically, existing symlinks are preserved,
+and hooks run through `sh -c` with the active template variables. Hooks and
+profile files have the same trust as `shell.lua`.
+
 #### Wayland extension
 
 `riced-wayland` uses `wl_output`, `ext-workspace-v1`, and
 `zwlr-foreign-toplevel-management-v1`, with read-only
-`ext-foreign-toplevel-list-v1` as a fallback. It is not Hyprland-specific.
-Missing protocols produce empty data and a `false` capability flag.
+`ext-foreign-toplevel-list-v1` as a fallback. It is not compositor-specific.
+Missing protocols produce empty data and `false` capability flags. It publishes
+store data only and pushes no events.
 
 ```lua
 local wayland = riced.plugin("wayland")
@@ -402,37 +608,86 @@ local focused = wayland.focused or {}
 
 for _, workspace in ipairs(wayland.workspaces or {}) do
     iced.button(workspace.name, {
-        on_press = workspace.active and nil or { event = "workspace", args = { id = workspace.id } },
+        on_press = workspace.active and nil or {
+            event = "workspace",
+            args = { id = workspace.id },
+        },
     })
+end
+
+local workspace = (wayland.workspaces or {})[1]
+if workspace then
+    wayland.activate_workspace(workspace.id, function(_, error)
+        if error then log(error) end
+    end)
 end
 ```
 
 Store fields:
 
-| Field              | Shape                                                                                                                                    |
+| Field              | Type / shape                                                                                                                             |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `connected`        | boolean; false while the compositor connection is down                                                                                   |
-| `capabilities`     | `{ toplevels, toplevel_control, workspaces }` booleans                                                                                   |
-| `outputs`          | `{ id, name, description, make, model, x, y, width, height, scale }`                                                                     |
-| `toplevels`        | `{ id, title, app_id, outputs, activated, maximized, minimized, fullscreen }`; the read-only fallback also has `identifier` and no state |
-| `workspaces`       | `{ id, protocol_id, name, coordinates, active, urgent, hidden, capabilities, group, outputs }`                                           |
-| `workspace_groups` | `{ id, capabilities, outputs }`                                                                                                          |
-| `focused`          | `{ toplevel, workspace, output }` ids or names; `nil` when unknown                                                                       |
+| `capabilities`     | `{ toplevels = boolean, toplevel_control = boolean, workspaces = boolean }`                                                              |
+| `outputs`          | array of `{ id, name, description, make, model, x, y, width, height, scale }`                                                            |
+| `toplevels`        | array of `{ id, title, app_id, outputs, activated, maximized, minimized, fullscreen }`; the read-only fallback uses `identifier` instead |
+| `workspaces`       | array of `{ id, protocol_id, name, coordinates, active, urgent, hidden, capabilities, group, outputs }`                                  |
+| `workspace_groups` | array of `{ id, capabilities, outputs }`                                                                                                 |
+| `focused`          | `{ toplevel = id                                                                                                                         | nil, workspace = id | nil, output = name | nil }` |
 
-Methods: `activate_toplevel(id)`, `close_toplevel(id)`, and
-`activate_workspace(id)`.
+`outputs` come from `wl_output`: `id` is the registry name, `name` is the
+connector name or `output-<id>`, and `width`/`height` are the current mode
+geometry. `scale` is the output scale. Text values are clamped to 1024
+characters.
 
-`capabilities.toplevel_control` is `false` when only the read-only toplevel list
-is available. Workspace activation needs `ext-workspace-v1` and the workspace's
-own `capabilities` list. Standard protocols do not map toplevels to workspaces.
+Toplevel `id` is an opaque string for use with the methods. With
+`zwlr-foreign-toplevel-management-v1`, each item also has the four state
+booleans and the names of the outputs it is on. With only the read-only
+`ext-foreign-toplevel-list-v1`, the item has `identifier`, has no state
+booleans, and `outputs` is empty.
+
+Workspace `id` is an opaque string; `protocol_id` is the compositor's workspace
+identifier or nil. `coordinates` is the compositor's raw coordinate list.
+`active`, `urgent`, and `hidden` are booleans. `capabilities` is a subset of
+`activate`, `deactivate`, `remove`, and `assign`. `group` is a workspace-group
+id or nil. `outputs` is derived from the workspace group and may be empty.
+Workspace-group `capabilities` currently contains `create_workspace` when
+supported.
+
+`focused` contains only unambiguous values. `toplevel` is nil with the
+read-only backend. `workspace` is nil unless exactly one workspace is active.
+`output` is usually a connector name; it falls back to an output object id if
+the output disappeared, and is nil when focus cannot be attributed to one
+output.
+
+Methods:
+
+| Method                   | Arguments | Requirements                                                | Errors                                                                                       |
+| ------------------------ | --------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `activate_toplevel(id)`  | string    | `toplevel_control`, a live toplevel handle, and a `wl_seat` | not connected, unknown/stale toplevel, no seat, or Wayland flush failure                     |
+| `close_toplevel(id)`     | string    | `toplevel_control` and a live toplevel handle               | not connected, unknown/stale toplevel, or Wayland flush failure                              |
+| `activate_workspace(id)` | string    | `ext-workspace-v1` and workspace capability `activate`      | not connected, unknown/stale workspace, no manager, unsupported capability, or flush failure |
+
+All three return no value on success. Use a callback to observe errors. IDs must
+come from the current `toplevels` or `workspaces` snapshot; handles become
+invalid when the compositor closes the object.
+
+`capabilities.toplevels` is true with either toplevel backend.
+`capabilities.toplevel_control` is false with only the read-only backend.
+`capabilities.workspaces` is true only with `ext-workspace-v1`. Standard
+protocols do not map toplevels to workspaces. Snapshots are bounded by the
+protocol line limit, so very large arrays may omit entries; text is clamped.
+On disconnect the extension retries every second; `connected` is false and the
+previous arrays may remain until the next successful snapshot.
 
 #### D-Bus extension
 
 `riced-dbus` provides StatusNotifier tray items and an
 `org.freedesktop.Notifications` server. It owns
 `org.kde.StatusNotifierWatcher` when the name is free; otherwise it registers
-with the existing watcher. It owns the notification name only if no other
-notification daemon does.
+as a host with the existing watcher. It owns the notification name only if no
+other notification daemon does. It publishes store data only and pushes no
+plugin events.
 
 ```lua
 local dbus = riced.plugin("dbus")
@@ -441,28 +696,126 @@ for _, item in ipairs(dbus.tray or {}) do
     iced.text(item.title)
 end
 
-dbus.activate_tray(item.id)
-dbus.context_menu_tray(item.id)
-dbus.close_notification(notification.id)
+local item = (dbus.tray or {})[1]
+if item then
+    dbus.activate_tray(item.id, function(_, error)
+        if error then log(error) end
+    end)
+    dbus.context_menu_tray(item.id)
+end
+
+local notification = (dbus.notifications or {})[1]
+if notification then
+    dbus.close_notification(notification.id)
+end
 ```
 
 Store fields:
 
-| Field           | Shape                                                                    |
-| --------------- | ------------------------------------------------------------------------ |
-| `connected`     | boolean; session bus connection                                          |
-| `capabilities`  | `{ tray, tray_host, notifications }` booleans                            |
-| `tray`          | `{ id, title, icon, status, menu, item_is_menu }`                        |
-| `notifications` | `{ id, app_name, app_icon, summary, body, actions, timeout, timestamp }` |
+| Field           | Type / shape                                                                      |
+| --------------- | --------------------------------------------------------------------------------- |
+| `connected`     | boolean; session bus connection                                                   |
+| `capabilities`  | `{ tray = boolean, tray_host = boolean, notifications = boolean }`                |
+| `tray`          | array of `{ id, title, icon, status, menu, item_is_menu }`                        |
+| `notifications` | array of `{ id, app_name, app_icon, summary, body, actions, timeout, timestamp }` |
 
-`actions` is a list of `{ key, label }`.
+`capabilities.tray` means a StatusNotifier watcher is available.
+`capabilities.tray_host` is true only when this extension owns the watcher; it
+is false when it registered with another watcher.
+`capabilities.notifications` is true only when this extension owns
+`org.freedesktop.Notifications`. If another daemon already owns the name, the
+extension does not receive notifications and the `notifications` array stays
+empty.
 
-Methods: `activate_tray(id)`, `secondary_activate_tray(id)`,
-`context_menu_tray(id)`, `close_notification(id)`, and
-`invoke_notification_action(id, key)`.
+Tray item fields:
 
-Tray icons are freedesktop icon names, not paths. Notifications expire according
-to the sender's timeout and disappear from the store.
+| Field          | Meaning                                                                                                                  |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `id`           | Opaque string (`bus + object path`), for example `:1.42/StatusNotifierItem`; pass to methods                             |
+| `title`        | Item title, falling back to the item `Id`; clamped to 256 characters                                                     |
+| `icon`         | Freedesktop icon name, not a file path; clamped to 256 characters                                                        |
+| `status`       | Raw StatusNotifier status such as `Active`, `Passive`, or `NeedsAttention`, clamped to 256 characters; default `Passive` |
+| `menu`         | D-Bus object path string or nil; `/` is treated as no menu                                                               |
+| `item_is_menu` | Whether activating the item should open the menu instead                                                                 |
+
+Tray properties are refreshed about every 500 ms. An item that fails to answer
+three times is removed from the store.
+
+Notification fields:
+
+| Field       | Meaning                                                                                     |
+| ----------- | ------------------------------------------------------------------------------------------- |
+| `id`        | Positive integer notification id                                                            |
+| `app_name`  | Sender application name; clamped to 256 characters                                          |
+| `app_icon`  | Icon name or path from the sender; clamped to 256 characters                                |
+| `summary`   | Summary text; clamped to 1024 characters                                                    |
+| `body`      | Body text; clamped to 1024 characters                                                       |
+| `actions`   | Array of `{ key, label }`, at most 16; labels are clamped to 256 characters                 |
+| `timeout`   | Effective timeout in milliseconds; `0` means it does not expire; sender `-1` becomes `5000` |
+| `timestamp` | Creation time in milliseconds since the Unix epoch                                          |
+
+At most 64 notifications are kept. When full, the oldest is removed. A `notify`
+call whose `replaces_id` matches a live notification replaces that entry;
+otherwise it creates a new id. Notifications also disappear when their timeout
+expires. The extension emits the standard D-Bus `ActionInvoked` and
+`NotificationClosed` signals; closed reasons are 1 for expiry, 2 for dismissal,
+3 for an explicit close, and 4 for eviction.
+
+Methods:
+
+| Method                                | Arguments       | Behavior                                                                                             |
+| ------------------------------------- | --------------- | ---------------------------------------------------------------------------------------------------- |
+| `activate_tray(id)`                   | string          | Calls `Activate(0, 0)` on the tray item                                                              |
+| `secondary_activate_tray(id)`         | string          | Calls `SecondaryActivate(0, 0)` on the tray item                                                     |
+| `context_menu_tray(id)`               | string          | Calls `ContextMenu(0, 0)` on the tray item                                                           |
+| `close_notification(id)`              | integer         | Removes the notification if present and emits `NotificationClosed`; unknown ids are ignored          |
+| `invoke_notification_action(id, key)` | integer, string | Validates the action key, removes the notification, and emits `ActionInvoked` + `NotificationClosed` |
+
+Tray methods fail if the item id is unknown, the session bus is disconnected, or
+the D-Bus call fails. They use a one-second D-Bus method timeout.
+`invoke_notification_action` fails if the notification exists but the key is not
+one of its actions. A missing or unknown notification id is ignored. All methods
+return no value on success; use callbacks to observe errors.
+
+Snapshots are bounded by the protocol line limit. Tray text and notification
+names are clamped as shown; very large arrays may omit entries with a
+diagnostic. On disconnect the extension retries every second; `connected` is
+false and the previous arrays may remain until the next successful snapshot.
+
+#### System extension
+
+`riced-system` reads host, clock, CPU, memory, disk, GPU, and process data. It
+has no methods and pushes no plugin events; everything is in its store.
+
+Reading a field for the first time subscribes to it. The extension refreshes
+only requested groups, once per second, so fields nothing reads are not
+computed. Values may be nil when the OS or hardware does not expose them.
+
+```lua
+local system = riced.plugin("system")
+local cpu = system.cpu or {}
+local memory = system.memory or {}
+
+iced.text(string.format("%.0f%%  %.1f / %.1f GiB", cpu.usage or 0,
+    (memory.used or 0) / 2 ^ 30, (memory.total or 0) / 2 ^ 30))
+```
+
+Store fields:
+
+| Field       | Shape                                                                                                                                                        |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `host`      | `{ name?, os?, version?, kernel?, uptime?, boot_time? }`; uptime and boot_time are seconds, boot_time is a Unix timestamp                                    |
+| `time`      | `{ epoch, time, date, weekday }` or nil; epoch is seconds, `time` is local `HH:MM` (24-hour), `date` is local `YYYY-MM-DD`, weekday is the full English name |
+| `cpu`       | `{ usage, cores, physical?, brand, frequency, load1, load5, load15 }`; usage is percent, frequency is the highest core MHz, physical may be nil              |
+| `memory`    | `{ total, used, available, swap_total, swap_used }`; bytes                                                                                                   |
+| `disks`     | array of `{ mount, fs, total, available, used }`; bytes; entries whose total is zero are omitted                                                             |
+| `gpus`      | array of `{ name, busy?, vram_used?, vram_total?, temp?, clock? }`; busy is percent, memory fields are bytes, temp is °C, clock is MHz                       |
+| `processes` | integer process count                                                                                                                                        |
+
+`disks` comes from `sysinfo`; `gpus` reads DRM cards under `/sys/class/drm`.
+Optional GPU values are nil when the driver does not expose them. `time` is nil
+if the system clock cannot be read. The host, memory, and disk numbers are
+snapshots; read them again when the plugin store changes.
 
 #### Writing extensions
 

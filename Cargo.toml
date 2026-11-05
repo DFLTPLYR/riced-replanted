@@ -1,5 +1,12 @@
 [workspace]
-members = [".", "crates/riced-extension-sdk", "extensions/system", "extensions/wayland", "extensions/dbus"]
+members = [
+  ".",
+  "crates/riced-extension-sdk",
+  "extensions/system",
+  "extensions/wayland",
+  "extensions/dbus",
+  "extensions/themeagen",
+]
 resolver = "3"
 
 [package]

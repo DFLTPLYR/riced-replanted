@@ -57,3 +57,8 @@ extension-wayland:
 extension-dbus:
     {{nix}} cargo build --release -p riced-extension-dbus
     install -Dm755 target/release/riced-dbus "{{ home_directory() }}/.config/riced/test/extensions/dbus/riced-dbus"
+
+# Build the Material You theme generator and install it into the test profile
+extension-themeagen:
+    {{nix}} cargo build --release -p riced-extension-themeagen
+    install -Dm755 target/release/riced-themeagen "{{ home_directory() }}/.config/riced/test/extensions/themeagen/riced-themeagen"

@@ -103,6 +103,19 @@ mod tests {
     }
 
     #[test]
+    fn iced_exposes_the_plugin_lookup() {
+        let lua = mlua::Lua::new();
+        load(&lua).unwrap();
+        assert!(
+            lua.load("return iced.plugins == riced.plugins")
+                .eval::<bool>()
+                .unwrap()
+        );
+        let proxy: mlua::Table = lua.load("return iced.plugins('themeagen')").eval().unwrap();
+        assert_eq!(proxy.get::<String>("name").unwrap(), "themeagen");
+    }
+
+    #[test]
     fn opacity_sets_the_alpha_channel() {
         let lua = mlua::Lua::new();
         load(&lua).unwrap();

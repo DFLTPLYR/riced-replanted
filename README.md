@@ -96,6 +96,7 @@ The bundled extensions are:
 - `riced-wayland` — outputs, toplevels, and workspaces using standard Wayland
   protocols.
 - `riced-dbus` — StatusNotifier tray items and freedesktop notifications.
+- `riced-themeagen` — Material You palettes and Matugen-compatible templates.
 
 The D-Bus and Wayland extensions bound display text and array snapshots to stay
 below the protocol's 256 KiB message limit. Entries that exceed an array's byte
@@ -109,6 +110,7 @@ Build and install the examples into `~/.config/riced/test/extensions/`:
 just extension-system
 just extension-wayland
 just extension-dbus
+just extension-themeagen
 ```
 
 The extension SDK is [`crates/riced-extension-sdk`](crates/riced-extension-sdk).
