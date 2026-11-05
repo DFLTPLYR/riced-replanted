@@ -7,6 +7,38 @@ iced.Length = { fill = "fill", shrink = "shrink" }
 iced.KeyboardInteractivity = { none = "none", on_demand = "on_demand", exclusive = "exclusive" }
 iced.Output = { active = "active", last_output = "last_output" }
 iced.Blur = { none = "none", full = "full" }
+iced.PopupAnchor = {
+	none = "none",
+	top = "top",
+	bottom = "bottom",
+	left = "left",
+	right = "right",
+	top_left = "top_left",
+	top_right = "top_right",
+	bottom_left = "bottom_left",
+	bottom_right = "bottom_right",
+}
+iced.PopupGravity = {
+	none = "none",
+	top = "top",
+	bottom = "bottom",
+	left = "left",
+	right = "right",
+	top_left = "top_left",
+	top_right = "top_right",
+	bottom_left = "bottom_left",
+	bottom_right = "bottom_right",
+}
+iced.PopupConstraintAdjustment = {
+	none = "none",
+	all = "all",
+	flip_x = "flip_x",
+	flip_y = "flip_y",
+	slide_x = "slide_x",
+	slide_y = "slide_y",
+	resize_x = "resize_x",
+	resize_y = "resize_y",
+}
 
 function iced.Size(width, height)
 	assert(width ~= nil and height ~= nil, "size requires width and height")

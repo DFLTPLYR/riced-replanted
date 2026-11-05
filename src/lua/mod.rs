@@ -116,6 +116,21 @@ mod tests {
     }
 
     #[test]
+    fn popup_enum_tables_are_exposed() {
+        let lua = mlua::Lua::new();
+        load(&lua).unwrap();
+        for (source, expected) in [
+            ("iced.PopupAnchor.bottom_left", "bottom_left"),
+            ("iced.PopupAnchor.none", "none"),
+            ("iced.PopupGravity.top_right", "top_right"),
+            ("iced.PopupConstraintAdjustment.all", "all"),
+            ("iced.PopupConstraintAdjustment.resize_y", "resize_y"),
+        ] {
+            assert_eq!(lua.load(source).eval::<String>().unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn opacity_sets_the_alpha_channel() {
         let lua = mlua::Lua::new();
         load(&lua).unwrap();

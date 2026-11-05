@@ -36,6 +36,9 @@ pub struct Popup {
     pub size: PixelSize,
     pub position: (i32, i32),
     pub anchor: Option<(i32, i32, PixelSize)>,
+    pub anchor_edge: iced_exwlshell::reexport::PopupAnchor,
+    pub gravity: iced_exwlshell::reexport::PopupGravity,
+    pub constraint_adjustment: iced_exwlshell::reexport::PopupConstraintAdjustment,
     pub on_closed: Option<Function>,
     pub closed: bool,
 }
@@ -207,7 +210,13 @@ pub fn reconcile_popups(
         }
         popup.window = old.window;
         popup.parent_window = Some(parent);
-        if old.size != popup.size || old.position != popup.position || old.anchor != popup.anchor {
+        if old.size != popup.size
+            || old.position != popup.position
+            || old.anchor != popup.anchor
+            || old.anchor_edge != popup.anchor_edge
+            || old.gravity != popup.gravity
+            || old.constraint_adjustment != popup.constraint_adjustment
+        {
             actions.push(ExwlShellCustomActionWithId::new(
                 Some(old.window),
                 Action::PopUpReposition {
@@ -225,10 +234,14 @@ pub fn reconcile_popups(
 }
 
 pub fn popup_settings(popup: &Popup, parent: window::Id) -> IcedNewPopupSettings {
-    match popup.anchor {
+    let settings = match popup.anchor {
         Some((x, y, size)) => IcedNewPopupSettings::new(parent, popup.size, (x, y), size),
         None => IcedNewPopupSettings::at_position(parent, popup.size, popup.position),
-    }
+    };
+    settings
+        .anchor(popup.anchor_edge)
+        .gravity(popup.gravity)
+        .constraint_adjustment(popup.constraint_adjustment)
 }
 
 fn open_popup(popup: &Popup, parent: window::Id) -> ExwlShellCustomActionWithId {
@@ -383,6 +396,12 @@ mod tests {
             size: PixelSize::px(200, 120),
             position: (4, 32),
             anchor: None,
+            anchor_edge: iced_exwlshell::reexport::PopupAnchor::BottomLeft,
+            gravity: iced_exwlshell::reexport::PopupGravity::BottomRight,
+            constraint_adjustment: iced_exwlshell::reexport::PopupConstraintAdjustment::FlipX
+                | iced_exwlshell::reexport::PopupConstraintAdjustment::FlipY
+                | iced_exwlshell::reexport::PopupConstraintAdjustment::SlideX
+                | iced_exwlshell::reexport::PopupConstraintAdjustment::SlideY,
             on_closed: None,
             closed: false,
         }
@@ -410,6 +429,9 @@ mod tests {
 
         let mut anchored = popup("anchored", "bar");
         anchored.anchor = Some((10, 20, PixelSize::px(30, 40)));
+        anchored.anchor_edge = iced_exwlshell::reexport::PopupAnchor::TopLeft;
+        anchored.gravity = iced_exwlshell::reexport::PopupGravity::TopRight;
+        anchored.constraint_adjustment = iced_exwlshell::reexport::PopupConstraintAdjustment::FlipY;
         let actions = reconcile_popups(&[], &mut [anchored], &parents);
         assert!(matches!(
             &actions[0].1,
@@ -418,6 +440,10 @@ mod tests {
                     position: (10, 20),
                     size: PixelSize::px(30, 40),
                 }
+                    && settings.anchor == iced_exwlshell::reexport::PopupAnchor::TopLeft
+                    && settings.gravity == iced_exwlshell::reexport::PopupGravity::TopRight
+                    && settings.constraint_adjustment
+                        == iced_exwlshell::reexport::PopupConstraintAdjustment::FlipY
         ));
 
         next[0].size = PixelSize::px(240, 160);

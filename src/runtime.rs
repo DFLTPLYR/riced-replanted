@@ -1082,6 +1082,9 @@ impl App {
                     size: popup.size,
                     position: popup.position,
                     anchor: popup.anchor,
+                    anchor_edge: popup.anchor_edge,
+                    gravity: popup.gravity,
+                    constraint_adjustment: popup.constraint_adjustment,
                     on_closed: popup.on_closed,
                     closed: false,
                 });
@@ -1341,7 +1344,11 @@ impl App {
                             if popup.parent == current.parent
                                 && popup.size == current.size
                                 && popup.position == current.position
-                                && popup.anchor == current.anchor => {}
+                                && popup.anchor == current.anchor
+                                && popup.anchor_edge == current.anchor_edge
+                                && popup.gravity == current.gravity
+                                && popup.constraint_adjustment == current.constraint_adjustment => {
+                        }
                         _ => self.surfaces_dirty.set(true),
                     }
                 } else if let Some(layer) = self.layers.iter().find(|layer| layer.id == id) {

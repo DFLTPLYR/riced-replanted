@@ -1758,18 +1758,52 @@ end
 | `width`, `height`| number in 1..32768, rounded                  | required       |
 | `x`, `y`         | finite number, rounded                       | 0, 0           |
 | `anchor`         | `{ x, y, width, height }`, rounded            | none           |
+| `anchor_edge`    | `iced.PopupAnchor` value                     | `"bottom_left"`|
+| `gravity`        | `iced.PopupGravity` value                    | `"bottom_right"`|
+| `constraint_adjustment` | `iced.PopupConstraintAdjustment` value or list | flip and slide both axes |
 | `on_closed`      | function                                     | none           |
 
 `width`, `height`, `x`, `y`, and anchor values are logical pixels. `x` and `y`
 are relative to the parent layer surface and are used when `anchor` is absent.
-`anchor` attaches the popup to a rectangle in the parent surface; the compositor
-may flip or slide it to stay on screen. To anchor to a widget, wrap it with
-`iced.measure` and pass `iced.bounds(id)` as shown in
+When `anchor` is absent, `(x, y)` acts as a 1x1 anchor rectangle, so
+`anchor_edge` and `gravity` still apply.
+`anchor` attaches the popup to a rectangle in the parent surface. To anchor to a
+widget, wrap it with `iced.measure` and pass `iced.bounds(id)` as shown in
 [`iced.measure`](#icedmeasurecontent-props). Popup ids share the surface-id namespace
 with layers and windows. The size is fixed; the popup does not measure or resize
-itself. Changing `width`, `height`, `x`, `y`, or `anchor` repositions the open
-popup; changing `parent` recreates it. Popups are created after their parent
-layer.
+itself. Changing `width`, `height`, `x`, `y`, `anchor`, `anchor_edge`, `gravity`,
+or `constraint_adjustment` repositions the open popup; changing `parent` recreates
+it. Popups are created after their parent layer.
+
+`anchor_edge` selects the point on the anchor rectangle that the popup is
+attached to. `gravity` selects the direction the popup grows from that point:
+
+```lua
+-- Below a bar button.
+anchor_edge = iced.PopupAnchor.bottom,
+gravity = iced.PopupGravity.bottom,
+
+-- To the right of a button.
+anchor_edge = iced.PopupAnchor.right,
+gravity = iced.PopupGravity.right,
+```
+
+Both accept one value, not a list. `"none"` centers the popup on the anchor
+rectangle. Corners such as `"top_left"` attach or grow diagonally. The compositor
+may still move the popup to keep it on screen.
+
+`constraint_adjustment` controls how the compositor may adjust a constrained
+popup. Pass one value or a list:
+
+```lua
+constraint_adjustment = iced.PopupConstraintAdjustment.all,
+-- or
+constraint_adjustment = { "flip_x", "slide_y" },
+```
+
+Available values are `"none"`, `"all"`, `"flip_x"`, `"flip_y"`, `"slide_x"`,
+`"slide_y"`, `"resize_x"`, and `"resize_y"`. `"all"` combines flip, slide, and
+resize on both axes; `"none"` disables adjustment.
 
 `visible = false` removes the native popup but keeps the declaration in place.
 Setting it back to true opens a fresh popup. This is equivalent to omitting and

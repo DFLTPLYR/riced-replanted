@@ -314,6 +314,9 @@ config = {}
 ---@field x? number
 ---@field y? number
 ---@field anchor? { x: number, y: number, width: number, height: number }
+---@field anchor_edge? "none"|"top"|"bottom"|"left"|"right"|"top_left"|"top_right"|"bottom_left"|"bottom_right"
+---@field gravity? "none"|"top"|"bottom"|"left"|"right"|"top_left"|"top_right"|"bottom_left"|"bottom_right"
+---@field constraint_adjustment? "none"|"all"|"flip_x"|"flip_y"|"slide_x"|"slide_y"|"resize_x"|"resize_y"|("none"|"all"|"flip_x"|"flip_y"|"slide_x"|"slide_y"|"resize_x"|"resize_y")[]
 ---@field on_closed? fun()
 
 ---@class iced.LayerValues
@@ -342,6 +345,38 @@ config = {}
 ---@class iced.BlurValues
 ---@field none "none"
 ---@field full "full"
+
+---@class iced.PopupAnchorValues
+---@field none "none"
+---@field top "top"
+---@field bottom "bottom"
+---@field left "left"
+---@field right "right"
+---@field top_left "top_left"
+---@field top_right "top_right"
+---@field bottom_left "bottom_left"
+---@field bottom_right "bottom_right"
+
+---@class iced.PopupGravityValues
+---@field none "none"
+---@field top "top"
+---@field bottom "bottom"
+---@field left "left"
+---@field right "right"
+---@field top_left "top_left"
+---@field top_right "top_right"
+---@field bottom_left "bottom_left"
+---@field bottom_right "bottom_right"
+
+---@class iced.PopupConstraintAdjustmentValues
+---@field none "none"
+---@field all "all"
+---@field flip_x "flip_x"
+---@field flip_y "flip_y"
+---@field slide_x "slide_x"
+---@field slide_y "slide_y"
+---@field resize_x "resize_x"
+---@field resize_y "resize_y"
 
 -- Elements and value helpers.
 
@@ -383,6 +418,44 @@ iced.Output = { active = "active", last_output = "last_output" }
 
 ---@type iced.BlurValues
 iced.Blur = { none = "none", full = "full" }
+
+---@type iced.PopupAnchorValues
+iced.PopupAnchor = {
+	none = "none",
+	top = "top",
+	bottom = "bottom",
+	left = "left",
+	right = "right",
+	top_left = "top_left",
+	top_right = "top_right",
+	bottom_left = "bottom_left",
+	bottom_right = "bottom_right",
+}
+
+---@type iced.PopupGravityValues
+iced.PopupGravity = {
+	none = "none",
+	top = "top",
+	bottom = "bottom",
+	left = "left",
+	right = "right",
+	top_left = "top_left",
+	top_right = "top_right",
+	bottom_left = "bottom_left",
+	bottom_right = "bottom_right",
+}
+
+---@type iced.PopupConstraintAdjustmentValues
+iced.PopupConstraintAdjustment = {
+	none = "none",
+	all = "all",
+	flip_x = "flip_x",
+	flip_y = "flip_y",
+	slide_x = "slide_x",
+	slide_y = "slide_y",
+	resize_x = "resize_x",
+	resize_y = "resize_y",
+}
 
 ---@param width string|integer
 ---@param height string|integer

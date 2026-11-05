@@ -1,6 +1,7 @@
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, BlurRegion, Extent, KeyboardInteractivity, Layer, LayerSize,
-    NewLayerShellSettings, OutputOption, PixelSize,
+    NewLayerShellSettings, OutputOption, PixelSize, PopupAnchor, PopupConstraintAdjustment,
+    PopupGravity,
 };
 use mlua::{Function, Table, Value};
 
@@ -81,6 +82,9 @@ pub struct PopupSettings {
     pub size: PixelSize,
     pub position: (i32, i32),
     pub anchor: Option<(i32, i32, PixelSize)>,
+    pub anchor_edge: PopupAnchor,
+    pub gravity: PopupGravity,
+    pub constraint_adjustment: PopupConstraintAdjustment,
     pub on_closed: Option<Function>,
 }
 
@@ -96,6 +100,9 @@ pub fn popup(table: Table) -> mlua::Result<PopupSettings> {
             "x",
             "y",
             "anchor",
+            "anchor_edge",
+            "gravity",
+            "constraint_adjustment",
             "on_closed",
         ],
     )?;
@@ -140,12 +147,32 @@ pub fn popup(table: Table) -> mlua::Result<PopupSettings> {
             value => popup_coordinate(value, "y")?,
         },
     );
+    let anchor_edge = match table.get::<Value>("anchor_edge")? {
+        Value::Nil => PopupAnchor::BottomLeft,
+        value => popup_anchor(value, "anchor_edge")?,
+    };
+    let gravity = match table.get::<Value>("gravity")? {
+        Value::Nil => PopupGravity::BottomRight,
+        value => popup_gravity(value)?,
+    };
+    let constraint_adjustment = match table.get::<Value>("constraint_adjustment")? {
+        Value::Nil => {
+            PopupConstraintAdjustment::FlipX
+                | PopupConstraintAdjustment::FlipY
+                | PopupConstraintAdjustment::SlideX
+                | PopupConstraintAdjustment::SlideY
+        }
+        value => popup_constraints(value)?,
+    };
     Ok(PopupSettings {
         visible,
         parent,
         size,
         position,
         anchor,
+        anchor_edge,
+        gravity,
+        constraint_adjustment,
         on_closed: table.get::<Option<Function>>("on_closed")?,
     })
 }
@@ -179,6 +206,98 @@ fn popup_coordinate(value: Value, name: &str) -> mlua::Result<i32> {
             "popup {name} must be a finite integer"
         ))),
     }
+}
+
+fn popup_values(value: Value, name: &str) -> mlua::Result<Vec<String>> {
+    match value {
+        Value::String(value) => Ok(vec![value.to_str()?.to_owned()]),
+        Value::Table(values) => {
+            sequence(&values)?;
+            values
+                .sequence_values::<String>()
+                .collect::<mlua::Result<Vec<_>>>()
+        }
+        _ => Err(mlua::Error::runtime(format!(
+            "popup {name} must be a string or a list of strings"
+        ))),
+    }
+}
+
+fn popup_anchor(value: Value, name: &str) -> mlua::Result<PopupAnchor> {
+    let Value::String(value) = value else {
+        return Err(mlua::Error::runtime(format!(
+            "popup {name} must be a string"
+        )));
+    };
+    let value = value.to_str()?;
+    Ok(match value.as_ref() {
+        "none" => PopupAnchor::None,
+        "top" => PopupAnchor::Top,
+        "bottom" => PopupAnchor::Bottom,
+        "left" => PopupAnchor::Left,
+        "right" => PopupAnchor::Right,
+        "top_left" => PopupAnchor::TopLeft,
+        "top_right" => PopupAnchor::TopRight,
+        "bottom_left" => PopupAnchor::BottomLeft,
+        "bottom_right" => PopupAnchor::BottomRight,
+        _ => {
+            return Err(mlua::Error::runtime(format!(
+                "unknown popup anchor edge: {value}"
+            )));
+        }
+    })
+}
+
+fn popup_gravity(value: Value) -> mlua::Result<PopupGravity> {
+    let Value::String(value) = value else {
+        return Err(mlua::Error::runtime("popup gravity must be a string"));
+    };
+    let value = value.to_str()?;
+    Ok(match value.as_ref() {
+        "none" => PopupGravity::None,
+        "top" => PopupGravity::Top,
+        "bottom" => PopupGravity::Bottom,
+        "left" => PopupGravity::Left,
+        "right" => PopupGravity::Right,
+        "top_left" => PopupGravity::TopLeft,
+        "top_right" => PopupGravity::TopRight,
+        "bottom_left" => PopupGravity::BottomLeft,
+        "bottom_right" => PopupGravity::BottomRight,
+        _ => {
+            return Err(mlua::Error::runtime(format!(
+                "unknown popup gravity edge: {value}"
+            )));
+        }
+    })
+}
+
+fn popup_constraints(value: Value) -> mlua::Result<PopupConstraintAdjustment> {
+    let mut adjustment = PopupConstraintAdjustment::empty();
+    for name in popup_values(value, "constraint_adjustment")? {
+        adjustment |= match name.as_str() {
+            "none" => PopupConstraintAdjustment::empty(),
+            "all" => {
+                PopupConstraintAdjustment::FlipX
+                    | PopupConstraintAdjustment::FlipY
+                    | PopupConstraintAdjustment::SlideX
+                    | PopupConstraintAdjustment::SlideY
+                    | PopupConstraintAdjustment::ResizeX
+                    | PopupConstraintAdjustment::ResizeY
+            }
+            "flip_x" => PopupConstraintAdjustment::FlipX,
+            "flip_y" => PopupConstraintAdjustment::FlipY,
+            "slide_x" => PopupConstraintAdjustment::SlideX,
+            "slide_y" => PopupConstraintAdjustment::SlideY,
+            "resize_x" => PopupConstraintAdjustment::ResizeX,
+            "resize_y" => PopupConstraintAdjustment::ResizeY,
+            _ => {
+                return Err(mlua::Error::runtime(format!(
+                    "unknown popup constraint adjustment: {name}"
+                )));
+            }
+        };
+    }
+    Ok(adjustment)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -411,7 +530,7 @@ mod tests {
     fn parses_and_validates_popup_settings() {
         let lua = Lua::new();
         let table = lua
-            .load("{parent='bar',width=200.0,height=120.4,x=4.6,y=-8.2,visible=false,anchor={x=10.2,y=20.8,width=30.4,height=40.0}}")
+            .load("{parent='bar',width=200.0,height=120.4,x=4.6,y=-8.2,visible=false,anchor={x=10.2,y=20.8,width=30.4,height=40.0},anchor_edge='top_left',gravity='top_right',constraint_adjustment={'flip_x','slide_y'}}")
             .eval()
             .unwrap();
         let settings = popup(table).unwrap();
@@ -422,6 +541,12 @@ mod tests {
         assert_eq!(
             settings.anchor.map(|(x, y, size)| (x, y, size.to_set())),
             Some((10, 21, (30, 40)))
+        );
+        assert_eq!(settings.anchor_edge, PopupAnchor::TopLeft);
+        assert_eq!(settings.gravity, PopupGravity::TopRight);
+        assert_eq!(
+            settings.constraint_adjustment,
+            PopupConstraintAdjustment::FlipX | PopupConstraintAdjustment::SlideY
         );
 
         for source in [
@@ -434,6 +559,11 @@ mod tests {
             "{parent='bar',width=200,height=120,anchor={x=0,y=0,width=0,height=1}}",
             "{parent='bar',width=200,height=120,anchor={x=0,y=0}}",
             "{parent='bar',width=200,height=120,on_closed='nope'}",
+            "{parent='bar',width=200,height=120,anchor_edge='middle'}",
+            "{parent='bar',width=200,height=120,anchor_edge={'top','left'}}",
+            "{parent='bar',width=200,height=120,gravity={}}",
+            "{parent='bar',width=200,height=120,gravity=true}",
+            "{parent='bar',width=200,height=120,constraint_adjustment='bogus'}",
             "{parent='bar',width=200,height=120,extra=true}",
         ] {
             let table = lua.load(source).eval().unwrap();
