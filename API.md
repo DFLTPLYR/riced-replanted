@@ -236,7 +236,8 @@ replaces the previous handler, so editing the module that registers handlers
 keeps working. An empty command name is an error.
 
 The CLI only queues the request, so success means it was queued, not that a
-daemon handled it. Each profile has its own queue. Without `-p`, the CLI targets
+daemon handled it. Each profile has its own queue; starting a new daemon discards
+requests left by the previous instance. Without `-p`, the CLI targets
 the only running profile discovered through
 `$XDG_RUNTIME_DIR/riced/<profile>.sock`; with several running profiles it fails
 and asks for `-p <profile>`.

@@ -536,6 +536,14 @@ fn listen(socket: &Path) -> io::Result<(Receiver<Incoming>, Arc<AtomicBool>)> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+    // Discard requests for the previous instance before clients can connect.
+    if let (Some(parent), Some(profile)) = (socket.parent(), socket.file_stem()) {
+        match fs::remove_dir_all(parent.join("ipc").join(profile)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
     let listener = UnixListener::bind(socket)?;
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
@@ -1255,6 +1263,37 @@ mod tests {
                 .unwrap(),
             5
         );
+    }
+
+    #[test]
+    fn socket_start_discards_only_its_previous_instances_queue() {
+        let root = std::env::temp_dir().join(format!("riced-ipc-restart-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let queue = root.join("ipc/test");
+        let other = root.join("ipc/other");
+        fs::create_dir_all(&queue).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        fs::write(queue.join("old.ready"), "old command").unwrap();
+        fs::write(queue.join("old.tmp"), "partial command").unwrap();
+        fs::write(other.join("keep.ready"), "other profile").unwrap();
+
+        let socket = root.join("test.sock");
+        // A crashed instance can leave both a socket and queued requests behind.
+        drop(UnixListener::bind(&socket).unwrap());
+        let (_incoming, stop) = listen(&socket).unwrap();
+        assert!(!queue.exists());
+        assert!(other.join("keep.ready").exists());
+
+        fs::create_dir_all(&queue).unwrap();
+        fs::write(queue.join("new.ready"), "new command").unwrap();
+        assert_eq!(
+            listen(&socket).unwrap_err().kind(),
+            io::ErrorKind::AddrInUse
+        );
+        assert!(queue.join("new.ready").exists());
+
+        stop.store(true, Ordering::Relaxed);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
