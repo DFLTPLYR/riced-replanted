@@ -111,6 +111,8 @@ The bundled extensions are:
   protocols.
 - `riced-dbus` — StatusNotifier tray items and freedesktop notifications.
 - `riced-themeagen` — Material You palettes and Matugen-compatible templates.
+- `riced-lucide` — icon-name lookup and the extension-owned `iced.lucide` widget.
+- `riced-openmeteo` — current weather, automatic refresh, and `iced.openmeteo`.
 
 The D-Bus and Wayland extensions bound display text and array snapshots to stay
 below the protocol's 256 KiB message limit. Entries that exceed an array's byte
@@ -125,18 +127,75 @@ just extension-system
 just extension-wayland
 just extension-dbus
 just extension-themeagen
+just extension-lucide
+just extension-openmeteo
 ```
+
+Build any Rust extension into an output directory:
+
+```sh
+riced extension build extensions/openmeteo -o ~/.config/riced/test/extensions/openmeteo
+```
+
+This builds the package in release mode and packages its executable plus
+top-level `*.lua` companions. Omitting `-o` installs into `extensions/` of the
+profile named by `-c`/`-p`, or of the only running daemon. Each daemon records
+its canonical `shell.lua` in `$XDG_RUNTIME_DIR/riced/<profile>.profile` at
+startup, and stale records are rejected. It does not restart daemons.
 
 The extension SDK is [`crates/riced-extension-sdk`](crates/riced-extension-sdk).
 Third-party extensions depend on it by git or path, build their own binary, and
 never need `riced` rebuilt. Extensions run as your user and have the same trust
 as `shell.lua`.
 
+Extensions can ship non-executable Lua files beside their binary. A file named
+`demo.lua` can use `iced.define("demo", factory)` to provide `iced.demo(props)`;
+the existing loader discovers it automatically. Returned Lua objects are also
+available through `require("extensions.demo.demo")`. See
+[extension packaging](API.md#writing-extensions).
+
+Lucide installs its own `lucide.lua` companion:
+
+```lua
+iced.lucide({ name = "activity", size = 20 })
+```
+
+It resolves names asynchronously and caches glyphs. For raw glyphs, use
+`iced.icon(glyph, props)`; this replaces the old `iced.lucide(glyph, props)` alias.
+When upgrading, reconcile and remove any old profile-root `lucide.lua` to avoid
+duplicate widget names, and change `require("lucide")` to
+`require("extensions.lucide.lucide")`.
+
+Open-Meteo uses one location per extension, configured from Lua:
+
+```lua
+local weather = require("extensions.openmeteo.openmeteo")
+weather.configure(52.52, 13.41)
+-- Inside view:
+iced.openmeteo({ size = 18 })
+```
+
+It refreshes every 15 minutes and marks retained readings stale on errors.
+See the [Open-Meteo API](API.md#open-meteo-extension) for raw weather fields.
+
 ### Logging
 
-Core and SDK diagnostics use the shared `log` facade and write to stderr as
-`[event]: information`. `Plugin::serve` / `serve_at` install the default logger
-automatically, preserving any logger the extension has already installed.
+Core and SDK diagnostics use the shared `log` facade in `[event]: information`
+form. The daemon stores every record, including extension stderr, in
+`$XDG_RUNTIME_DIR/riced/logs/` and stays quiet by default:
+
+```sh
+riced --logs                  # mirror records to stderr
+riced logs                    # print the stored records
+riced logs --clear            # remove them
+riced --log-retention 60      # seconds to keep records; 0 keeps until cleared
+```
+
+Retention defaults to 30 seconds. Fatal startup errors still print to stderr.
+`riced logs -c <name>` or `-p <directory>` selects a configuration; without
+either, exactly one running daemon is required. `Plugin::serve` / `serve_at`
+install the default logger automatically, preserving any logger the extension
+has already installed.
 On a terminal, `[event]` is colored by severity: errors red, warnings yellow,
 info green, debug cyan, and trace gray. Redirected logs stay plain; setting
 `NO_COLOR` disables color.

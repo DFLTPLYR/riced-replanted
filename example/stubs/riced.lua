@@ -477,10 +477,19 @@ function iced.text(content, props) end
 ---@return iced.Element
 function iced.icon(content, props) end
 
----@param content string Single Lucide glyph char (resolve names via riced.plugins("lucide").resolve(name))
+---@class iced.LucideProps: iced.Props
+---@field name string Kebab-case Lucide icon name
+
+---Requires the Lucide extension's lucide.lua companion. Blank until resolved.
+---@param props iced.LucideProps
+---@return iced.Element
+function iced.lucide(props) end
+
+---Requires the Open-Meteo companion; configure its location through the returned Lua module.
+---Displays current temperature in Celsius, marking retained readings as stale on errors.
 ---@param props? iced.Props
 ---@return iced.Element
-function iced.lucide(content, props) end
+function iced.openmeteo(props) end
 
 ---@param content iced.Element[]
 ---@param props? iced.Props

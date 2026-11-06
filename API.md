@@ -405,6 +405,7 @@ Extensions may push events. They arrive in `update` as:
 | `dbus`      | `connected`, `capabilities`, `tray`, `notifications`                                             | `activate_tray`, `secondary_activate_tray`, `context_menu_tray`, `close_notification`, `invoke_notification_action` | none   |
 | `themeagen` | `ready`, `mode`, `source`, `colors`                                                              | `generate`, `populate`, `regenerate`                                                                                | none   |
 | `lucide`    | `count`                                                                                          | `resolve`, `exists`, `list`                                                                                           | none   |
+| `openmeteo` | `ready`, `latitude`, `longitude`, `current`, `current_units`, `timezone`, `updated_at`, `error` | `configure` | none |
 
 All bundled extensions publish whole snapshots rather than pushing events.
 Each publish replaces the snapshot contents, so re-read a field in `view`
@@ -824,6 +825,54 @@ Optional GPU values are nil when the driver does not expose them. `time` is nil
 if the system clock cannot be read. The host, memory, and disk numbers are
 snapshots; read them again when the plugin store changes.
 
+#### Open-Meteo extension
+
+`riced-openmeteo` retrieves current conditions for one location per process.
+Install it and its Lua widget with `just extension-openmeteo`, then configure
+coordinates once in your profile (safe before the executable connects):
+
+```lua
+local weather = require("extensions.openmeteo.openmeteo")
+weather.configure(52.52, 13.41)
+
+function app:view()
+    return iced.openmeteo({ size = 18, color = theme.text })
+end
+```
+
+The Lua module remembers the desired coordinates and sends them when the widget
+first renders after connection/reconnection. All widget instances share that
+location; repeated instances need distinct `id` props. The widget uses normal
+text props, displays `12.5°C`, and shows loading/unavailable text before a reading.
+Retained readings are marked `(stale)` after a failed refresh or disconnect.
+
+For a custom UI, use `riced.plugins("openmeteo")`. Its asynchronous
+`configure(latitude, longitude, callback?)` method accepts finite numeric WGS84
+coordinates (`-90..90`, `-180..180`). Success acknowledges configuration, with
+`(nil, nil)`; the weather arrives separately in the store. Call only once the
+extension is alive. Configuration is in memory; resend it after reconnection.
+
+| Store field | Meaning |
+| --- | --- |
+| `ready` | A successful reading exists for the configured location |
+| `latitude`, `longitude` | Requested coordinates, absent until configured |
+| `current` | Open-Meteo values: `time`, `interval`, `temperature_2m`, `relative_humidity_2m`, `apparent_temperature`, `is_day`, `precipitation`, `weather_code`, `wind_speed_10m`, `wind_direction_10m` |
+| `current_units` | Units returned by Open-Meteo: Celsius, km/h, mm, percent, etc. |
+| `timezone` | Resolved IANA timezone; `current.time` is local to it |
+| `updated_at` | Unix seconds of the last successful fetch |
+| `error` | Last fetch error, absent after a successful refresh |
+
+Fetching starts after configuration and repeats every 15 minutes without a Lua
+timer. Failures retry after 60 seconds and keep the last reading. Changing the
+location clears old weather. Requests time out after 15 seconds, reject HTTP
+errors/redirects and invalid responses, and cap response bodies at 64 KiB.
+Other current values may be null when unavailable; handle missing values in
+custom views. `weather_code` follows Open-Meteo's WMO interpretation codes.
+
+Weather data: [Open-Meteo](https://open-meteo.com/),
+[API documentation](https://open-meteo.com/en/docs). This version uses its public
+non-commercial endpoint without an API key; see the provider's usage terms.
+
 #### Writing extensions
 
 Extensions are executables, or directories containing an executable, under
@@ -839,13 +888,52 @@ with a 256 KiB line limit, bounded queues, a `0700` socket directory, and a
 An SDK method reply that exceeds the line limit returns an error to its caller
 instead of leaving the callback pending.
 
+Extensions can bundle Lua widgets and objects alongside their executable:
+
+```text
+<profile>/extensions/demo/
+  riced-demo     # executable (0755)
+  demo.lua       # Lua module (0644)
+```
+
+`demo.lua` registers `iced.demo(props)` with `iced.define("demo", factory)`.
+The existing widget loader finds it on first access; no `require` or host
+rebuild is needed. Use `riced.plugins("demo")` inside the module to access the
+process, and handle `alive == false` before making calls. Plugin replies trigger
+a redraw. Keep Lua companions non-executable so the supervisor does not launch
+them as processes.
+
+Modules can also return ordinary Lua objects, imported with
+`require("extensions.demo.demo")`. For lifecycle hooks, use
+`iced.component(id, "extensions.demo.component", props)` with a component module.
+The same module watching and failed-reload recovery apply. Widget filenames must
+match their constructor names, names must be unique across the profile, and
+`iced.define` cannot replace built-ins. After adding a previously missing widget,
+reload `shell.lua` or restart to clear the loader's cached miss.
+
 ```sh
 just extension-system
 just extension-wayland
 just extension-dbus
 just extension-themeagen
 just extension-lucide
+just extension-openmeteo
 ```
+
+Build any Rust extension into an output directory:
+
+```sh
+riced extension build extensions/openmeteo -o ~/.config/riced/test/extensions/openmeteo
+```
+
+The source is a Cargo package directory containing exactly one `[[bin]]`.
+It builds in release mode and copies that executable plus top-level `*.lua`
+files into the output directory (created if needed). The executable remains
+`0755` and Lua companions are `0644`. Omitting `-o` targets `extensions/` in
+the profile named by `-c`/`-p`, or of the only running daemon. Startups record
+the canonical `shell.lua` in `$XDG_RUNTIME_DIR/riced/<profile>.profile`; stale
+records that no longer match the live socket are rejected. This command does not
+restart daemons.
 
 ## iced components
 
@@ -869,7 +957,7 @@ enter/leave/displacement animation instead of property animation.
 
 ### Widget reference
 
-#### `iced.icon(content, props)` and `iced.lucide(content, props)`
+#### `iced.icon(content, props)`
 
 `content`: a single unicode char (glyph) from the Lucide font, e.g.
 `"\u{e038}"` for `activity`. The host has **no** lucide-icons lookup;
@@ -880,15 +968,14 @@ resolve a kebab-case name (`"activity"`, `"arrow-right"`) via the
 local lucide = riced.plugins("lucide")
 lucide.resolve("activity", function(result, err)
     if result then
-        -- result.char is the raw glyph; freeze it in a module table or
-        -- re-resolve every view.
+        -- Cache the raw glyph; replies automatically trigger a redraw.
         glyph = result.char
     end
 end)
 -- iced.icon(content, props) renders the glyph:
-iced.icon(glyph, { size = 16, color = theme.text })
--- alias:
-iced.lucide(glyph, { size = 20 })
+if glyph then
+    iced.icon(glyph, { size = 16, color = theme.text })
+end
 ```
 
 Props: `size` (positive, default 16), `color`, `center` (boolean), `align_x` (`"left"`, `"center"`, `"right"`, `"justified"`), `align_y` (`"top"`, `"center"`, `"bottom"`). `center`/`align_*` only take effect with a constrained `width`/`height`. The icon renders as a
@@ -899,6 +986,34 @@ loaded at startup via `Settings.fonts`), so `size`/`color` animate like
 The extension owns all `lucide-icons` logic (`extensions/lucide`); the
 host only embeds the TTF, so `lucide-icons` appears **only** in
 `extensions/lucide/Cargo.toml`.
+
+#### `iced.lucide(props)` — extension-owned widget
+
+Install the executable and its companion with `just extension-lucide`, or place
+`riced-lucide` and `extensions/lucide/lucide.lua` together under
+`<profile>/extensions/lucide/` (Lua file mode `0644`). Then call:
+
+```lua
+iced.lucide({ name = "activity", size = 20, color = theme.text })
+```
+
+`name` is a required, nonempty kebab-case Lucide icon name. Other props are the
+same as `iced.icon`; repeated instances need distinct `id` values, like other
+custom widgets. It renders blank text while the extension is unavailable or a
+lookup is pending. Successful lookups are cached and trigger a redraw. Failed
+lookups stay blank and are retried after reconnection or module reload, avoiding
+a request/redraw loop. Cached glyphs remain usable while disconnected.
+
+The module also exports the existing helpers through
+`require("extensions.lucide.lucide")`: `icon(name, props, fallback)`,
+`exists(name, callback)`, `list(prefix, callback)`, `warm(names)`, and lazy glyph
+fields such as `lucide.activity` (nil until resolved).
+
+Migration: replace old `iced.lucide(glyph, props)` calls with
+`iced.icon(glyph, props)`. If the old installer placed `lucide.lua` at the profile
+root, move any customizations into the bundled module and remove the old copy;
+two files named `lucide.lua` cause a duplicate-widget error. Update old
+`require("lucide")` calls to `require("extensions.lucide.lucide")`.
 
 #### `iced.text(content, props)`
 
@@ -1142,10 +1257,11 @@ local bounds = iced.bounds("close_button")
 `iced.bounds(id)` returns the last measured rectangle for the current surface.
 If that surface has no measurement for `id`, it falls back to the most recent
 measurement of that id on another surface. This matters because `app:view` runs
-once per layer/window/popup. It is `nil` before the first layout/draw, so call
-it from `view` and handle nil. The rectangle is relative to the layer or window
-where the measured widget lives, which is the coordinate space popup anchors
-use.
+once per layer/window/popup. It is `nil` before the first layout/draw, so keep
+a fallback in the first view. The daemon rebuilds views once after that first
+measurement, so the next `view` sees the real rectangle. The rectangle is
+relative to the layer or window where the measured widget lives, which is the
+coordinate space popup anchors use.
 
 There is no `z` coordinate. Iced layouts are two-dimensional; draw order comes
 from tree order, overlays, and layer levels. Output-global coordinates are also
