@@ -67,4 +67,5 @@ extension-themeagen:
 extension-lucide:
     {{nix}} cargo build --release -p riced-extension-lucide
     install -Dm755 target/release/riced-lucide "{{ home_directory() }}/.config/riced/test/extensions/lucide/riced-lucide"
-    install -Dm755 extensions/lucide/example/lucide.lua "{{ home_directory() }}/.config/riced/test/lucide.lua"
+    install -Dm644 extensions/lucide/lucide.lua "{{ home_directory() }}/.config/riced/test/extensions/lucide/lucide.lua"
+

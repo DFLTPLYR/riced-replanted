@@ -1092,6 +1092,142 @@ mod tests {
     }
 
     #[test]
+    fn lucide_companion_handles_async_results_errors_and_reconnection() {
+        let (tx, mut plugins, lua) = setup();
+        let helper: Table = lua
+            .load(include_str!("../extensions/lucide/lucide.lua"))
+            .eval()
+            .unwrap();
+        lua.globals().set("lucide", helper).unwrap();
+        lua.load("assert(lucide.icon('activity') == nil)")
+            .exec()
+            .unwrap();
+
+        for conn in [1, 2] {
+            let (writer, calls) = mpsc::sync_channel(16);
+            tx.send(Incoming::Register {
+                conn,
+                v: VERSION,
+                name: "lucide".into(),
+                methods: HashMap::from([("resolve".into(), MethodSpec::default())]),
+                writer,
+            })
+            .unwrap();
+            assert!(plugins.poll(&lua).unwrap().0);
+            lua.load(
+                "assert(lucide.icon('activity') == nil); assert(lucide.icon('activity') == nil)",
+            )
+            .exec()
+            .unwrap();
+            let ToPlugin::Call { id, method, args } =
+                serde_json::from_slice(&calls.try_recv().unwrap()).unwrap()
+            else {
+                panic!("expected icon lookup");
+            };
+            assert_eq!(method, "resolve");
+            assert_eq!(args, vec![serde_json::json!("activity")]);
+            assert!(
+                calls.try_recv().is_err(),
+                "pending lookups must be deduplicated"
+            );
+
+            if conn == 1 {
+                tx.send(Incoming::Closed { conn }).unwrap();
+                assert!(plugins.poll(&lua).unwrap().0);
+                lua.load("assert(lucide.icon('activity') == nil)")
+                    .exec()
+                    .unwrap();
+                continue;
+            }
+            tx.send(Incoming::Result {
+                conn,
+                id,
+                ok: true,
+                result: serde_json::json!({"char": "\u{e038}"}),
+                error: None,
+            })
+            .unwrap();
+            assert!(
+                plugins.poll(&lua).unwrap().0,
+                "resolved icons must trigger redraw"
+            );
+            lua.load(
+                r#"
+                assert(lucide.activity == '\u{e038}')
+                assert(lucide.icon('activity', { size = 20 }).size == 20)
+                assert(lucide.icon('activity').content == '\u{e038}')
+                assert(lucide.icon('unknown') == nil)
+            "#,
+            )
+            .exec()
+            .unwrap();
+            let ToPlugin::Call { id, args, .. } =
+                serde_json::from_slice(&calls.try_recv().unwrap()).unwrap()
+            else {
+                panic!("expected unknown icon lookup");
+            };
+            assert_eq!(args, vec![serde_json::json!("unknown")]);
+            tx.send(Incoming::Result {
+                conn,
+                id,
+                ok: false,
+                result: Json::Null,
+                error: Some("unknown icon".into()),
+            })
+            .unwrap();
+            plugins.poll(&lua).unwrap();
+            lua.load(
+                "assert(lucide.icon('unknown') == nil); assert(lucide.icon('unknown') == nil)",
+            )
+            .exec()
+            .unwrap();
+            assert!(
+                calls.try_recv().is_err(),
+                "failed lookups must not loop on redraw"
+            );
+        }
+    }
+
+    #[test]
+    fn lucide_companion_retries_send_errors_and_validates_names() {
+        let (_, _, lua) = setup();
+        lua.load(
+            r#"
+            local ext = riced.plugins('lucide')
+            ext.alive = true
+            attempts = 0
+            ext.resolve = function()
+                attempts = attempts + 1
+                error('queue full')
+            end
+        "#,
+        )
+        .exec()
+        .unwrap();
+        let helper: Table = lua
+            .load(include_str!("../extensions/lucide/lucide.lua"))
+            .eval()
+            .unwrap();
+        lua.globals().set("lucide", helper).unwrap();
+        lua.load(
+            r#"
+            for _ = 1, 2 do
+                local ok, err = pcall(lucide.icon, 'activity')
+                assert(not ok and err:find('queue full'))
+            end
+            assert(attempts == 2)
+            for _, name in ipairs({ '', false, 42 }) do
+                assert(not pcall(lucide.icon, name))
+            end
+            assert(not pcall(lucide.icon))
+            assert(attempts == 2)
+        "#,
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[test]
     fn error_replies_release_callback_slots() {
         let (tx, mut plugins, lua) = setup();
         let calls = register(&tx, &["query"]);
@@ -1328,10 +1464,14 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&root).unwrap();
-        let script = root.join("demo");
+        fs::create_dir_all(root.join("demo")).unwrap();
+        let script = root.join("demo/riced-demo");
         fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let companion = root.join("demo/demo.lua");
+        fs::write(&companion, "return {}").unwrap();
+        fs::set_permissions(&companion, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(scan(&root), vec![script.clone()]);
         let mut supervisor = Supervisor::new(root.clone(), root.join("socket"), "test".to_owned());
 
         supervisor.poll();

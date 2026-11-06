@@ -1,9 +1,9 @@
 //! Lucide icon extension: name -> glyph (PUA char) and charset lookup.
 //!
-//! The host renders the glyph natively via `iced.icon("activity", {...})`
+//! The host renders the resolved glyph natively via `iced.icon(glyph, {...})`
 //! with the bundled `lucide` font family. This process owns no font bytes;
-//! it only exposes the same `lucide-icons` enum the host links, so scripts
-//! can validate names or fetch the unicode codepoint out of process.
+//! it owns the `lucide-icons` lookup, so scripts can validate names or fetch
+//! the unicode codepoint out of process. The companion lucide.lua owns iced.lucide.
 
 use lucide_icons::Icon;
 use riced_extension_sdk::Plugin;

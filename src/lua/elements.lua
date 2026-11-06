@@ -79,7 +79,7 @@ function iced.popup(content, settings)
 end
 
 -- Custom widgets: define a named constructor once, then use iced.name(props).
--- Files under components/widgets/ are loaded automatically; redefining a name
+-- Matching Lua files anywhere in the profile load on demand; redefining a name
 -- replaces the previous constructor so edits reload.
 local defined = {}
 local windows = {}
@@ -360,6 +360,3 @@ function iced.component(id, module, props)
 	assert(props == nil or type(props) == "table", "component props must be a table")
 	return { kind = "component", id = id, module = module, props = props or {} }
 end
-
--- `iced.lucide` is the explicit alias; `iced.icon` is the primary name.
-iced.lucide = iced.icon

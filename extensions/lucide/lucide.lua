@@ -1,38 +1,14 @@
--- Lucide icon helper for riced profiles.
---
--- Copy this file into your profile as `lucide.lua` (next to `shell.lua`,
--- not under data/ or components/) and copy the extension binary:
---
---   ln -s "$PWD/extensions/lucide/example/lucide.lua" ~/.config/riced/<profile>/lucide.lua
---   # or:
---   cp extensions/lucide/example/lucide.lua ~/.config/riced/<profile>/lucide.lua
---
--- Import once from any profile module:
---   local lucide = require("lucide")
---
--- Then use it two ways:
---
---   -- 1. Magic table: first read resolves via the extension and caches.
---   local activity_glyph = lucide.activity -- "\u{e038}" or nil if unresolved
---
---   -- 2. Widget helper: builds an iced element from a name.
---   lucide.icon("activity", { size = 16, color = theme.text })
---   lucide.icon("arrow-right", { size = 20 })
---
--- Names are kebab-case lucide names ("activity", "arrow-right", "settings").
--- The glyph is cached in the module table so repeated reads are free.
--- The extension is asynchronous; the first view after a fresh require may
--- render a placeholder (or nil) until the callback fires. Re-render by
--- returning any task / event that triggers a view.
---
--- Copy this file into your profile (e.g. `<profile>/lucide.lua`) and the
--- `riced-lucide` extension binary into `<profile>/extensions/lucide/`.
+-- Install alongside riced-lucide as <profile>/extensions/lucide/lucide.lua (mode 0644).
+-- iced.lucide({ name = "activity", size = 16 }) loads this module on demand.
+-- Helpers: local lucide = require("extensions.lucide.lucide")
+-- Lookups are asynchronous; plugin replies trigger a redraw automatically.
 
 local ext = riced.plugins("lucide")
 
 local lucide = {}
 local glyphs = {}
 local pending = {}
+local failed = {}
 
 --- Extension proxy. Methods appear on the proxy only after `riced-lucide`
 --- registers. Guard every call so a cold start (first view before the child
@@ -40,7 +16,7 @@ local pending = {}
 --- The next view retries automatically.
 local function call_method(name, ...)
     local method = ext[name]
-    if type(method) ~= "function" then
+    if not ext.alive or type(method) ~= "function" then
         return false
     end
     method(...)
@@ -48,27 +24,31 @@ local function call_method(name, ...)
 end
 
 local function fetch(name)
+    assert(type(name) == "string" and name ~= "", "icon name must be a nonempty string")
     if glyphs[name] ~= nil then
         return glyphs[name]
     end
     if pending[name] then
         return nil
     end
-    if type(ext.resolve) ~= "function" then
-        -- Extension not registered yet; retry on next view.
+    local resolve = ext.resolve
+    if not ext.alive or type(resolve) ~= "function" or failed[name] == resolve then
         return nil
     end
     pending[name] = true
-    ext.resolve(name, function(result, err)
+    local ok, error_message = pcall(resolve, name, function(result, err)
         pending[name] = nil
-        if err then
-            -- Keep name unresolved so the next view retries.
-            return
-        end
-        if result and result.char then
+        if not err and result and result.char then
             glyphs[name] = result.char
+        else
+            -- Avoid a request/redraw loop; a new connection or module reload retries.
+            failed[name] = resolve
         end
     end)
+    if not ok then
+        pending[name] = nil
+        error(error_message, 0)
+    end
     return nil
 end
 
@@ -115,5 +95,15 @@ function lucide.warm(names)
         if type(name) == "string" then fetch(name) end
     end
 end
+
+iced.define("lucide", function()
+    local widget = {}
+    function widget:view(props)
+        local node = lucide.icon(props.name, props) or iced.text("", props)
+        node.name = nil
+        return node
+    end
+    return widget
+end)
 
 return lucide

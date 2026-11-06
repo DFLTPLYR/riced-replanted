@@ -2415,6 +2415,90 @@ mod tests {
     }
 
     #[test]
+    fn extension_widget_loads_from_a_symlink_and_reloads() {
+        let source = include_str!("../extensions/lucide/lucide.lua");
+        let extension = Profile::new(&[("lucide.lua", source)]);
+        let profile = Profile::new(&[("shell.lua", ""), ("extensions/.keep", "")]);
+        std::os::unix::fs::symlink(&extension.0, profile.0.join("extensions/lucide")).unwrap();
+        let mut app = load(
+            r#"
+            return riced.daemon({}, 'test', function() end, function()
+                node = iced.lucide({ name = 'activity', size = 20, color = '#ffffff' })
+                return node
+            end):run()
+            "#,
+            &profile.shell(),
+        )
+        .unwrap();
+        let id = window::Id::unique();
+        app.view(id).unwrap();
+        app.lua
+            .load("assert(node.kind == 'text' and node.content == '' and node.name == nil)")
+            .exec()
+            .unwrap();
+
+        extension.write(
+            "lucide.lua",
+            &source.replace("iced.text(\"\", props)", "iced.text(\"loading\", props)"),
+        );
+        assert!(matches!(app.reload_modules().unwrap(), Change::Windows(_)));
+        app.view(id).unwrap();
+        app.lua
+            .load("assert(node.content == 'loading')")
+            .exec()
+            .unwrap();
+
+        extension.write(
+            "lucide.lua",
+            &source.replace("return lucide", "error('broken extension')\nreturn lucide"),
+        );
+        assert!(app.reload_modules().is_err());
+        app.view(id).unwrap();
+        app.lua
+            .load("assert(node.content == 'loading')")
+            .exec()
+            .unwrap();
+
+        extension.write("lucide.lua", source);
+        app.reload_modules().unwrap();
+        app.lua
+            .load(
+                r#"
+                local ext = riced.plugins('lucide')
+                ext.alive = true
+                ext.resolve = function(name, callback)
+                    assert(name == 'activity')
+                    callback({ char = '\u{e038}' })
+                end
+            "#,
+            )
+            .exec()
+            .unwrap();
+        app.view(id).unwrap();
+        app.view(id).unwrap();
+        app.lua
+            .load("assert(node.kind == 'icon' and node.name == nil and node.size == 20)")
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn extension_widgets_cannot_replace_builtin_widgets() {
+        let profile = Profile::new(&[
+            ("shell.lua", ""),
+            (
+                "extensions/demo/demo.lua",
+                "iced.define('icon', function() return { view = function() return iced.text('bad') end } end)",
+            ),
+        ]);
+        let error = match load("require('extensions.demo.demo')", &profile.shell()) {
+            Ok(_) => panic!("built-in widget replacement must fail"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("widget already exists: icon"), "{error}");
+    }
+
+    #[test]
     fn duplicate_widget_names_are_rejected() {
         let profile = Profile::new(&[
             ("shell.lua", ""),
@@ -2427,7 +2511,7 @@ mod tests {
                 end)"#,
             ),
             (
-                "right/greeting.lua",
+                "extensions/demo/greeting.lua",
                 r#"iced.define("greeting", function()
                     local widget = {}
                     function widget:view() seen = "right"; return iced.text("hi") end
