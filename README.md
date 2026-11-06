@@ -106,13 +106,17 @@ end
 
 The bundled extensions are:
 
-- `riced-system` — system metrics.
-- `riced-wayland` — outputs, toplevels, and workspaces using standard Wayland
-  protocols.
-- `riced-dbus` — StatusNotifier tray items and freedesktop notifications.
-- `riced-themeagen` — Material You palettes and Matugen-compatible templates.
-- `riced-lucide` — icon-name lookup and the extension-owned `iced.lucide` widget.
-- `riced-openmeteo` — current weather, automatic refresh, and `iced.openmeteo`.
+- [`riced-system`](extensions/system/API.md) — system metrics.
+- [`riced-wayland`](extensions/wayland/API.md) — outputs, toplevels, and
+  workspaces using standard Wayland protocols.
+- [`riced-dbus`](extensions/dbus/API.md) — StatusNotifier tray items and
+  freedesktop notifications.
+- [`riced-themeagen`](extensions/themeagen/API.md) — Material You palettes and
+  Matugen-compatible templates.
+- [`riced-lucide`](extensions/lucide/API.md) — icon-name lookup and the
+  extension-owned `iced.lucide` widget.
+- [`riced-openmeteo`](extensions/openmeteo/API.md) — current weather, automatic
+  refresh, and `iced.openmeteo`.
 
 The D-Bus and Wayland extensions bound display text and array snapshots to stay
 below the protocol's 256 KiB message limit. Entries that exceed an array's byte
