@@ -43,7 +43,7 @@ iced = { version = "0.14.0", features = [
   "wayland",
 ] }
 iced_anim = { version = "0.3.1", features = ["derive"] }
-iced_exwlshell = "0.20.1"
+iced_exwlshell = "0.21.3"
 freedesktop_entry_parser = "1.3"
 riced-extension-sdk = { path = "crates/riced-extension-sdk", default-features = false }
 serde = { version = "1", features = ["derive"] }

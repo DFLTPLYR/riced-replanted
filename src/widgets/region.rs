@@ -4,7 +4,7 @@ use iced::advanced::layout;
 use iced::advanced::widget::{Operation, Tree, tree};
 use iced::advanced::{Clipboard, Layout, Shell, Widget, mouse, overlay, renderer};
 use iced::{Element, Event, Length, Rectangle, Size, Theme, Vector, window};
-use iced_exwlshell::actions::{ActionCallback, ExwlShellCustomAction, ExwlShellCustomActionWithId};
+use iced_exwlshell::actions::{ExWlShellCustomAction, ExWlShellCustomActionWithId, RegionActionCB};
 
 use crate::runtime::Message;
 
@@ -160,15 +160,15 @@ impl Widget<Message, Theme, iced::Renderer> for Region<'_> {
             return;
         }
         let bounds = state.last.clone();
-        shell.publish(Message::Surface(ExwlShellCustomActionWithId::new(
+        shell.publish(Message::Surface(ExWlShellCustomActionWithId::new(
             Some(window),
-            ExwlShellCustomAction::SetInputRegion(ActionCallback::new(move |region| {
+            ExWlShellCustomAction::SetInputRegion(RegionActionCB::new(move |region| {
                 for bounds in &bounds {
                     let (x, y) = (bounds.x.round() as i32, bounds.y.round() as i32);
                     let (width, height) =
                         (bounds.width.round() as i32, bounds.height.round() as i32);
                     if width > 0 && height > 0 {
-                        region.add(x, y, width, height);
+                        let _ = region.add(x, y, width, height);
                     }
                 }
             })),

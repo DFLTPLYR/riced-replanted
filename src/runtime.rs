@@ -7,10 +7,10 @@ use std::{
 };
 
 use iced::widget::operation;
-use iced::{Element, Size, Subscription, Task, Theme, theme, window};
+use iced::{Element, Settings, Size, Subscription, Task, Theme, theme, window};
 use iced_exwlshell::{
-    Settings,
-    actions::{ExwlShellCustomAction, ExwlShellCustomActionWithId, IcedXdgWindowSettings},
+    ExWlSettings,
+    actions::{ExWlShellCustomAction, ExWlShellCustomActionWithId, IcedXdgWindowSettings},
     redraw::Scope,
     reexport::KeyboardInteractivity,
     settings::StartMode,
@@ -57,7 +57,7 @@ pub enum Message {
     Resized(window::Id, Size),
     WindowClosed(window::Id),
     Noop,
-    Surface(ExwlShellCustomActionWithId),
+    Surface(ExWlShellCustomActionWithId),
 }
 
 /// Typed value carried by a widget event; converted to a Lua table on delivery.
@@ -270,7 +270,7 @@ struct Mount {
 
 type Mounts = Rc<RefCell<HashMap<(window::Id, String), Mount>>>;
 
-impl TryFrom<Message> for ExwlShellCustomActionWithId {
+impl TryFrom<Message> for ExWlShellCustomActionWithId {
     type Error = Message;
 
     fn try_from(message: Message) -> Result<Self, Self::Error> {
@@ -300,7 +300,7 @@ pub struct App {
     toplevels: Vec<update::Window>,
     popups: Vec<Popup>,
     surfaces_dirty: Cell<bool>,
-    pending: Vec<ExwlShellCustomActionWithId>,
+    pending: Vec<ExWlShellCustomActionWithId>,
     modules: Rc<RefCell<modules::Modules>>,
     mounts: Mounts,
     windows_of: Rc<RefCell<HashMap<String, Vec<window::Id>>>>,
@@ -1139,9 +1139,9 @@ impl App {
         let mut tasks = Task::none();
         for layer in &self.layers {
             tasks = tasks.chain(Task::done(Message::Surface(
-                ExwlShellCustomActionWithId::new(
+                ExWlShellCustomActionWithId::new(
                     None,
-                    ExwlShellCustomAction::NewLayerShell {
+                    ExWlShellCustomAction::NewLayerShell {
                         id: layer.window,
                         settings: layer.settings.clone(),
                     },
@@ -1150,12 +1150,13 @@ impl App {
         }
         for window in &self.toplevels {
             tasks = tasks.chain(Task::done(Message::Surface(
-                ExwlShellCustomActionWithId::new(
+                ExWlShellCustomActionWithId::new(
                     None,
-                    ExwlShellCustomAction::NewBaseWindow {
+                    ExWlShellCustomAction::NewBaseWindow {
                         settings: IcedXdgWindowSettings {
                             size: Some(window.size),
                             client_side_decorations: window.client_side_decorations,
+                            app_id: None,
                         },
                         id: window.window,
                     },
@@ -1175,9 +1176,9 @@ impl App {
                 continue;
             };
             tasks = tasks.chain(Task::done(Message::Surface(
-                ExwlShellCustomActionWithId::new(
+                ExWlShellCustomActionWithId::new(
                     None,
-                    ExwlShellCustomAction::NewPopUp {
+                    ExWlShellCustomAction::NewPopUp {
                         settings: popup_settings(popup, parent),
                         id: popup.window,
                     },
@@ -1649,21 +1650,22 @@ impl App {
         }
     }
 
-    fn settings(&self) -> mlua::Result<Settings> {
+    fn settings(&self) -> mlua::Result<(Settings, ExWlSettings)> {
         let mut settings = Settings::default();
+        let mut wl_settings = ExWlSettings::default();
         // Vendored Lucide font for iced.icon / iced.lucide (extension-owned lookup).
         settings.fonts.push(std::borrow::Cow::Borrowed(
             include_bytes!("fonts/lucide.ttf") as &[u8],
         ));
         let Some(table) = self.options.get::<Option<Table>>("settings")? else {
-            return Ok(settings);
+            return Ok((settings, wl_settings));
         };
         keys(&table, &["id", "layer_settings"])?;
         settings.id = table.get("id")?;
         if let Some(layer) = table.get::<Option<Table>>("layer_settings")? {
             keys(&layer, &["start_mode", "keyboard_interactivity"])?;
             if let Some(mode) = layer.get::<Option<String>>("start_mode")? {
-                settings.layer_settings.start_mode = match mode.as_str() {
+                wl_settings.layer_settings.start_mode = match mode.as_str() {
                     "background" => StartMode::Background,
                     "active" => StartMode::Active,
                     "all_screens" => StartMode::AllScreens,
@@ -1671,7 +1673,7 @@ impl App {
                 };
             }
             if let Some(mode) = layer.get::<Option<String>>("keyboard_interactivity")? {
-                settings.layer_settings.keyboard_interactivity = match mode.as_str() {
+                wl_settings.layer_settings.keyboard_interactivity = match mode.as_str() {
                     "none" => KeyboardInteractivity::None,
                     "on_demand" => KeyboardInteractivity::OnDemand,
                     "exclusive" => KeyboardInteractivity::Exclusive,
@@ -1683,7 +1685,7 @@ impl App {
                 };
             }
         }
-        Ok(settings)
+        Ok((settings, wl_settings))
     }
 
     fn reload(&mut self, source: &str) -> mlua::Result<()> {
@@ -1697,11 +1699,11 @@ impl App {
         let current = self.settings()?;
         let next = candidate.settings()?;
         if self.namespace != candidate.namespace
-            || current.id != next.id
-            || current.layer_settings.keyboard_interactivity
-                != next.layer_settings.keyboard_interactivity
-            || std::mem::discriminant(&current.layer_settings.start_mode)
-                != std::mem::discriminant(&next.layer_settings.start_mode)
+            || current.0.id != next.0.id
+            || current.1.layer_settings.keyboard_interactivity
+                != next.1.layer_settings.keyboard_interactivity
+            || std::mem::discriminant(&current.1.layer_settings.start_mode)
+                != std::mem::discriminant(&next.1.layer_settings.start_mode)
         {
             return Err(mlua::Error::runtime(
                 "namespace or startup settings changed; restart riced to apply them",
@@ -1885,9 +1887,9 @@ impl App {
 
     pub fn run(mut self) -> iced_exwlshell::Result {
         checked(self.prepare_layers());
-        let mut settings = checked(self.settings());
+        let (settings, mut wl_settings) = checked(self.settings());
         if !self.layers.is_empty() || !self.toplevels.is_empty() {
-            settings.layer_settings.start_mode = StartMode::Background;
+            wl_settings.layer_settings.start_mode = StartMode::Background;
         }
         let namespace = self.namespace.clone();
         let state = Rc::new(RefCell::new(self));
@@ -1950,6 +1952,7 @@ impl App {
         .style(|app, theme| checked_fallback(app.borrow().style(theme), theme::Style { background_color: iced::Color::TRANSPARENT, text_color: iced::Color::TRANSPARENT }, "style"))
         .redraw_scope(move |message| checked_fallback(redraw.borrow().redraw(message), Scope::None, "redraw_scope"))
         .settings(settings)
+        .wl_settings(wl_settings)
         .run()
     }
 
@@ -2829,7 +2832,7 @@ mod tests {
         assert!(
             app.pending
                 .iter()
-                .any(|action| matches!(&action.1, ExwlShellCustomAction::NewPopUp { id, .. } if *id == popup.window))
+                .any(|action| matches!(&action.1, ExWlShellCustomAction::NewPopUp { id, .. } if *id == popup.window))
         );
         app.view(popup.window).unwrap();
 
@@ -2839,8 +2842,8 @@ mod tests {
         assert_eq!(app.popups[0].window, popup.window);
         assert!(app.pending.iter().any(|action| matches!(
             &action.1,
-            ExwlShellCustomAction::PopUpReposition { settings }
-                if settings.placement == iced_exwlshell::reexport::PopupPlacement::Position((8, 30))
+            ExWlShellCustomAction::PopUpReposition { settings }
+                if settings.placement == iced_exwlshell::reexport::PopupPlacement::Position(iced_exwlshell::reexport::Position::new(8, 30))
         )));
 
         app.pending.clear();
@@ -2848,7 +2851,7 @@ mod tests {
         app.reconcile_layers().unwrap();
         assert!(app.popups.is_empty());
         assert!(app.pending.iter().any(|action| {
-            matches!(&action.1, ExwlShellCustomAction::RemoveWindow)
+            matches!(&action.1, ExWlShellCustomAction::RemoveWindow)
                 && action.0 == Some(popup.window)
         }));
 
@@ -3060,16 +3063,16 @@ mod tests {
         app.view(app.layers[1].window).unwrap();
         assert_eq!(app.state.get::<u32>("count").unwrap(), 1);
         let id = app.layers[0].window;
-        let action = ExwlShellCustomActionWithId::new(
+        let action = ExWlShellCustomActionWithId::new(
             None,
-            ExwlShellCustomAction::NewLayerShell {
+            ExWlShellCustomAction::NewLayerShell {
                 id,
                 settings: app.layers[0].settings.clone(),
             },
         );
-        let converted = ExwlShellCustomActionWithId::try_from(Message::Surface(action)).unwrap();
+        let converted = ExWlShellCustomActionWithId::try_from(Message::Surface(action)).unwrap();
         assert!(
-            matches!(converted.1, ExwlShellCustomAction::NewLayerShell {id: actual, ..} if actual == id)
+            matches!(converted.1, ExWlShellCustomAction::NewLayerShell {id: actual, ..} if actual == id)
         );
     }
 
@@ -3145,7 +3148,7 @@ mod tests {
         assert!(
             app.pending
                 .iter()
-                .any(|action| matches!(action.1, ExwlShellCustomAction::LayerChange(_)))
+                .any(|action| matches!(action.1, ExWlShellCustomAction::LayerChange(_)))
         );
     }
 
@@ -4521,11 +4524,11 @@ return m";
         assert_eq!(app.state.get::<u32>("count").unwrap(), 7);
         assert_eq!(app.generation, 0);
         assert!(app.pending.iter().any(|action| action.0 == Some(window)
-            && matches!(action.1, ExwlShellCustomAction::LayoutChange { .. })));
+            && matches!(action.1, ExWlShellCustomAction::LayoutChange { .. })));
         assert!(
             app.pending
                 .iter()
-                .any(|action| matches!(action.1, ExwlShellCustomAction::ExclusiveZoneChange(64)))
+                .any(|action| matches!(action.1, ExWlShellCustomAction::ExclusiveZoneChange(64)))
         );
         app.pending.clear();
 

@@ -1,5 +1,5 @@
 use iced_exwlshell::reexport::{
-    Anchor, BlurOption, BlurRegion, Extent, KeyboardInteractivity, Layer, LayerSize,
+    Anchor, BlurOption, BlurRegion, Extent, KeyboardInteractivity, Layer, LayerSize, Margin,
     NewLayerShellSettings, OutputOption, PixelSize, PopupAnchor, PopupConstraintAdjustment,
     PopupGravity,
 };
@@ -599,12 +599,12 @@ pub fn settings(table: Table) -> mlua::Result<NewLayerShellSettings> {
                 "margin must contain top, right, bottom, left",
             ));
         }
-        settings.margin = Some((
-            margin.get(1)?,
-            margin.get(2)?,
-            margin.get(3)?,
-            margin.get(4)?,
-        ));
+        settings.margin = Some(Margin {
+            top: margin.get(1)?,
+            right: margin.get(2)?,
+            bottom: margin.get(3)?,
+            left: margin.get(4)?,
+        });
     }
     if let Some(mode) = table.get::<Option<String>>("keyboard_interactivity")? {
         settings.keyboard_interactivity = match mode.as_str() {
@@ -912,7 +912,12 @@ mod tests {
                 layer: Layer::Bottom,
                 anchor: Anchor::Top | Anchor::Left | Anchor::Right,
                 exclusive_zone: Some(32),
-                margin: Some((1, 2, 3, -4)),
+                margin: Some(Margin {
+                    top: 1,
+                    right: 2,
+                    bottom: 3,
+                    left: -4
+                }),
                 keyboard_interactivity: KeyboardInteractivity::None,
                 output_option: OutputOption::OutputName("DP-1".into()),
                 events_transparent: true,

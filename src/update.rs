@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use iced::window;
 use iced_exwlshell::{
     actions::{
-        ExwlShellCustomAction as Action, ExwlShellCustomActionWithId, IcedNewPopupSettings,
+        ExWlShellCustomAction as Action, ExWlShellCustomActionWithId, IcedNewPopupSettings,
         IcedXdgWindowSettings,
     },
-    reexport::{NewLayerShellSettings, PixelSize},
+    reexport::{NewLayerShellSettings, PixelSize, Position},
 };
 use mlua::Function;
 
@@ -43,7 +43,7 @@ pub struct Popup {
     pub closed: bool,
 }
 
-pub fn reconcile(previous: &[Layer], next: &mut [Layer]) -> Vec<ExwlShellCustomActionWithId> {
+pub fn reconcile(previous: &[Layer], next: &mut [Layer]) -> Vec<ExWlShellCustomActionWithId> {
     let mut actions = Vec::new();
     let mut used = Vec::new();
     let next_ids = next
@@ -66,14 +66,14 @@ pub fn reconcile(previous: &[Layer], next: &mut [Layer]) -> Vec<ExwlShellCustomA
                 || before.namespace != after.namespace
                 || before.events_transparent != after.events_transparent
             {
-                actions.push(ExwlShellCustomActionWithId::new(
+                actions.push(ExWlShellCustomActionWithId::new(
                     Some(old.window),
                     Action::RemoveWindow,
                 ));
             } else {
                 layer.window = old.window;
                 let mut push = |action| {
-                    actions.push(ExwlShellCustomActionWithId::new(Some(old.window), action))
+                    actions.push(ExWlShellCustomActionWithId::new(Some(old.window), action))
                 };
                 if before.size != after.size || before.anchor != after.anchor {
                     push(Action::LayoutChange {
@@ -103,7 +103,7 @@ pub fn reconcile(previous: &[Layer], next: &mut [Layer]) -> Vec<ExwlShellCustomA
                 continue;
             }
         }
-        actions.push(ExwlShellCustomActionWithId::new(
+        actions.push(ExWlShellCustomActionWithId::new(
             None,
             Action::NewLayerShell {
                 id: layer.window,
@@ -113,7 +113,7 @@ pub fn reconcile(previous: &[Layer], next: &mut [Layer]) -> Vec<ExwlShellCustomA
     }
     for old in previous {
         if !used.contains(&old.window) {
-            actions.push(ExwlShellCustomActionWithId::new(
+            actions.push(ExWlShellCustomActionWithId::new(
                 Some(old.window),
                 Action::RemoveWindow,
             ));
@@ -125,7 +125,7 @@ pub fn reconcile(previous: &[Layer], next: &mut [Layer]) -> Vec<ExwlShellCustomA
 pub fn reconcile_windows(
     previous: &[Window],
     next: &mut [Window],
-) -> Vec<ExwlShellCustomActionWithId> {
+) -> Vec<ExWlShellCustomActionWithId> {
     let mut actions = Vec::new();
     let mut used = Vec::new();
     let next_ids = next
@@ -150,7 +150,7 @@ pub fn reconcile_windows(
         } else if old.size != window.size
             || old.client_side_decorations != window.client_side_decorations
         {
-            actions.push(ExwlShellCustomActionWithId::new(
+            actions.push(ExWlShellCustomActionWithId::new(
                 Some(old.window),
                 Action::RemoveWindow,
             ));
@@ -162,7 +162,7 @@ pub fn reconcile_windows(
     }
     for old in previous {
         if !used.contains(&old.window) {
-            actions.push(ExwlShellCustomActionWithId::new(
+            actions.push(ExWlShellCustomActionWithId::new(
                 Some(old.window),
                 Action::RemoveWindow,
             ));
@@ -175,7 +175,7 @@ pub fn reconcile_popups(
     previous: &[Popup],
     next: &mut [Popup],
     parents: &HashMap<String, window::Id>,
-) -> Vec<ExwlShellCustomActionWithId> {
+) -> Vec<ExWlShellCustomActionWithId> {
     let mut actions = Vec::new();
     let mut used = Vec::new();
     for popup in next.iter_mut() {
@@ -217,7 +217,7 @@ pub fn reconcile_popups(
             || old.gravity != popup.gravity
             || old.constraint_adjustment != popup.constraint_adjustment
         {
-            actions.push(ExwlShellCustomActionWithId::new(
+            actions.push(ExWlShellCustomActionWithId::new(
                 Some(old.window),
                 Action::PopUpReposition {
                     settings: popup_settings(popup, parent),
@@ -235,8 +235,14 @@ pub fn reconcile_popups(
 
 pub fn popup_settings(popup: &Popup, parent: window::Id) -> IcedNewPopupSettings {
     let settings = match popup.anchor {
-        Some((x, y, size)) => IcedNewPopupSettings::new(parent, popup.size, (x, y), size),
-        None => IcedNewPopupSettings::at_position(parent, popup.size, popup.position),
+        Some((x, y, size)) => {
+            IcedNewPopupSettings::new(parent, popup.size, Position::new(x, y), size)
+        }
+        None => IcedNewPopupSettings::at_position(
+            parent,
+            popup.size,
+            Position::new(popup.position.0, popup.position.1),
+        ),
     };
     settings
         .anchor(popup.anchor_edge)
@@ -244,8 +250,8 @@ pub fn popup_settings(popup: &Popup, parent: window::Id) -> IcedNewPopupSettings
         .constraint_adjustment(popup.constraint_adjustment)
 }
 
-fn open_popup(popup: &Popup, parent: window::Id) -> ExwlShellCustomActionWithId {
-    ExwlShellCustomActionWithId::new(
+fn open_popup(popup: &Popup, parent: window::Id) -> ExWlShellCustomActionWithId {
+    ExWlShellCustomActionWithId::new(
         None,
         Action::NewPopUp {
             settings: popup_settings(popup, parent),
@@ -254,17 +260,18 @@ fn open_popup(popup: &Popup, parent: window::Id) -> ExwlShellCustomActionWithId 
     )
 }
 
-fn remove_popup(window: window::Id) -> ExwlShellCustomActionWithId {
-    ExwlShellCustomActionWithId::new(Some(window), Action::RemoveWindow)
+fn remove_popup(window: window::Id) -> ExWlShellCustomActionWithId {
+    ExWlShellCustomActionWithId::new(Some(window), Action::RemoveWindow)
 }
 
-fn open_window(window: &Window) -> ExwlShellCustomActionWithId {
-    ExwlShellCustomActionWithId::new(
+fn open_window(window: &Window) -> ExWlShellCustomActionWithId {
+    ExWlShellCustomActionWithId::new(
         None,
         Action::NewBaseWindow {
             settings: IcedXdgWindowSettings {
                 size: Some(window.size),
                 client_side_decorations: window.client_side_decorations,
+                app_id: None,
             },
             id: window.window,
         },
@@ -275,7 +282,7 @@ fn open_window(window: &Window) -> ExwlShellCustomActionWithId {
 mod tests {
     use super::*;
     use iced_exwlshell::reexport::{
-        Anchor, BlurOption, KeyboardInteractivity, Layer as Level, LayerSize, OutputOption,
+        Anchor, BlurOption, KeyboardInteractivity, Layer as Level, LayerSize, Margin, OutputOption,
     };
 
     fn layer(id: &str) -> Layer {
@@ -293,7 +300,12 @@ mod tests {
         next.settings.size = LayerSize::fill_width(64);
         next.settings.anchor = Anchor::Top | Anchor::Left | Anchor::Right;
         next.settings.layer = Level::Bottom;
-        next.settings.margin = Some((1, 2, 3, 4));
+        next.settings.margin = Some(Margin {
+            top: 1,
+            right: 2,
+            bottom: 3,
+            left: 4,
+        });
         next.settings.exclusive_zone = Some(64);
         next.settings.keyboard_interactivity = KeyboardInteractivity::Exclusive;
         next.settings.blur_option = BlurOption::FullRegion;
@@ -303,7 +315,15 @@ mod tests {
         assert!(actions.iter().all(|action| action.0 == Some(old.window)));
         assert!(matches!(actions[0].1, Action::LayoutChange { .. }));
         assert!(matches!(actions[1].1, Action::LayerChange(Level::Bottom)));
-        assert!(matches!(actions[2].1, Action::MarginChange((1, 2, 3, 4))));
+        assert!(matches!(
+            actions[2].1,
+            Action::MarginChange(Margin {
+                top: 1,
+                right: 2,
+                bottom: 3,
+                left: 4
+            })
+        ));
         assert!(matches!(actions[3].1, Action::ExclusiveZoneChange(64)));
         assert!(matches!(
             actions[4].1,
@@ -319,10 +339,23 @@ mod tests {
     fn clearing_optional_settings_resets_native_values() {
         let mut old = layer("panel");
         old.settings.exclusive_zone = Some(32);
-        old.settings.margin = Some((1, 2, 3, 4));
+        old.settings.margin = Some(Margin {
+            top: 1,
+            right: 2,
+            bottom: 3,
+            left: 4,
+        });
         let mut next = vec![layer("panel")];
         let actions = reconcile(&[old], &mut next);
-        assert!(matches!(actions[0].1, Action::MarginChange((0, 0, 0, 0))));
+        assert!(matches!(
+            actions[0].1,
+            Action::MarginChange(Margin {
+                top: 0,
+                right: 0,
+                bottom: 0,
+                left: 0
+            })
+        ));
         assert!(matches!(actions[1].1, Action::ExclusiveZoneChange(0)));
     }
 
@@ -436,10 +469,11 @@ mod tests {
         assert!(matches!(
             &actions[0].1,
             Action::NewPopUp { settings, .. }
-                if settings.placement == iced_exwlshell::reexport::PopupPlacement::Anchored {
-                    position: (10, 20),
-                    size: PixelSize::px(30, 40),
-                }
+                if settings.placement
+                    == iced_exwlshell::reexport::PopupPlacement::Anchored {
+                        position: Position::new(10, 20),
+                        size: PixelSize::px(30, 40),
+                    }
                     && settings.anchor == iced_exwlshell::reexport::PopupAnchor::TopLeft
                     && settings.gravity == iced_exwlshell::reexport::PopupGravity::TopRight
                     && settings.constraint_adjustment
@@ -455,7 +489,8 @@ mod tests {
             &actions[0].1,
             Action::PopUpReposition { settings }
                 if settings.size.to_set() == (240, 160)
-                    && settings.placement == iced_exwlshell::reexport::PopupPlacement::Position((8, 40))
+                    && settings.placement
+                        == iced_exwlshell::reexport::PopupPlacement::Position(Position::new(8, 40))
         ));
         assert_eq!(next[0].window, old.window);
 
