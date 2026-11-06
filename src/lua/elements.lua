@@ -78,10 +78,11 @@ function iced.popup(content, settings)
 	return { kind = "popup", content = content, settings = settings or {} }
 end
 
--- Custom widgets: define a named constructor once, then use iced.name(props).
+-- Named definitions: widgets use iced.name(props), values use iced.name().
 -- Matching Lua files anywhere in the profile load on demand; redefining a name
 -- replaces the previous constructor so edits reload.
-local defined = {}
+-- Key by constructor so restoring iced after a failed reload also restores its kind.
+local defined = setmetatable({}, { __mode = "k" })
 local windows = {}
 local records = {}
 local parent
@@ -336,21 +337,82 @@ function iced.measure(content, props)
 	return { kind = "measure", content = content, id = id }
 end
 
+local function copy(value, seen)
+	if type(value) ~= "table" then return value end
+	seen = seen or {}
+	if seen[value] then return seen[value] end
+	local result = {}
+	seen[value] = result
+	for key, field in pairs(value) do result[copy(key, seen)] = copy(field, seen) end
+	return result
+end
+
 function iced.define(name, factory)
 	assert(type(name) == "string" and name:match("^[%a_][%w_]*$"), "widget name must be a valid identifier")
-	assert(type(factory) == "function", "widget factory must be a function")
-	assert(rawget(iced, name) == nil or defined[name], "widget already exists: " .. name)
+	assert(type(factory) == "function", "definition factory must be a function")
+	assert(rawget(iced, name) == nil or defined[rawget(iced, name)], "widget already exists: " .. name)
 	local widget = factory()
-	assert(type(widget) == "table", "widget factory must return a table")
-	local view = widget.view or widget.render
-	assert(type(view) == "function", "custom widget needs a view or render method")
-	defined[name] = true
+	assert(widget ~= nil, "definition factory must return a value")
+	local view = type(widget) == "table" and (widget.view or widget.render)
+	if type(view) ~= "function" then
+		local value = copy(widget)
+		iced[name] = function() return copy(value) end
+		defined[iced[name]] = "value"
+		return
+	end
 	iced[name] = function(props)
 		assert(props == nil or type(props) == "table", "widget props must be a table")
 		props = props or {}
 		local node = animations.render("widget:" .. name .. ":" .. tostring(props.id or name), widget, props)
 		return node
 	end
+	defined[iced[name]] = "widget"
+end
+
+local function array(value)
+	for key in pairs(value) do
+		if type(key) == "number" then return true end
+	end
+	return false
+end
+
+local function merge(target, overrides, active)
+	active = active or {}
+	assert(not active[overrides], "transition overrides must not contain cycles")
+	active[overrides] = true
+	for key, value in pairs(overrides) do
+		if key ~= "props" and type(value) == "table" and type(target[key]) == "table"
+			and not array(value) and not array(target[key]) then
+			target[key] = merge(copy(target[key]), value, active)
+		else
+			target[key] = copy(value)
+		end
+	end
+	active[overrides] = nil
+	return target
+end
+
+function iced.transition(preset, overrides)
+	if type(preset) == "string" then
+		local constructor = iced[preset]
+		assert(constructor ~= nil, "unknown transition: " .. preset)
+		assert(defined[constructor] == "value", "transition must name a value definition: " .. preset)
+		preset = constructor()
+	end
+	assert(type(preset) == "table", "transition preset must be a table")
+	assert(overrides == nil or type(overrides) == "table", "transition overrides must be a table")
+	local result = merge(copy(preset), overrides or {})
+	local duration, easing, spring = result.duration, result.easing, result.spring
+	assert(easing == nil or spring == nil, "transition takes easing or spring, not both")
+	result.duration, result.easing, result.spring = nil, nil, nil
+	for event, config in pairs(result) do
+		assert(type(event) == "string" and event ~= "" and type(config) == "table", "transition must be an event table")
+		if config.duration == nil then config.duration = duration end
+		if config.easing == nil then config.easing = easing end
+		if config.spring == nil then config.spring = spring end
+		assert(config.easing == nil or config.spring == nil, "transition takes easing or spring, not both")
+	end
+	return result
 end
 
 

@@ -2416,6 +2416,49 @@ mod tests {
     }
 
     #[test]
+    fn named_transitions_lazy_load_reload_and_restore_after_rejection() {
+        let preset = r#"iced.define('fade', function()
+            return {duration = 180, easing = 'out', enter = {from = {scale = 0}}, change = {props = {'width'}}}
+        end)"#;
+        let profile = Profile::new(&[("shell.lua", ""), ("presets/fade.lua", preset)]);
+        let mut app = load(
+            r#"
+            return riced.daemon({}, 'test', function() end, function()
+                local transition = iced.transition('fade')
+                seen = transition.enter.duration
+                return iced.container(iced.text('hello'), {id = 'card', width = 80, transition = transition})
+            end):run()
+            "#,
+            &profile.shell(),
+        )
+        .unwrap();
+        let id = window::Id::unique();
+        app.view(id).unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("seen").unwrap(), 180);
+
+        profile.write("presets/fade.lua", &preset.replace("180", "90"));
+        app.reload_modules().unwrap();
+        app.view(id).unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("seen").unwrap(), 90);
+
+        for broken in [
+            preset.replace("180", "0"),
+            preset.replace("'out'", "'invalid'"),
+            preset.replace("{'width'}", "{'unsupported'}"),
+            "iced.define('fade', function() return {view = function() return iced.text('wrong kind') end} end)".into(),
+        ] {
+            profile.write("presets/fade.lua", &broken);
+            assert!(app.reload_modules().is_err());
+            app.view(id).unwrap();
+            assert_eq!(app.lua.globals().get::<u32>("seen").unwrap(), 90);
+        }
+        profile.write("presets/fade.lua", &preset.replace("180", "60"));
+        app.reload_modules().unwrap();
+        app.view(id).unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("seen").unwrap(), 60);
+    }
+
+    #[test]
     fn extension_widget_loads_from_a_symlink_and_reloads() {
         let source = include_str!("../extensions/lucide/lucide.lua");
         let extension = Profile::new(&[("lucide.lua", source)]);

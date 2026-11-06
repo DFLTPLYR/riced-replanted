@@ -3,6 +3,15 @@
 
 local wayland = {}
 
+iced.define("workspace_motion", function()
+	return {
+		duration = 180,
+		enter = { from = { x = -180, scale = 0 } },
+		exit = { duration = 120, to = { x = -180, scale = 0 } },
+		displaced = {},
+	}
+end)
+
 function wayland.view()
 	local plugin = riced.plugin("wayland")
 	local focused = plugin.focused or {}
@@ -11,11 +20,7 @@ function wayland.view()
 		key = "id",
 		spacing = 4,
 		direction = "horizontal",
-		transition = {
-			enter = { duration = 180, from = { x = -180, scale = 0 } },
-			exit = { duration = 120, to = { x = -180, scale = 0 } },
-			displaced = { duration = 180 },
-		},
+		transition = iced.transition("workspace_motion"),
 		render = function(workspace, index)
 			local can_activate = false
 			for _, capability in ipairs(workspace.capabilities or {}) do
