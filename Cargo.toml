@@ -7,6 +7,7 @@ members = [
   "extensions/dbus",
   "extensions/themeagen",
   "extensions/lucide",
+  "extensions/openmeteo",
 ]
 resolver = "3"
 

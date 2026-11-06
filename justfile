@@ -69,3 +69,8 @@ extension-lucide:
     install -Dm755 target/release/riced-lucide "{{ home_directory() }}/.config/riced/test/extensions/lucide/riced-lucide"
     install -Dm644 extensions/lucide/lucide.lua "{{ home_directory() }}/.config/riced/test/extensions/lucide/lucide.lua"
 
+# Build the Open-Meteo weather extension and its Lua widget
+extension-openmeteo:
+    {{nix}} cargo build --release -p riced-extension-openmeteo
+    install -Dm755 target/release/riced-openmeteo "{{ home_directory() }}/.config/riced/test/extensions/openmeteo/riced-openmeteo"
+    install -Dm644 extensions/openmeteo/openmeteo.lua "{{ home_directory() }}/.config/riced/test/extensions/openmeteo/openmeteo.lua"

@@ -2483,6 +2483,97 @@ mod tests {
     }
 
     #[test]
+    fn openmeteo_widget_configures_on_connect_and_marks_stale_weather() {
+        let profile = Profile::new(&[
+            ("shell.lua", ""),
+            (
+                "extensions/openmeteo/openmeteo.lua",
+                include_str!("../extensions/openmeteo/openmeteo.lua"),
+            ),
+        ]);
+        let app = load(
+            r#"
+            weather = require('extensions.openmeteo.openmeteo')
+            weather.configure(52.52, 13.41)
+            return riced.daemon({}, 'test', function() end, function()
+                node = iced.openmeteo({ size = 18 })
+                return node
+            end):run()
+        "#,
+            &profile.shell(),
+        )
+        .unwrap();
+        let id = window::Id::unique();
+        app.view(id).unwrap();
+        app.lua
+            .load(
+                r#"
+            assert(node.content == 'Weather unavailable')
+            ext = weather.plugin
+            ext.alive = true
+            calls = 0
+            ext.configure = function(latitude, longitude)
+                assert(latitude == 52.52 and longitude == 13.41)
+                calls = calls + 1
+            end
+        "#,
+            )
+            .exec()
+            .unwrap();
+        app.view(id).unwrap();
+        app.view(id).unwrap();
+        app.lua
+            .load(
+                r#"
+            assert(calls == 1 and node.content == 'Loading weather…')
+            ext.latitude, ext.longitude = 52.52, 13.41
+            ext.ready = true
+            ext.current = { temperature_2m = 12.5 }
+        "#,
+            )
+            .exec()
+            .unwrap();
+        app.view(id).unwrap();
+        app.lua
+            .load("assert(node.content == '12.5°C' and node.size == 18); ext.error = 'offline'")
+            .exec()
+            .unwrap();
+        app.view(id).unwrap();
+        app.lua
+            .load("assert(node.content == '12.5°C (stale)'); ext.error = nil; ext.alive = false")
+            .exec()
+            .unwrap();
+        app.view(id).unwrap();
+        app.lua
+            .load(
+                r#"
+            assert(node.content == '12.5°C (stale)' and calls == 1)
+            ext.alive = true
+            ext.configure = function() calls = calls + 1 end
+        "#,
+            )
+            .exec()
+            .unwrap();
+        app.view(id).unwrap();
+        app.lua
+            .load(
+                r#"
+            assert(calls == 2)
+            weather.configure(0, 0)
+            assert(not pcall(weather.configure, 91, 0))
+            assert(not pcall(weather.configure, 0, 0/0))
+        "#,
+            )
+            .exec()
+            .unwrap();
+        app.view(id).unwrap();
+        app.lua
+            .load("assert(node.content == 'Loading weather…' and calls == 3)")
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
     fn extension_widgets_cannot_replace_builtin_widgets() {
         let profile = Profile::new(&[
             ("shell.lua", ""),
