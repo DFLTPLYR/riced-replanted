@@ -1,6 +1,7 @@
 mod file;
 mod ipc;
 mod layers;
+mod logs;
 mod lua;
 mod modules;
 mod plugins;
@@ -14,6 +15,7 @@ use std::{
     path::{Component, Path, PathBuf},
     process::ExitCode,
     rc::Rc,
+    time::Duration,
 };
 
 use clap::{Args, Parser, Subcommand};
@@ -29,6 +31,12 @@ use clap::{Args, Parser, Subcommand};
 struct Cli {
     #[command(flatten)]
     config: ConfigArgs,
+    /// Mirror logs to stderr; records are always stored for `riced logs`
+    #[arg(long)]
+    logs: bool,
+    /// Seconds to keep stored logs; 0 keeps them until cleared
+    #[arg(long, value_name = "SECONDS", default_value_t = 30)]
+    log_retention: u64,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -53,6 +61,14 @@ enum Command {
         /// Command name followed by arguments passed unchanged to its Lua handler
         #[arg(required = true, num_args = 1.., trailing_var_arg = true, value_name = "COMMAND")]
         command: Vec<String>,
+    },
+    /// Print stored logs, or clear them with --clear
+    Logs {
+        #[command(flatten)]
+        config: ConfigArgs,
+        /// Remove stored logs instead of printing them
+        #[arg(long)]
+        clear: bool,
     },
 }
 
@@ -88,18 +104,32 @@ impl ConfigArgs {
     }
 }
 
+fn selected_profile(config: &ConfigArgs) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if config.path.is_some() || config.config.is_some() {
+        Ok(Some(ipc::profile_id(&config.directory()?)?))
+    } else {
+        Ok(None)
+    }
+}
+
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(Command::Ipc { config, command }) = cli.command {
-        let (command, args) = command.split_first().ok_or("missing IPC command")?;
-        if command.is_empty() {
-            return Err("IPC command must not be empty".into());
+    if let Some(command) = cli.command {
+        match command {
+            Command::Ipc { config, command } => {
+                let (command, args) = command.split_first().ok_or("missing IPC command")?;
+                if command.is_empty() {
+                    return Err("IPC command must not be empty".into());
+                }
+                ipc::queue(selected_profile(&config)?.as_deref(), command, args)?;
+            }
+            Command::Logs { config, clear } => {
+                let profile = match selected_profile(&config)? {
+                    Some(profile) => profile,
+                    None => ipc::running_profile()?,
+                };
+                logs::show(&profile, clear)?;
+            }
         }
-        let profile = if config.path.is_some() || config.config.is_some() {
-            Some(ipc::profile_id(&config.directory()?)?)
-        } else {
-            None
-        };
-        ipc::queue(profile.as_deref(), command, args)?;
         return Ok(());
     }
     let directory = cli.config.directory()?;
@@ -109,17 +139,22 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Extensions and module reloads must keep resolving from this directory.
     let path = directory.canonicalize()?.join("shell.lua");
     let plugins = Rc::new(RefCell::new(plugins::Plugins::start(&path)?));
+    logs::start(
+        &ipc::profile_id(&directory)?,
+        (cli.log_retention > 0).then(|| Duration::from_secs(cli.log_retention)),
+        cli.logs,
+    )?;
     runtime::load_with_plugins(&source, &path, plugins)?.run()?;
     Ok(())
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let _ = riced_extension_sdk::logging::init();
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            riced_extension_sdk::log::error!(target: "startup.error", "{error}");
+            // Fatal startup errors stay visible even when routine logs are quiet.
+            eprintln!("[startup.error]: {error}");
             ExitCode::FAILURE
         }
     }

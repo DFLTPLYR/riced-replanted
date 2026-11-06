@@ -38,7 +38,8 @@ impl Log for Logger {
     }
 }
 
-fn write_record(writer: &mut impl Write, record: &Record<'_>, color: bool) -> io::Result<()> {
+/// Writes one `[event]: information` record without a trailing flush.
+pub fn write_record(writer: &mut impl Write, record: &Record<'_>, color: bool) -> io::Result<()> {
     if color {
         let code = match record.level() {
             Level::Error => 31,

@@ -28,7 +28,7 @@ pub struct Command {
     pub args: Vec<String>,
 }
 
-fn runtime_dir() -> io::Result<PathBuf> {
+pub(crate) fn runtime_dir() -> io::Result<PathBuf> {
     env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .map(|path| path.join("riced"))
@@ -43,27 +43,34 @@ fn destination(root: &Path, profile: Option<&str>) -> io::Result<PathBuf> {
             UnixStream::connect(root.join(format!("{profile}.sock")))?;
             profile.to_owned()
         }
-        None => {
-            let mut profiles = Vec::new();
-            for entry in fs::read_dir(root)? {
-                let path = entry?.path();
-                if path.extension().is_some_and(|ext| ext == "sock")
-                    && UnixStream::connect(&path).is_ok()
-                    && let Some(name) = path.file_stem().and_then(|name| name.to_str())
-                {
-                    profiles.push(name.to_owned());
-                }
-            }
-            if profiles.len() != 1 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "expected one running profile; use riced ipc -c <name> or -p <directory> <command> [args...]",
-                ));
-            }
-            profiles.remove(0)
-        }
+        None => running_profile_at(root)?,
     };
     Ok(root.join("ipc").join(profile))
+}
+
+/// Returns the only running configuration, for commands without `-c` or `-p`.
+pub fn running_profile() -> io::Result<String> {
+    running_profile_at(&runtime_dir()?)
+}
+
+fn running_profile_at(root: &Path) -> io::Result<String> {
+    let mut profiles = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "sock")
+            && UnixStream::connect(&path).is_ok()
+            && let Some(name) = path.file_stem().and_then(|name| name.to_str())
+        {
+            profiles.push(name.to_owned());
+        }
+    }
+    if profiles.len() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected one running profile; use riced ipc -c <name> or -p <directory> <command> [args...]",
+        ));
+    }
+    Ok(profiles.remove(0))
 }
 
 pub fn queue(profile: Option<&str>, command: &str, args: &[String]) -> io::Result<()> {

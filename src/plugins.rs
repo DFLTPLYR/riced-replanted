@@ -1,13 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::{self, BufReader, Write},
+    io::{self, BufRead, BufReader, Write},
     os::unix::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -183,6 +183,7 @@ impl Plugins {
     /// Applies extension messages. Returns whether anything should be redrawn, plus events
     /// that the caller must feed into `app:update`.
     pub fn poll(&mut self, lua: &Lua) -> mlua::Result<(bool, Vec<Update>)> {
+        crate::logs::prune();
         if let Some(supervisor) = &mut self.supervisor {
             supervisor.poll();
         }
@@ -778,9 +779,22 @@ impl Supervisor {
             .current_dir(path.parent().unwrap_or(Path::new(".")))
             .env("RICED_SOCKET", &self.socket)
             .env("RICED_PROFILE", &self.profile)
+            .stderr(Stdio::piped())
             .spawn();
         match result {
-            Ok(child) => {
+            Ok(mut child) => {
+                if let Some(stderr) = child.stderr.take() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    let _ = thread::Builder::new()
+                        .name(format!("riced-log-{name}"))
+                        .stack_size(128 * 1024)
+                        .spawn(move || {
+                            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                                let (target, message) = extension_line(&line);
+                                crate::logs::external(target, message);
+                            }
+                        });
+                }
                 log::info!(target: "extension.started", "started extension {}", path.display());
                 entry.child = Some(child);
                 entry.started = Instant::now();
@@ -803,6 +817,12 @@ impl Supervisor {
         }
         self.children.clear();
     }
+}
+
+fn extension_line(line: &str) -> (&str, &str) {
+    line.strip_prefix('[')
+        .and_then(|line| line.split_once("]: "))
+        .unwrap_or(("extension", line))
 }
 
 fn scan(dir: &Path) -> Vec<PathBuf> {
@@ -1331,5 +1351,14 @@ mod tests {
         }
         assert!(valid_name("system"));
         assert!(valid_name("my-plugin_2"));
+    }
+
+    #[test]
+    fn extension_lines_keep_their_event_target() {
+        assert_eq!(
+            extension_line("[dbus.connected]: connected"),
+            ("dbus.connected", "connected")
+        );
+        assert_eq!(extension_line("raw warning"), ("extension", "raw warning"));
     }
 }

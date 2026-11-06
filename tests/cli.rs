@@ -50,7 +50,7 @@ fn lua_log_uses_shared_stderr_logging_and_lua_tostring() {
     let output = Command::new(env!("CARGO_BIN_EXE_riced"))
         .env("XDG_CONFIG_HOME", &directory)
         .env("XDG_RUNTIME_DIR", &directory)
-        .args(["-c", "test"])
+        .args(["--logs", "-c", "test"])
         .output()
         .unwrap();
     std::fs::remove_dir_all(directory).unwrap();
@@ -89,7 +89,7 @@ fn lua_log_table_formats_nested_tables() {
     let output = Command::new(env!("CARGO_BIN_EXE_riced"))
         .env("XDG_CONFIG_HOME", &directory)
         .env("XDG_RUNTIME_DIR", &directory)
-        .args(["-c", "test"])
+        .args(["--logs", "-c", "test"])
         .output()
         .unwrap();
     std::fs::remove_dir_all(directory).unwrap();
@@ -198,6 +198,121 @@ fn help_does_not_require_configuration_or_compositor() {
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("--config <NAME>"), "{help}");
     assert!(help.contains("--path <DIRECTORY>"), "{help}");
+    assert!(help.contains("--logs"), "{help}");
+    assert!(help.contains("--log-retention"), "{help}");
+    let logs = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .args(["logs", "--help"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&logs.stdout).contains("--clear"));
+}
+
+#[test]
+fn logs_are_hidden_by_default_and_available_on_request() {
+    let directory =
+        std::path::PathBuf::from(format!("/tmp/opencode/riced-logs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let profile = directory.join("riced/test");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(
+        profile.join("shell.lua"),
+        r#"log("stored diagnostic\nsecond line\n\nlast line"); error("logs test complete")"#,
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_riced"))
+            .env("XDG_CONFIG_HOME", &directory)
+            .env("XDG_RUNTIME_DIR", &directory)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let quiet = run(&["-c", "test"]);
+    assert!(!quiet.status.success());
+    assert!(!String::from_utf8_lossy(&quiet.stderr).contains("[lua]: stored diagnostic"));
+
+    let mirrored = run(&["--logs", "-c", "test"]);
+    assert!(!mirrored.status.success());
+    assert!(String::from_utf8_lossy(&mirrored.stderr).contains("[lua]: stored diagnostic"));
+
+    let stored = run(&["logs", "-c", "test"]);
+    assert!(stored.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&stored.stdout),
+        "[lua]: stored diagnostic\nsecond line\n\nlast line\n"
+    );
+
+    let cleared = run(&["logs", "-c", "test", "--clear"]);
+    assert!(cleared.status.success());
+    let empty = run(&["logs", "-c", "test"]);
+    assert!(empty.status.success());
+    assert!(empty.stdout.is_empty());
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn rejected_duplicate_start_preserves_running_logs() {
+    let directory = std::path::PathBuf::from(format!(
+        "/tmp/opencode/riced-duplicate-logs-{}",
+        std::process::id()
+    ));
+    let profile = directory.join("profile");
+    let logs = directory.join("riced/logs");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::write(profile.join("shell.lua"), "error('must not load')").unwrap();
+    let id = profile_id(&profile);
+    let _listener =
+        std::os::unix::net::UnixListener::bind(directory.join(format!("riced/{id}.sock"))).unwrap();
+    let path = logs.join(format!("{id}.log"));
+    let contents = "123 [lua]: active daemon diagnostic\n";
+    std::fs::write(&path, contents).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env("XDG_RUNTIME_DIR", &directory)
+        .arg("-p")
+        .arg(&profile)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already in use"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn clearing_logs_waits_for_an_in_progress_prune() {
+    let directory = std::path::PathBuf::from(format!(
+        "/tmp/opencode/riced-clear-lock-{}",
+        std::process::id()
+    ));
+    let profile = directory.join("profile");
+    let logs = directory.join("riced/logs");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::create_dir_all(&logs).unwrap();
+    let path = logs.join(format!("{}.log", profile_id(&profile)));
+    std::fs::write(&path, "1 expired\n2 retained\n").unwrap();
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.lock().unwrap();
+
+    let mut clear = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env("XDG_RUNTIME_DIR", &directory)
+        .args(["logs", "--clear", "-p"])
+        .arg(&profile)
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let waiting = clear.try_wait().unwrap().is_none();
+    // Finish the daemon's locked rewrite after the CLI has requested a clear.
+    file.set_len(0).unwrap();
+    std::io::Write::write_all(&mut file, b"2 retained\n").unwrap();
+    file.unlock().unwrap();
+    assert!(clear.wait().unwrap().success());
+    assert!(waiting, "clear finished before pruning released its lock");
+    assert!(std::fs::read(&path).unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -277,6 +392,7 @@ fn clap_rejects_invalid_selectors_and_reports_version() {
         vec!["--unknown"],
         vec!["ipc", "-c", "test", "-p", "/other", "settings"],
         vec!["ipc"],
+        vec!["logs", "-c", "test", "-p", "/other"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_riced"))
             .env_remove("HOME")
