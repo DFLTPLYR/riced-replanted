@@ -543,7 +543,15 @@ fn listen(socket: &Path) -> io::Result<(Receiver<Incoming>, Arc<AtomicBool>)> {
     }
     // Discard requests for the previous instance before clients can connect.
     if let (Some(parent), Some(profile)) = (socket.parent(), socket.file_stem()) {
+        let profile = profile.to_str().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid profile socket name")
+        })?;
         match fs::remove_dir_all(parent.join("ipc").join(profile)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        match fs::remove_file(parent.join(format!("{profile}.profile"))) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),

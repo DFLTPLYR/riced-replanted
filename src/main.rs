@@ -12,8 +12,9 @@ mod widgets;
 use std::{
     cell::RefCell,
     env,
+    io::{BufRead, BufReader},
     path::{Component, Path, PathBuf},
-    process::ExitCode,
+    process::{Command as ProcessCommand, ExitCode, Stdio},
     rc::Rc,
     time::Duration,
 };
@@ -70,6 +71,29 @@ enum Command {
         #[arg(long)]
         clear: bool,
     },
+    /// Build and package a Rust extension
+    Extension {
+        /// Required subcommand
+        #[command(subcommand)]
+        command: ExtensionCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExtensionCommand {
+    /// Build a Rust extension and copy it into an output directory
+    Build {
+        /// Extension package directory, relative to the current directory
+        #[arg(value_name = "EXTENSION", id = "extension")]
+        path: PathBuf,
+        /// Required subcommand
+        #[command(flatten)]
+        config: ConfigArgs,
+        /// Copy the executable and Lua companions into this directory. Without
+        /// -o and without -c or -p, use the running profile's extensions directory.
+        #[arg(short, long, value_name = "OUTPUT")]
+        output: Option<PathBuf>,
+    },
 }
 
 fn config_name(value: &str) -> Result<String, String> {
@@ -81,6 +105,18 @@ fn config_name(value: &str) -> Result<String, String> {
 }
 
 impl ConfigArgs {
+    fn extensions_dir(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let directory = if self.config.is_some() || self.path.is_some() {
+            self.directory()?
+        } else {
+            let shell = ipc::running_shell().map_err(|_| {
+                "no running profile with a recorded shell path; use -o <output-path>, -c <name>, -p <directory>, or start riced first"
+            })?;
+            shell.parent().unwrap().to_path_buf()
+        };
+        Ok(directory.join("extensions"))
+    }
+
     fn directory(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
         if let Some(path) = &self.path {
             if path.as_os_str().is_empty() {
@@ -102,6 +138,162 @@ impl ConfigArgs {
                 .join(self.config.as_deref().unwrap_or("")),
         )?)
     }
+}
+
+fn build_extension(
+    config: &ConfigArgs,
+    path: &Path,
+    output: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if path.as_os_str().is_empty() || output.is_some_and(|output| output.as_os_str().is_empty()) {
+        return Err("extension and output paths must not be empty".into());
+    }
+    let path = std::path::absolute(path)?;
+    let output = match output {
+        Some(output) => std::path::absolute(output)?,
+        None => config.extensions_dir()?,
+    };
+    let manifest = path.join("Cargo.toml");
+    let metadata: PackageMetadata = serde_json::from_value(cargo_metadata(&manifest)?)?;
+    let package = metadata
+        .packages
+        .iter()
+        .find(|package| package.manifest_path == manifest)
+        .ok_or_else(|| format!("{} is not a Cargo package directory", path.display()))?;
+    let targets: Vec<&TargetMetadata> = package
+        .targets
+        .iter()
+        .filter(|target| target.kind == ["bin"])
+        .collect();
+    if targets.is_empty() {
+        return Err(format!("{} does not contain a Cargo binary", path.display()).into());
+    }
+    if targets.len() > 1 {
+        return Err(format!(
+            "{} contains multiple Cargo binaries; split each extension into its own package",
+            path.display()
+        )
+        .into());
+    }
+    let target = targets[0];
+
+    let mut child = ProcessCommand::new("cargo")
+        .args(["build", "--release", "--message-format=json"])
+        .arg("--bin")
+        .arg(&target.name)
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let child_stdout = child.stdout.take().ok_or("cargo build stdout is missing")?;
+    let mut executable = None;
+    for line in BufReader::new(child_stdout).lines() {
+        let line = line?;
+        if !line.starts_with('{') {
+            eprintln!("{line}");
+            continue;
+        }
+        let message: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(message) => message,
+            Err(_) => continue,
+        };
+        if message["reason"] == "compiler-artifact"
+            && message["target"]["name"] == target.name
+            && message["filenames"]
+                .as_array()
+                .and_then(|filenames| {
+                    filenames.iter().find(|filename| {
+                        filename.as_str().is_some_and(|filename| {
+                            Path::new(filename)
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                == Some(target.name.as_str())
+                        })
+                    })
+                })
+                .is_some()
+        {
+            executable = message["filenames"].as_array().and_then(|filenames| {
+                filenames
+                    .iter()
+                    .filter_map(|filename| filename.as_str().map(str::to_owned))
+                    .find(|filename| {
+                        Path::new(filename)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            == Some(target.name.as_str())
+                    })
+            });
+        }
+    }
+    if !child.wait()?.success() {
+        return Err("cargo build failed".into());
+    }
+    let executable = executable.ok_or("cargo build did not produce the extension binary")?;
+
+    std::fs::create_dir_all(&output)?;
+    let destination = output.join(&target.name);
+    std::fs::copy(executable, &destination)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o755))?;
+    }
+    for entry in std::fs::read_dir(&path)? {
+        let entry = entry?;
+        let source = entry.path();
+        if source.is_file()
+            && source
+                .extension()
+                .is_some_and(|extension| extension == "lua")
+        {
+            std::fs::copy(&source, output.join(source.file_name().unwrap()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    output.join(source.file_name().unwrap()),
+                    std::fs::Permissions::from_mode(0o644),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PackageMetadata {
+    packages: Vec<MetadataPackage>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MetadataPackage {
+    manifest_path: PathBuf,
+    targets: Vec<TargetMetadata>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TargetMetadata {
+    name: String,
+    kind: Vec<String>,
+}
+
+fn cargo_metadata(manifest: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let output = ProcessCommand::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .arg("--manifest-path")
+        .arg(manifest)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "cannot read extension package {}: {}",
+            manifest.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
 }
 
 fn selected_profile(config: &ConfigArgs) -> Result<Option<String>, Box<dyn std::error::Error>> {
@@ -129,6 +321,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 };
                 logs::show(&profile, clear)?;
             }
+            Command::Extension { command } => match command {
+                ExtensionCommand::Build {
+                    config,
+                    path,
+                    output,
+                } => build_extension(&config, &path, output.as_deref())?,
+            },
         }
         return Ok(());
     }
@@ -139,6 +338,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Extensions and module reloads must keep resolving from this directory.
     let path = directory.canonicalize()?.join("shell.lua");
     let plugins = Rc::new(RefCell::new(plugins::Plugins::start(&path)?));
+    // After Plugins::start clears stale runtime state for this profile.
+    ipc::record_running_shell(&ipc::profile_id(&directory)?, &path)?;
     logs::start(
         &ipc::profile_id(&directory)?,
         (cli.log_retention > 0).then(|| Duration::from_secs(cli.log_retention)),

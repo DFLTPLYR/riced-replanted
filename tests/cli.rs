@@ -382,6 +382,53 @@ fn default_named_and_explicit_directories_load_their_own_shells() {
 }
 
 #[test]
+fn extension_build_requires_an_output_or_running_profile() {
+    for args in [
+        vec!["extension", "build"],
+        vec!["extension", "build", "./path"],
+        vec!["extension", "build", "-o", "./output"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+            .env_remove("XDG_RUNTIME_DIR")
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?}: {output:?}");
+    }
+    let missing_output = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env_remove("XDG_RUNTIME_DIR")
+        .args(["extension", "build", "./path"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&missing_output.stderr).contains("-o"),
+        "{}",
+        String::from_utf8_lossy(&missing_output.stderr)
+    );
+}
+
+#[test]
+fn extension_build_rejects_invalid_arguments() {
+    for args in [
+        vec!["extension", "build", "-c", "test", "-p", "/other", "./path"],
+        vec!["extension", "build", "./path", "-o", ""],
+        vec!["extension", "build", "", "-o", "./output"],
+        vec!["extension", "build", "--unknown"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn clap_rejects_invalid_selectors_and_reports_version() {
     for args in [
         vec!["-c", "test", "-p", "/other"],

@@ -45,5 +45,6 @@ iced = { version = "0.14.0", features = [
 iced_anim = { version = "0.3.1", features = ["derive"] }
 iced_exwlshell = "0.20.1"
 riced-extension-sdk = { path = "crates/riced-extension-sdk", default-features = false }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

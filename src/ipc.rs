@@ -28,6 +28,53 @@ pub struct Command {
     pub args: Vec<String>,
 }
 
+/// Stores the canonical `shell.lua` path for `profile`, so commands running
+/// beside a daemon can install into the profile it is supervising.
+pub fn record_running_shell(profile: &str, shell: &Path) -> io::Result<()> {
+    record_running_shell_at(&runtime_dir()?, profile, shell)
+}
+
+fn record_running_shell_at(root: &Path, profile: &str, shell: &Path) -> io::Result<()> {
+    fs::create_dir_all(root)?;
+    fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+    let path = root.join(format!("{profile}.profile"));
+    let temporary = root.join(format!(".{profile}.profile.tmp-{}", process::id()));
+    fs::write(&temporary, shell.as_os_str().as_encoded_bytes())?;
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+    fs::rename(&temporary, &path)
+}
+
+/// Returns the only live daemon's `shell.lua`, rejecting stale runtime records.
+pub fn running_shell() -> io::Result<PathBuf> {
+    running_shell_at(&runtime_dir()?)
+}
+
+fn running_shell_at(root: &Path) -> io::Result<PathBuf> {
+    let profile = running_profile_at(root)?;
+    let path = root.join(format!("{profile}.profile"));
+    let shell = fs::read_to_string(&path).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "running profile location is missing",
+        )
+    })?;
+    let directory = Path::new(&shell).parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "recorded shell path has no parent",
+        )
+    })?;
+    if profile_id(directory)? != profile
+        || Path::new(&shell).file_name().and_then(|name| name.to_str()) != Some("shell.lua")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "running profile location is stale; restart the daemon",
+        ));
+    }
+    Ok(PathBuf::from(shell))
+}
+
 pub(crate) fn runtime_dir() -> io::Result<PathBuf> {
     env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -175,6 +222,47 @@ mod tests {
         );
         assert_eq!(take_from(&dir), None);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn running_shell_resolves_the_profile_started_by_the_daemon() {
+        use std::os::unix::net::UnixListener;
+
+        let root = env::temp_dir().join(format!(
+            "riced-running-{}-{}",
+            process::id(),
+            TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        let profile_dir = root.join("config");
+        fs::create_dir_all(&profile_dir).unwrap();
+        let profile = profile_id(&profile_dir).unwrap();
+        let shell = profile_dir.join("shell.lua");
+        record_running_shell_at(&root, &profile, &shell).unwrap();
+        let _socket = UnixListener::bind(root.join(format!("{profile}.sock"))).unwrap();
+
+        assert_eq!(running_shell_at(&root).unwrap(), shell);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn running_shell_rejects_records_that_do_not_match_the_live_socket() {
+        use std::os::unix::net::UnixListener;
+
+        let root = env::temp_dir().join(format!(
+            "riced-running-stale-{}-{}",
+            process::id(),
+            TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        let started = root.join("started");
+        let recorded = root.join("recorded");
+        fs::create_dir_all(&started).unwrap();
+        fs::create_dir_all(&recorded).unwrap();
+        let profile = profile_id(&started).unwrap();
+        record_running_shell_at(&root, &profile, &recorded.join("shell.lua")).unwrap();
+        let _socket = UnixListener::bind(root.join(format!("{profile}.sock"))).unwrap();
+
+        assert!(running_shell_at(&root).is_err());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
