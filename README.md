@@ -232,13 +232,14 @@ application event to Lua.
 | Daemon builder and callbacks | [`riced.daemon`](API.md#riceddaemon) |
 | IPC commands | [`riced.ipc`](API.md#ricedipc) |
 | Theme and window style | [`config` and `theme`](API.md#config-and-theme) |
+| Icon theme lookup and installed fonts | [Icon themes](API.md#icon-themes-and-lookup), [Fonts](API.md#fonts) |
 | JSON/TOML files with save callbacks | [`riced.file`](API.md#ricedfile) |
 | Extension stores, methods, events | [Plugins and extensions](API.md#plugins-and-extensions) |
 | All widget constructors and props | [Widget reference](API.md#widget-reference) |
 | Widget events and styles | [Widget events](API.md#widget-events), [Styles](API.md#styles) |
 | Tasks and subscriptions | [Tasks](API.md#tasks), [Subscriptions](API.md#subscriptions) |
 | Animations | [Property transitions](API.md#property-transitions) |
-| Reusable widgets and watched components | [Custom widgets](API.md#custom-widgets), [Components](API.md#components) |
+| Reusable widgets, transitions, and easing aliases | [Custom widgets](API.md#custom-widgets), [Named values](API.md#named-values-and-transitions), [Components](API.md#components) |
 | Layer surfaces and click-through regions | [`iced.layer`](API.md#icedlayercontent-settings), [`iced.region`](API.md#icedregioncontent) |
 | Native windows | [`iced.window`](API.md#native-windows) |
 | Known limits | [Known limits](API.md#known-limits) |

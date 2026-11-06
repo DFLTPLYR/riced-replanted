@@ -86,6 +86,52 @@ Styles: `normal`, `italic`, `oblique`.
 Stretches: `ultra_condensed`, `extra_condensed`, `condensed`, `semi_condensed`,
 `normal`, `semi_expanded`, `expanded`, `extra_expanded`, `ultra_expanded`.
 
+`iced.fonts()` returns a sorted, unique array of family names from the renderer's
+font database. It includes system fonts and any fonts already loaded into the
+renderer. Pass a returned name as the `font` prop.
+
+### Icon themes and lookup
+
+Set `iced.icon_theme` to an installed theme's **directory name**. Every
+`iced.icon_path` call reads the current value; changing it affects the next view
+rebuild. It defaults to `"hicolor"` and does not change the desktop's GTK settings.
+`iced.icon_themes()` returns a sorted, unique array of installed theme directory
+names, suitable for assigning to `iced.icon_theme`.
+
+```lua
+iced.icon_theme = "Papirus-Dark"
+local themes = iced.icon_themes()
+local path = iced.icon_path("firefox", { size = 24, scale = 1 })
+local icon = iced.text("?")
+if path then
+    local image = path:lower():match("%.svg$") and iced.svg or iced.image
+    icon = image(path, { width = 24, height = 24 })
+end
+```
+
+`iced.icon_path(name, options?)` returns an existing file path or nil:
+
+- `name`: an icon name (optionally ending in `.png`/`.svg`) or an absolute file path.
+- `size`: whole logical pixels, 1–4096; default 24.
+- `scale`: whole display scale, 1–16; default 1.
+- `path`: optional absolute application icon directory, such as a tray item's
+  `icon_theme_path`. Direct files in this directory take precedence over themed
+  icons. An empty directory string is treated as absent.
+
+Theme lookup searches `~/.icons`, `$XDG_DATA_HOME/icons` (default
+`~/.local/share/icons`), and each `$XDG_DATA_DIRS/icons` (default
+`/usr/local/share/icons:/usr/share/icons`). It honors fixed/scalable/threshold
+sizes and scale, then chooses the nearest size in that theme. Inherited themes
+are searched in order, with cycle protection, followed by `hicolor`, unthemed
+icons, and the corresponding XDG `pixmaps` directories. This includes Nix
+profile paths when present in `XDG_DATA_DIRS`.
+
+Named lookup supports PNG and SVG. Absolute paths are returned unchanged if
+they exist; use a renderer that supports their format. Invalid arguments raise
+Lua errors. Results are cached by theme/name/size/scale/application directory;
+reload `shell.lua` after installing or replacing icons to refresh the cache.
+`iced.icon` continues to render a Lucide glyph; it is separate from theme lookup.
+
 ## riced API
 
 ### `log`
@@ -402,7 +448,7 @@ Extensions may push events. They arrive in `update` as:
 | ----------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- | ------ |
 | `system`    | `host`, `time`, `cpu`, `memory`, `disks`, `gpus`, `processes`                                    | none                                                                                                                | none   |
 | `wayland`   | `connected`, `capabilities`, `outputs`, `toplevels`, `workspaces`, `workspace_groups`, `focused` | `activate_toplevel`, `close_toplevel`, `activate_workspace`                                                         | none   |
-| `dbus`      | `connected`, `capabilities`, `tray`, `notifications`                                             | `activate_tray`, `secondary_activate_tray`, `context_menu_tray`, `close_notification`, `invoke_notification_action` | none   |
+| `dbus`      | `connected`, `capabilities`, `tray`, `tray_menu`, `notifications`                                 | `activate_tray`, `secondary_activate_tray`, `context_menu_tray`, `open_tray_menu`, `close_tray_menu`, `tray_menu_event`, `close_notification`, `invoke_notification_action` | none   |
 | `themeagen` | `ready`, `mode`, `source`, `colors`                                                              | `generate`, `populate`, `regenerate`                                                                                | none   |
 | `lucide`    | `count`                                                                                          | `resolve`, `exists`, `list`                                                                                           | none   |
 | `openmeteo` | `ready`, `latitude`, `longitude`, `current`, `current_units`, `timezone`, `updated_at`, `error` | `configure` | none |
@@ -411,7 +457,8 @@ All bundled extensions publish whole snapshots rather than pushing events.
 Each publish replaces the snapshot contents, so re-read a field in `view`
 instead of caching a nested table across updates; the proxy table itself stays
 live. Store reads are synchronous and subscribe to fields the first time Lua
-reads them. Methods are asynchronous and use positional arguments. `system` has no
+reads them. JSON `null` fields are exposed as `nil`, and `null` array entries are
+removed. Methods are asynchronous and use positional arguments. `system` has no
 methods. Wayland and D-Bus methods return no value on success, so their callback
 receives `(nil, nil)`; themeagen methods return a result table. On failure every
 method calls its callback with `(nil, error)`. Without a callback, method
@@ -724,7 +771,8 @@ Store fields:
 | --------------- | --------------------------------------------------------------------------------- |
 | `connected`     | boolean; session bus connection                                                   |
 | `capabilities`  | `{ tray = boolean, tray_host = boolean, notifications = boolean }`                |
-| `tray`          | array of `{ id, title, icon, status, menu, item_is_menu }`                        |
+| `tray`          | array of `{ id, title, icon, icon_theme_path, status, menu, item_is_menu }`                        |
+| `tray_menu`     | active menu `{ id, revision, items, error }`, or nil                                                |
 | `notifications` | array of `{ id, app_name, app_icon, summary, body, actions, timeout, timestamp }` |
 
 `capabilities.tray` means a StatusNotifier watcher is available.
@@ -741,13 +789,46 @@ Tray item fields:
 | -------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `id`           | Opaque string (`bus + object path`), for example `:1.42/StatusNotifierItem`; pass to methods                             |
 | `title`        | Item title, falling back to the item `Id`; clamped to 256 characters                                                     |
-| `icon`         | Freedesktop icon name, not a file path; clamped to 256 characters                                                        |
+| `icon`         | Sender's `IconName` (normally a Freedesktop icon name); clamped to 256 characters. Resolve with `iced.icon_path`. |
+| `icon_theme_path` | Sender's optional absolute `IconThemePath` directory, or nil; paths over 4096 bytes or containing NUL are ignored. |
 | `status`       | Raw StatusNotifier status such as `Active`, `Passive`, or `NeedsAttention`, clamped to 256 characters; default `Passive` |
 | `menu`         | D-Bus object path string or nil; `/` is treated as no menu                                                               |
 | `item_is_menu` | Whether activating the item should open the menu instead                                                                 |
 
 Tray properties are refreshed about every 500 ms. An item that fails to answer
 three times is removed from the store.
+
+Use `iced.icon_path(item.icon, { size = 24, path = item.icon_theme_path })` to
+resolve tray icons with the current `iced.icon_theme`. `IconPixmap`-only items
+still need a placeholder; raw tray pixmaps are not currently exposed.
+
+Tray menus use `com.canonical.dbusmenu`. Call `open_tray_menu(item.id)` while a
+popup is visible; the extension calls `AboutToShow` and `GetLayout`, then fills
+`tray_menu`. The active menu is refreshed about every 500 ms. Call
+`close_tray_menu()` when the popup closes. Menu entries look like:
+
+```lua
+{
+    id = 12,
+    label = "Open",
+    enabled = true,
+    type = "standard",      -- or "separator"
+    icon = "firefox",       -- icon-name, or nil
+    toggle = nil,           -- "checkmark" or "radio"
+    checked = false,
+    submenu = false,
+    children = {},          -- nested entries when submenu is true
+}
+```
+
+`tray_menu = { id, revision, items, error }`, where `id` is the tray item id.
+Hidden entries are omitted. Labels and icon names are clamped to 128 characters;
+menus are limited to 128 entries and 8 levels. Click a leaf with
+`tray_menu_event(item.id, entry.id, "clicked")`; use `"opened"`/`"closed"` when
+expanding a submenu. `icon-data` pixmaps are not exposed. If the item exports no
+`Menu` path, call `context_menu_tray(item.id)` and let the application draw its
+own menu. The menu API is a thin D-BusMenu bridge; rendering, submenu expansion,
+and popup sizing stay in Lua.
 
 Notification fields:
 
@@ -776,14 +857,19 @@ Methods:
 | `activate_tray(id)`                   | string          | Calls `Activate(0, 0)` on the tray item                                                              |
 | `secondary_activate_tray(id)`         | string          | Calls `SecondaryActivate(0, 0)` on the tray item                                                     |
 | `context_menu_tray(id)`               | string          | Calls `ContextMenu(0, 0)` on the tray item                                                           |
+| `open_tray_menu(id, callback?)`       | string          | Reads the item's `com.canonical.dbusmenu` layout into `tray_menu`; errors if it has no menu          |
+| `close_tray_menu()`                   | none            | Clears `tray_menu`; safe to call repeatedly                                                          |
+| `tray_menu_event(id, menu_id, event, callback?)` | string, integer, string | Sends `clicked`, `opened`, `closed`, or `hovered` for a menu item |
 | `close_notification(id)`              | integer         | Removes the notification if present and emits `NotificationClosed`; unknown ids are ignored          |
 | `invoke_notification_action(id, key)` | integer, string | Validates the action key, removes the notification, and emits `ActionInvoked` + `NotificationClosed` |
 
 Tray methods fail if the item id is unknown, the session bus is disconnected, or
 the D-Bus call fails. They use a one-second D-Bus method timeout.
-`invoke_notification_action` fails if the notification exists but the key is not
-one of its actions. A missing or unknown notification id is ignored. All methods
-return no value on success; use callbacks to observe errors.
+`open_tray_menu` also fails when the item exports no `Menu` path.
+`tray_menu_event` rejects unknown menu ids and events, and only the active menu
+is accepted. `invoke_notification_action` fails if the notification exists but
+the key is not one of its actions. A missing or unknown notification id is
+ignored. All methods return no value on success; use callbacks to observe errors.
 
 Snapshots are bounded by the protocol line limit. Tray text and notification
 names are clamped as shown; very large arrays may omit entries with a
@@ -1267,16 +1353,18 @@ There is no `z` coordinate. Iced layouts are two-dimensional; draw order comes
 from tree order, overlays, and layer levels. Output-global coordinates are also
 not exposed; bounds are surface-local.
 
-Use it to anchor a popup to a widget:
+Widgets with an `id` prop are measured automatically, so `iced.measure` is
+only needed to wrap content that has no id of its own. Popups can use the id
+directly instead of reading bounds:
 
 ```lua
-local bounds = iced.bounds("close_button")
-local anchor = bounds and {
-    x = bounds.x,
-    y = bounds.y + bounds.height,
-    width = bounds.width,
-    height = bounds.height,
-}
+iced.popup(iced.text("menu"), {
+    id = "menu",
+    parent = "bar",
+    width = 120,
+    height = 80,
+    anchor = "close_button",
+})
 ```
 
 #### `iced.table(content, props)`
@@ -1724,6 +1812,9 @@ Buttons: `left`, `right`, `middle`, `back`, `forward`, or `other`.
 ### Property transitions
 
 `transition` is a table keyed by event. Omit it to disable animations.
+Use `iced.transition("name", overrides)` to reuse a named preset, or
+`iced.transition({ duration = 180, enter = {}, exit = {} })` to share timing
+across events. See [named values and transitions](#named-values-and-transitions).
 `change` interpolates `width`, `height`, scalar `padding`, `size`/`color` (text),
 `spacing` (row/column), `value` (progress_bar), and the style fields
 `background`, `text_color`, `border`, and `shadow` on widgets that support them.
@@ -1824,8 +1915,9 @@ Legacy booleans, flat transition options, and list `onAdded`/`onRemoved`/
 returns the constructor. No top-level `require` and no fixed widget directory
 are needed. Two files with the same name are an error, and the file basename
 must match the widget name (`workspaces.lua` defines `iced.workspaces`). The
-factory runs when that file first loads and must return a prototype table with a `view`
-method (or a `render` function):
+factory runs once per definition. Returning a prototype table with a `view`
+method (or a `render` function) creates a widget; other non-nil returns create
+[named values](#named-values-and-transitions):
 
 ```lua
 iced.define("counted", function()
@@ -1842,12 +1934,71 @@ iced.counted({ count = self.count })
 ```
 
 The name must be a valid identifier and must not already exist on `iced`.
-Defining an existing custom widget again replaces it, so edits reload. If a
+Defining an existing custom definition again replaces it, so edits reload. If a
 reload fails, the previous definition is restored and the error is logged; the
 shell keeps running. The constructor takes only props. Events still go through
 `app:update`; there is no per-widget update callback. Build the element inside
 `view` when it reads live state or plugin store values. Use a component module
 for mounted widgets with lifecycle hooks.
+
+#### Named values and transitions
+
+`iced.define(name, factory)` also registers easing aliases, transition presets,
+styles, and other reusable values. Access them with `iced.name()`. The factory
+must return a non-nil value; `false` is valid. Tables are snapshotted at definition
+time and copied recursively on every call (without metatables); functions and
+userdata retain their identity. A table with a callable `view` or `render` is
+treated as a widget prototype. A returned element without those methods is a
+static value, without a custom widget's instance identity.
+
+```lua
+-- soft.lua
+iced.define("soft", function() return "ease_in_out" end)
+
+-- fade.lua
+iced.define("fade", function()
+    return {
+        duration = 150,
+        easing = iced.soft(),
+        enter = { from = { scale = 0 } },
+        exit = { to = { scale = 0 }, duration = 80 },
+        change = { props = { "width" } },
+    }
+end)
+
+-- In a view:
+iced.container(child, {
+    id = "panel",
+    transition = iced.transition("fade", {
+        duration = 90,
+        exit = { duration = 60 },
+    }),
+})
+```
+
+`iced.transition(preset, overrides?)` accepts a definition name or an inline table:
+
+- Names use the same lazy `<name>.lua` loader as widgets. Unknown names, widget
+  definitions, and non-table values are errors.
+- Overrides merge nested fields without mutating the preset or caller's tables.
+  Arrays and `props` replace whole values, including `props = {}`. Empty event
+  tables retain their existing fields; they do not remove events.
+- Root `duration`, `easing`, and `spring` become defaults for each existing event,
+  including `change`, `displaced`, and custom events. Event fields win. No events
+  are added automatically, and callbacks remain per-event.
+- `easing` and `spring` cannot coexist, including when inherited from the root.
+  Event timing can override the same kind of timing, but cannot switch between
+  easing and spring while inheriting the other.
+- The result is a fresh event table accepted by the existing animation parser.
+  Timing values, transforms, and widget-specific `change.props` are validated
+  when the widget is built.
+
+Use `easing = iced.soft()` for a named alias; `easing = "soft"` is not resolved.
+Easing aliases use the existing built-in curves; custom curve functions and
+cubic-bezier tables are not supported. Direct `transition = { ... }` tables keep
+their existing event-only syntax; root timing defaults require `iced.transition`.
+To observe redefinitions in a view, call `iced.name()` or `iced.transition("name")`
+there rather than caching their returned values in `shell.lua`.
 
 ### Components
 
@@ -1891,28 +2042,39 @@ to close it. The parent must be an `iced.layer` declared in the same view.
 
 ```lua
 function app:view()
-    return {
-        iced.layer(iced.text("bar"), { id = "bar", size = { width = 200, height = 30 } }),
-        iced.popup(iced.text("menu"), {
-            id = "menu",
-            visible = self.menu_open,
-            parent = "bar",
-            width = 180,
-            height = 120,
-            anchor = { x = 12, y = 30, width = 40, height = 30 },
+    return iced.layer(
+        iced.row({
+            iced.button(iced.text("Menu"), { id = "bar_button", on_press = "menu" }),
+            iced.popup(iced.text("menu"), {
+                id = "menu",
+                visible = self.menu_open,
+                width = 180,
+                height = 120,
+                anchor = "bar_button",
+                anchor_edge = iced.PopupAnchor.bottom,
+                gravity = iced.PopupGravity.bottom,
+            }),
         }),
-    }
+        { id = "bar", size = { width = 200, height = 30 } }
+    )
 end
 ```
+
+A popup nested anywhere in a layer or window content is hoisted to a
+surface automatically, so `app:view` can return only the layer. Its `parent`
+defaults to the containing layer. This also works inside custom widgets: return
+a row containing the popup from the widget's `view`. Popups returned from a
+`list_view` `render` callback are not hoisted; declare them as siblings of the
+list instead.
 
 | Key              | Values                                       | Default        |
 | ---------------- | -------------------------------------------- | -------------- |
 | `id`             | nonempty string                              | position-based |
 | `visible`        | boolean                                      | true           |
-| `parent`         | `iced.layer` id                              | required       |
+| `parent`         | `iced.layer` id                              | containing layer for nested popups; required at root |
 | `width`, `height`| number in 1..32768, rounded                  | required       |
 | `x`, `y`         | finite number, rounded                       | 0, 0           |
-| `anchor`         | `{ x, y, width, height }`, rounded            | none           |
+| `anchor`         | widget id string, or `{ x, y, width, height }` | none           |
 | `anchor_edge`    | `iced.PopupAnchor` value                     | `"bottom_left"`|
 | `gravity`        | `iced.PopupGravity` value                    | `"bottom_right"`|
 | `constraint_adjustment` | `iced.PopupConstraintAdjustment` value or list | flip and slide both axes |
@@ -1922,9 +2084,13 @@ end
 are relative to the parent layer surface and are used when `anchor` is absent.
 When `anchor` is absent, `(x, y)` acts as a 1x1 anchor rectangle, so
 `anchor_edge` and `gravity` still apply.
-`anchor` attaches the popup to a rectangle in the parent surface. To anchor to a
-widget, wrap it with `iced.measure` and pass `iced.bounds(id)` as shown in
-[`iced.measure`](#icedmeasurecontent-props). Popup ids share the surface-id namespace
+`anchor` attaches the popup to a rectangle in the parent surface. Pass a widget
+`id` to use that widget's measured bounds; any widget with an `id` prop is
+measured automatically, so `iced.measure` is not required. Until the target has
+been laid out once, the popup stays hidden; the first measurement rebuild opens
+it. The target should live on the popup's parent layer so both use the same
+surface coordinates. A `{ x, y, width, height }` table is also accepted for a
+rectangle that is not a widget. Popup ids share the surface-id namespace
 with layers and windows. The size is fixed; the popup does not measure or resize
 itself. Changing `width`, `height`, `x`, `y`, `anchor`, `anchor_edge`, `gravity`,
 or `constraint_adjustment` repositions the open popup; changing `parent` recreates

@@ -45,7 +45,7 @@ config = {}
 ---@field args any
 
 ---@class iced.ChangeTransition
----@field props? ("width"|"height"|"padding"|"size"|"spacing"|"color"|"value")[]
+---@field props? ("width"|"height"|"padding"|"size"|"spacing"|"color"|"value"|"background"|"text_color"|"border"|"shadow")[]
 ---@field duration? integer
 ---@field easing? "linear"|"ease"|"in"|"out"|"in_out"|"ease_in"|"ease_out"|"ease_in_out"
 ---@field spring? "smooth"|"snappy"|"bouncy"|"instant"
@@ -69,6 +69,20 @@ config = {}
 ---@field press? iced.EventTransition
 ---@field release? iced.EventTransition
 ---@field [string] iced.EventTransition
+
+---@class iced.TransitionPreset
+---@field duration? integer Shared timing; event fields take precedence.
+---@field easing? "linear"|"ease"|"in"|"out"|"in_out"|"ease_in"|"ease_out"|"ease_in_out"
+---@field spring? "smooth"|"snappy"|"bouncy"|"instant"
+---@field change? iced.ChangeTransition
+---@field enter? iced.EventTransition
+---@field exit? iced.EventTransition
+---@field displaced? iced.EventTransition
+---@field pointer_enter? iced.EventTransition
+---@field pointer_exit? iced.EventTransition
+---@field press? iced.EventTransition
+---@field release? iced.EventTransition
+---@field [string] iced.EventTransition|iced.ChangeTransition|string|integer
 
 ---@class iced.Instance
 ---@field props table
@@ -308,12 +322,12 @@ config = {}
 ---@class iced.PopupSettings
 ---@field id? string
 ---@field visible? boolean
----@field parent string
+---@field parent? string Defaults to the containing layer for nested popups
 ---@field width integer
 ---@field height integer
 ---@field x? number
 ---@field y? number
----@field anchor? { x: number, y: number, width: number, height: number }
+---@field anchor? string|{ x: number, y: number, width: number, height: number }
 ---@field anchor_edge? "none"|"top"|"bottom"|"left"|"right"|"top_left"|"top_right"|"bottom_left"|"bottom_right"
 ---@field gravity? "none"|"top"|"bottom"|"left"|"right"|"top_left"|"top_right"|"bottom_left"|"bottom_right"
 ---@field constraint_adjustment? "none"|"all"|"flip_x"|"flip_y"|"slide_x"|"slide_y"|"resize_x"|"resize_y"|("none"|"all"|"flip_x"|"flip_y"|"slide_x"|"slide_y"|"resize_x"|"resize_y")[]
@@ -381,6 +395,21 @@ config = {}
 -- Elements and value helpers.
 
 iced = {}
+
+---Theme directory name used by every icon_path lookup; defaults to hicolor.
+---@type string
+iced.icon_theme = "hicolor"
+
+---@return string[] themes Sorted, unique installed theme directory names.
+function iced.icon_themes() end
+
+---@param name string Icon name or absolute filename.
+---@param options? { size?: integer, scale?: integer, path?: string } Size defaults to 24, scale to 1; path is an application's extra icon directory.
+---@return string|nil path
+function iced.icon_path(name, options) end
+
+---@return string[] families Sorted, unique families in the renderer's font database.
+function iced.fonts() end
 
 ---@type iced.LayerValues
 iced.Layer = {
@@ -685,8 +714,14 @@ function iced.window(settings) end
 function iced.popup(content, settings) end
 
 ---@param name string
----@param factory fun(): table
+---@param factory fun(): any Returns a widget prototype (view/render method) or a non-nil named value.
 function iced.define(name, factory) end
+
+---Returns a fresh event table, merging overrides and expanding shared timing.
+---@param preset string|iced.TransitionPreset
+---@param overrides? iced.TransitionPreset
+---@return iced.Transition
+function iced.transition(preset, overrides) end
 
 ---@param id string
 ---@param module string
