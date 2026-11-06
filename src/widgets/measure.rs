@@ -53,6 +53,11 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
+/// Last measured rectangle for `id` on any surface, for popup anchoring.
+pub(crate) fn latest(id: &str) -> Option<Rectangle> {
+    LATEST.with_borrow(|bounds| bounds.get(id).map(|(_, bounds)| *bounds))
+}
+
 fn bounds(id: &str) -> Option<Rectangle> {
     let current = CURRENT_WINDOW.get();
     if let Some(bounds) =
@@ -61,7 +66,7 @@ fn bounds(id: &str) -> Option<Rectangle> {
         return Some(bounds);
     }
     // Popups and other surfaces may anchor to a widget measured on the parent surface.
-    LATEST.with_borrow(|bounds| bounds.get(id).map(|(_, bounds)| *bounds))
+    latest(id)
 }
 
 fn record(id: &str, window: Option<window::Id>, bounds: Rectangle) {
@@ -76,6 +81,11 @@ fn record(id: &str, window: Option<window::Id>, bounds: Rectangle) {
 /// True once after a measured widget's bounds change, including its first draw.
 pub(crate) fn take_changed() -> bool {
     CHANGED.replace(false)
+}
+
+#[cfg(test)]
+pub(crate) fn record_for_test(id: &str, bounds: Rectangle) {
+    record(id, None, bounds);
 }
 
 pub(super) struct Measured<'a> {

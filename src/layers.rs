@@ -3,7 +3,7 @@ use iced_exwlshell::reexport::{
     NewLayerShellSettings, OutputOption, PixelSize, PopupAnchor, PopupConstraintAdjustment,
     PopupGravity,
 };
-use mlua::{Function, Table, Value};
+use mlua::{Function, Lua, Table, Value};
 
 use crate::runtime::keys;
 
@@ -67,6 +67,143 @@ fn collect_list(node: Table, nodes: &mut Vec<Table>) -> mlua::Result<()> {
     Ok(())
 }
 
+/// Moves popups nested in layer or window content to the root surface list.
+/// Their `parent` defaults to the containing layer id.
+pub fn hoist_popups(lua: &Lua, node: Table) -> mlua::Result<Table> {
+    let mut surfaces = Vec::new();
+    flatten(node.clone(), &mut surfaces)?;
+    let output = lua.create_table()?;
+    let mut count = 0;
+    let mut hoisted = false;
+    for surface in surfaces {
+        let kind = surface.get::<Option<String>>("kind")?;
+        if matches!(kind.as_deref(), Some("layer" | "window")) {
+            let parent = surface
+                .get::<Option<Table>>("settings")?
+                .and_then(|settings| settings.get::<Option<String>>("id").ok().flatten());
+            let mut popups = Vec::new();
+            if let Some(content) = surface.get::<Option<Value>>("content")? {
+                let cleaned = extract(lua, content, parent.as_deref(), &mut popups)?;
+                if !popups.is_empty() {
+                    surface.set("content", cleaned)?;
+                }
+            }
+            count += 1;
+            output.set(count, surface)?;
+            for popup in popups {
+                hoisted = true;
+                count += 1;
+                output.set(count, popup)?;
+            }
+        } else {
+            count += 1;
+            output.set(count, surface)?;
+        }
+    }
+    if hoisted { Ok(output) } else { Ok(node) }
+}
+
+fn flatten(node: Table, surfaces: &mut Vec<Table>) -> mlua::Result<()> {
+    if node.get::<Option<String>>("kind")?.is_some() {
+        surfaces.push(node);
+        return Ok(());
+    }
+    for value in node.sequence_values::<Value>() {
+        if let Value::Table(child) = value? {
+            flatten(child, surfaces)?;
+        }
+    }
+    Ok(())
+}
+
+fn extract(
+    lua: &Lua,
+    value: Value,
+    parent: Option<&str>,
+    popups: &mut Vec<Table>,
+) -> mlua::Result<Value> {
+    let Value::Table(node) = value else {
+        return Ok(value);
+    };
+    let kind = node.get::<Option<String>>("kind")?;
+    if kind.as_deref() == Some("popup") {
+        let settings: Table = node.get("settings")?;
+        if settings.get::<Option<String>>("parent")?.is_none() {
+            let parent = parent.ok_or_else(|| {
+                mlua::Error::runtime("popup nested in a layer without an id requires parent")
+            })?;
+            settings.set("parent", parent)?;
+        }
+        popups.push(node.clone());
+        let space = lua.create_table()?;
+        space.set("kind", "space")?;
+        return Ok(Value::Table(space));
+    }
+    match kind.as_deref() {
+        Some("row" | "column" | "stack" | "grid" | "pane_grid") => {
+            if let Value::Table(content) = node.get::<Value>("content")? {
+                node.set("content", map_list(lua, content, parent, popups)?)?;
+            }
+        }
+        Some(
+            "container" | "button" | "region" | "scrollable" | "float" | "pin" | "tooltip"
+            | "mouse_area" | "sensor",
+        ) => {
+            if let Value::Table(content) = node.get::<Value>("content")? {
+                node.set(
+                    "content",
+                    extract(lua, Value::Table(content), parent, popups)?,
+                )?;
+            }
+        }
+        Some("table") => {
+            if let Value::Table(content) = node.get::<Value>("content")? {
+                let rows = lua.create_table()?;
+                for index in 1..=content.raw_len() {
+                    let row: Table = content.raw_get(index)?;
+                    let cells = lua.create_table()?;
+                    for column in 1..=row.raw_len() {
+                        let cell: Value = row.raw_get(column)?;
+                        cells.set(column, extract(lua, cell, parent, popups)?)?;
+                    }
+                    rows.set(index, cells)?;
+                }
+                node.set("content", rows)?;
+            }
+            if let Value::Table(columns) = node.get::<Value>("columns")? {
+                let output = lua.create_table()?;
+                for index in 1..=columns.raw_len() {
+                    let column: Table = columns.raw_get(index)?;
+                    if let Value::Table(header) = column.get::<Value>("header")? {
+                        column.set(
+                            "header",
+                            extract(lua, Value::Table(header), parent, popups)?,
+                        )?;
+                    }
+                    output.set(index, column)?;
+                }
+                node.set("columns", output)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(Value::Table(node))
+}
+
+fn map_list(
+    lua: &Lua,
+    content: Table,
+    parent: Option<&str>,
+    popups: &mut Vec<Table>,
+) -> mlua::Result<Table> {
+    let output = lua.create_table()?;
+    for index in 1..=content.raw_len() {
+        let value: Value = content.raw_get(index)?;
+        output.set(index, extract(lua, value, parent, popups)?)?;
+    }
+    Ok(output)
+}
+
 fn surface_visible(node: &Table) -> mlua::Result<bool> {
     if node.get::<Option<String>>("kind")?.as_deref() == Some("popup") {
         Ok(popup(node.get("settings")?)?.visible)
@@ -116,8 +253,39 @@ pub fn popup(table: Table) -> mlua::Result<PopupSettings> {
     let height = popup_dimension(table.get("height")?, "height")?;
     let size = PixelSize::try_px(width, height)
         .ok_or_else(|| mlua::Error::runtime("popup size must be nonzero"))?;
-    let anchor = match table.get::<Option<Table>>("anchor")? {
-        Some(anchor) => {
+    let mut visible = match table.get::<Value>("visible")? {
+        Value::Nil => true,
+        Value::Boolean(visible) => visible,
+        _ => {
+            return Err(mlua::Error::runtime("popup visible must be a boolean"));
+        }
+    };
+    let anchor = match table.get::<Value>("anchor")? {
+        Value::Nil => None,
+        Value::String(id) => {
+            let id = id.to_str()?.to_owned();
+            if id.is_empty() || id.contains('\0') {
+                return Err(mlua::Error::runtime(
+                    "popup anchor id must be a nonempty string without NUL",
+                ));
+            }
+            match crate::widgets::measure::latest(&id) {
+                Some(bounds) if bounds.width > 0.0 && bounds.height > 0.0 => {
+                    let size = PixelSize::try_px(
+                        bounds.width.round() as u32,
+                        bounds.height.round() as u32,
+                    )
+                    .ok_or_else(|| mlua::Error::runtime("popup anchor size must be nonzero"))?;
+                    Some((bounds.x.round() as i32, bounds.y.round() as i32, size))
+                }
+                // Not measured yet: hide until the first layout rebuild resolves it.
+                _ => {
+                    visible = false;
+                    None
+                }
+            }
+        }
+        Value::Table(anchor) => {
             keys(&anchor, &["x", "y", "width", "height"])?;
             let width = popup_dimension(anchor.get("width")?, "anchor width")?;
             let height = popup_dimension(anchor.get("height")?, "anchor height")?;
@@ -128,13 +296,10 @@ pub fn popup(table: Table) -> mlua::Result<PopupSettings> {
                     .ok_or_else(|| mlua::Error::runtime("popup anchor size must be nonzero"))?,
             ))
         }
-        None => None,
-    };
-    let visible = match table.get::<Value>("visible")? {
-        Value::Nil => true,
-        Value::Boolean(visible) => visible,
         _ => {
-            return Err(mlua::Error::runtime("popup visible must be a boolean"));
+            return Err(mlua::Error::runtime(
+                "popup anchor must be a widget id string or a table",
+            ));
         }
     };
     let position = (
@@ -549,9 +714,35 @@ mod tests {
             PopupConstraintAdjustment::FlipX | PopupConstraintAdjustment::SlideY
         );
 
+        crate::widgets::measure::record_for_test(
+            "button",
+            iced::Rectangle::new(iced::Point::new(12.2, 30.8), iced::Size::new(40.4, 30.4)),
+        );
+        let anchored: Table = lua
+            .load("{parent='bar',width=200,height=120,anchor='button'}")
+            .eval()
+            .unwrap();
+        let anchored = popup(anchored).unwrap();
+        assert!(anchored.visible);
+        assert_eq!(
+            anchored.anchor.map(|(x, y, size)| (x, y, size.to_set())),
+            Some((12, 31, (40, 30)))
+        );
+
+        let pending: Table = lua
+            .load("{parent='bar',width=200,height=120,anchor='missing'}")
+            .eval()
+            .unwrap();
+        let pending = popup(pending).unwrap();
+        assert!(!pending.visible);
+        assert_eq!(pending.anchor, None);
+
         for source in [
             "{width=200,height=120}",
             "{parent='',width=200,height=120}",
+            "{parent='bar',width=200,height=120,anchor=''}",
+            "{parent='bar',width=200,height=120,anchor=1}",
+            "{parent='bar',width=200,height=120,anchor=true}",
             "{parent='bar',width=0,height=120}",
             "{parent='bar',width=200,height=32769}",
             "{parent='bar',width=200,height=120,x=0/0}",
@@ -586,6 +777,72 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(nodes(nested).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn nested_popups_are_hoisted_and_default_to_their_layer() {
+        let lua = Lua::new();
+        crate::lua::load(&lua).unwrap();
+        let root: Table = lua
+            .load(
+                r#"
+                iced.layer(iced.row({
+                    iced.text("bar"),
+                    iced.popup(iced.text("menu"), { id = "menu", width = 10, height = 10 }),
+                }), { id = "top" })
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        let root = hoist_popups(&lua, root).unwrap();
+        let surfaces = nodes(root).unwrap();
+        assert_eq!(surfaces.len(), 2);
+        let popup = surfaces
+            .iter()
+            .find(|surface| surface.get::<String>("kind").unwrap() == "popup")
+            .unwrap();
+        assert_eq!(
+            popup
+                .get::<Table>("settings")
+                .unwrap()
+                .get::<String>("parent")
+                .unwrap(),
+            "top"
+        );
+    }
+
+    #[test]
+    fn nested_popups_keep_an_explicit_parent() {
+        let lua = Lua::new();
+        crate::lua::load(&lua).unwrap();
+        let root: Table = lua
+            .load(
+                r#"
+                iced.layer(iced.column({
+                    iced.popup(iced.text("menu"), {
+                        id = "menu", parent = "other", width = 10, height = 10,
+                    }),
+                }), { id = "top" })
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        let root = hoist_popups(&lua, root).unwrap();
+        let popup = nodes(root)
+            .unwrap()
+            .into_iter()
+            .find(|surface| surface.get::<String>("kind").unwrap() == "popup")
+            .unwrap();
+        assert_eq!(
+            popup
+                .get::<Table>("settings")
+                .unwrap()
+                .get::<String>("parent")
+                .unwrap(),
+            "other"
+        );
     }
 
     #[test]

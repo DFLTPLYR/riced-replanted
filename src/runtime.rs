@@ -865,6 +865,7 @@ impl App {
         let node = widgets::measure::with_window(Some(id), || {
             self.view.call((self.state.clone(), props))
         })?;
+        let node = layers::hoist_popups(&self.lua, node)?;
         self.modules.borrow_mut().watch_all(&self.lua)?;
         Ok(node)
     }
@@ -2850,6 +2851,110 @@ mod tests {
         assert_eq!(seen.get::<f32>("y").unwrap(), 10.0);
         assert!(seen.get::<f32>("width").unwrap() > 0.0);
         assert!(seen.get::<f32>("height").unwrap() > 0.0);
+    }
+
+    #[test]
+    fn popups_anchor_to_widget_ids_without_a_measure_wrapper() {
+        let source = r#"
+            local app = {}
+            function app:update() end
+            function app:view()
+                return iced.layer(
+                    iced.row({
+                        iced.button(iced.text("open"), { id = "open_button", on_press = "noop" }),
+                        iced.popup(iced.text("menu"), {
+                            id = "menu", width = 120, height = 80,
+                            anchor = "open_button",
+                        }),
+                    }),
+                    { id = "bar", size = { width = 200, height = 50 } }
+                )
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let mut app = load(source, Path::new("shell.lua")).unwrap();
+        app.prepare_layers().unwrap();
+        assert!(app.popups.is_empty());
+        let window = app.layers[0].window;
+        let mut tree = iced::advanced::widget::Tree::empty();
+        animation_frame(&mut app, window, &mut tree, std::time::Instant::now());
+
+        app.reconcile_layers().unwrap();
+        assert_eq!(app.popups.len(), 1);
+        assert_eq!(app.popups[0].parent, "bar");
+        assert!(app.popups[0].anchor.is_some());
+    }
+
+    #[test]
+    fn popup_buttons_publish_lua_press_callbacks() {
+        let source = r#"
+            clicked = false
+            local app = {}
+            function app:update() end
+            function app:view()
+                return iced.layer(iced.row({
+                    iced.text('bar'),
+                    iced.popup(iced.container(
+                        iced.button('click', {
+                            width = 100,
+                            height = 30,
+                            on_press = function() clicked = true end,
+                        }),
+                        { width = 120, height = 60 }
+                    ), {
+                        id = 'menu',
+                        width = 120,
+                        height = 60,
+                        anchor = { x = 0, y = 0, width = 10, height = 10 },
+                    }),
+                }), {
+                    id = 'bar',
+                    size = { width = 200, height = 30 },
+                    anchor = { 'top', 'left', 'right' },
+                })
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let mut app = load(source, Path::new("shell.lua")).unwrap();
+        app.prepare_layers().unwrap();
+        let popup = app.popups[0].clone();
+        use iced::advanced::renderer::Headless;
+        let mut tree = iced::advanced::widget::Tree::empty();
+        let mut element = app.view(popup.window).unwrap();
+        tree.diff(&element);
+        let renderer = iced::futures::executor::block_on(iced::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let size = Size::new(120.0, 60.0);
+        let layout = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &iced::advanced::layout::Limits::new(Size::ZERO, size),
+        );
+        use iced::advanced::{Layout, Shell};
+        let mut messages = Vec::new();
+        for event in [
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Mouse(event),
+                Layout::new(&layout),
+                iced::mouse::Cursor::Available(iced::Point::new(10.0, 10.0)),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &iced::Rectangle::with_size(size),
+            );
+        }
+        for message in messages {
+            let _ = app.update(message).unwrap();
+        }
+        assert!(app.lua.globals().get::<bool>("clicked").unwrap());
     }
 
     #[test]

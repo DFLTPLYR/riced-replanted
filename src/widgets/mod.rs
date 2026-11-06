@@ -420,9 +420,15 @@ pub fn element(node: Table, ctx: &Ctx) -> mlua::Result<Element<'static, Message>
         ctx
     };
     let effects = animation::parse(&node)?;
-    if node.get::<Option<String>>("kind")?.as_deref() == Some("list_view") {
+    let kind = node.get::<Option<String>>("kind")?;
+    if kind.as_deref() == Some("list_view") {
         return build(&node, ctx, None);
     }
+    let measurable = (kind.as_deref() != Some("measure"))
+        .then(|| node.get::<Option<String>>("id"))
+        .transpose()?
+        .flatten()
+        .filter(|id| !id.is_empty());
     let transition = Transition::parse(&node)?;
     let content = build(&node, ctx, transition.as_ref())?;
     let control = node
@@ -433,19 +439,25 @@ pub fn element(node: Table, ctx: &Ctx) -> mlua::Result<Element<'static, Message>
                 .map(|control| control.clone())
         })
         .transpose()?;
-    if effects.is_empty() && transition.is_none() && control.is_none() {
-        return Ok(content);
+    let element = if effects.is_empty() && transition.is_none() && control.is_none() {
+        content
+    } else {
+        scale::ScaleItem::new(
+            content,
+            effects,
+            control,
+            ctx.clone(),
+            ctx.owner.clone(),
+            node.get::<Option<bool>>("__retained")?.unwrap_or(false),
+        )
+        .property(node, transition)
+        .into()
+    };
+    // Every id'd widget is measurable, so popups can anchor to any of them.
+    if let Some(id) = measurable {
+        return Ok(measure::Measured::new(element, id, ctx.window()).into());
     }
-    Ok(scale::ScaleItem::new(
-        content,
-        effects,
-        control,
-        ctx.clone(),
-        ctx.owner.clone(),
-        node.get::<Option<bool>>("__retained")?.unwrap_or(false),
-    )
-    .property(node, transition)
-    .into())
+    Ok(element)
 }
 
 #[derive(Clone, Copy)]
