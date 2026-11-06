@@ -37,6 +37,7 @@ pub enum Message {
     Clipboard(u64, Option<String>),
     Key(u64, KeyEvent),
     Mouse(u64, MouseEvent),
+    Hover(u64),
     Frame(u64),
     Editor(u64, Option<(String, u64, Option<window::Id>)>, EditorAction),
     Animation {
@@ -612,6 +613,7 @@ impl App {
             | Message::Clipboard(..)
             | Message::Key(..)
             | Message::Mouse(..)
+            | Message::Hover(..)
             | Message::Frame(..)
             | Message::Editor(..)
             | Message::CheckReload
@@ -1537,6 +1539,19 @@ impl App {
             window::Event::Closed => Some(Message::WindowClosed(id)),
             _ => None,
         }));
+        // Popup surfaces do not repaint on their own cursor motion; refresh the open
+        // popup so hover styles update on the next frame.
+        if self.popups.iter().any(|popup| !popup.closed) {
+            subscriptions.push(
+                iced::event::listen()
+                    .filter_map(|event| match event {
+                        iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => Some(()),
+                        _ => None,
+                    })
+                    .with(self.generation)
+                    .map(|(generation, ())| Message::Hover(generation)),
+            );
+        }
         Ok(Subscription::batch(subscriptions))
     }
 
@@ -1600,6 +1615,14 @@ impl App {
             Message::Mouse(generation, event) if *generation == self.generation => {
                 mouse_payload(&self.lua, event)?
             }
+            Message::Hover(generation) if *generation == self.generation => {
+                return Ok(self
+                    .popups
+                    .iter()
+                    .find(|popup| !popup.closed)
+                    .map_or(Scope::None, |popup| Scope::Window(popup.window)));
+            }
+            Message::Hover(..) => return Ok(Scope::None),
             Message::Frame(generation) if *generation == self.generation => {
                 frame_payload(&self.lua)?
             }
