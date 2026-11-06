@@ -789,7 +789,7 @@ Tray item fields:
 | -------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `id`           | Opaque string (`bus + object path`), for example `:1.42/StatusNotifierItem`; pass to methods                             |
 | `title`        | Item title, falling back to the item `Id`; clamped to 256 characters                                                     |
-| `icon`         | Sender's `IconName` (normally a Freedesktop icon name); clamped to 256 characters. Resolve with `iced.icon_path`. |
+| `icon`         | Sender's `IconName`, or a normalized fallback derived from the item `Id` (for example `vesktop_status_icon_1` becomes `vesktop`); clamped to 256 characters. Resolve with `iced.icon_path`. |
 | `icon_theme_path` | Sender's optional absolute `IconThemePath` directory, or nil; paths over 4096 bytes or containing NUL are ignored. |
 | `status`       | Raw StatusNotifier status such as `Active`, `Passive`, or `NeedsAttention`, clamped to 256 characters; default `Passive` |
 | `menu`         | D-Bus object path string or nil; `/` is treated as no menu                                                               |
@@ -799,8 +799,10 @@ Tray properties are refreshed about every 500 ms. An item that fails to answer
 three times is removed from the store.
 
 Use `iced.icon_path(item.icon, { size = 24, path = item.icon_theme_path })` to
-resolve tray icons with the current `iced.icon_theme`. `IconPixmap`-only items
-still need a placeholder; raw tray pixmaps are not currently exposed.
+resolve tray icons with the current `iced.icon_theme`. Items that only send an
+`IconPixmap` still need a profile-level fallback; raw tray pixmaps are not
+currently exposed. Try `item.title` as a second icon name before using a
+placeholder.
 
 Tray menus use `com.canonical.dbusmenu`. Call `open_tray_menu(item.id)` while a
 popup is visible; the extension calls `AboutToShow` and `GetLayout`, then fills

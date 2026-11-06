@@ -110,6 +110,21 @@ fn clamp(mut value: String, max: usize) -> String {
     value
 }
 
+/// StatusNotifier items often use an `Id` like `vesktop_status_icon_1` while the
+/// installed desktop icon is just `vesktop`. Strip the Electron suffix so an
+/// item without `IconName` still resolves through the icon theme.
+fn fallback_icon_name(id: &str) -> String {
+    let name = id
+        .split_once("_status_icon")
+        .map_or(id, |(name, _)| name)
+        .trim_end_matches(['_', '-']);
+    if name.is_empty() {
+        id.to_owned()
+    } else {
+        name.to_ascii_lowercase()
+    }
+}
+
 fn tray_call(model: &Arc<Mutex<Model>>, args: &Value, method: &str) -> Result<Value, String> {
     let id = args
         .get(0)
@@ -737,9 +752,12 @@ fn item_properties(connection: &Connection, item: &TrayItem) -> Result<ItemInfo,
     )?;
     let id = clamp(proxy.get_property::<String>("Id")?, MAX_NAME);
     let title: String = proxy.get_property("Title").unwrap_or_else(|_| id.clone());
-    let icon: String = proxy
-        .get_property("IconName")
-        .unwrap_or_else(|_| id.clone());
+    let icon: String = proxy.get_property("IconName").unwrap_or_default();
+    let icon = if icon.trim().is_empty() {
+        fallback_icon_name(&id)
+    } else {
+        icon
+    };
     let icon_theme_path = proxy
         .get_property::<String>("IconThemePath")
         .ok()
@@ -1104,6 +1122,14 @@ mod tests {
             parse_registration("/Custom/Path", Some(":1.7")),
             (":1.7".to_owned(), "/Custom/Path".to_owned())
         );
+    }
+
+    #[test]
+    fn icon_fallback_strips_status_icon_suffix() {
+        assert_eq!(fallback_icon_name("vesktop_status_icon_1"), "vesktop");
+        assert_eq!(fallback_icon_name("TelegramDesktop"), "telegramdesktop");
+        assert_eq!(fallback_icon_name("steam"), "steam");
+        assert_eq!(fallback_icon_name("_status_icon_1"), "_status_icon_1");
     }
 
     #[test]
