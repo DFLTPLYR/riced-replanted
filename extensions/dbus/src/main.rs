@@ -1,11 +1,11 @@
-//! Session D-Bus extension: StatusNotifier tray items and a notification server.
+//! Session D-Bus extension: StatusNotifier tray items, DBusMenu trees, and a notification server.
 //!
 //! The extension owns `org.kde.StatusNotifierWatcher` when no other watcher is
 //! running; otherwise it registers as a host with the existing watcher. It owns
 //! `org.freedesktop.Notifications` when no other notification daemon is running.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     error::Error,
     sync::{Arc, Mutex, mpsc},
     thread,
@@ -14,20 +14,21 @@ use std::{
 
 use riced_extension_sdk::{Plugin, bounded_array, log, protocol::MAX_LINE};
 use serde_json::{Value, json};
-type ItemInfo = (String, String, String, Option<String>, bool);
+type ItemInfo = (String, String, Option<String>, String, Option<String>, bool);
 
 use zbus::{
     blocking::{Connection, Proxy},
     fdo::RequestNameFlags,
     interface,
     message::Header,
-    zvariant::OwnedObjectPath,
+    zvariant::{OwnedObjectPath, OwnedValue, Value as VariantValue},
 };
 
 const WATCHER: &str = "org.kde.StatusNotifierWatcher";
 const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 const WATCHER_IFACE: &str = "org.kde.StatusNotifierWatcher";
 const ITEM_IFACE: &str = "org.kde.StatusNotifierItem";
+const MENU_IFACE: &str = "com.canonical.dbusmenu";
 const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 const METHOD_TIMEOUT: Duration = Duration::from_secs(1);
@@ -35,6 +36,9 @@ const MAX_TEXT: usize = 1024;
 const MAX_NAME: usize = 256;
 const MAX_ACTIONS: usize = 16;
 const MAX_NOTIFICATIONS: usize = 64;
+const MAX_MENU_DEPTH: usize = 8;
+const MAX_MENU_ITEMS: usize = 128;
+const MAX_MENU_TEXT: usize = 128;
 
 fn main() -> std::io::Result<()> {
     let model = Arc::new(Mutex::new(Model::default()));
@@ -42,11 +46,20 @@ fn main() -> std::io::Result<()> {
     let activate = Arc::clone(&model);
     let secondary = Arc::clone(&model);
     let menu = Arc::clone(&model);
+    let open_menu = Arc::clone(&model);
+    let close_menu = Arc::clone(&model);
+    let menu_event = Arc::clone(&model);
     let close = Arc::clone(&model);
     let invoke = Arc::clone(&model);
 
     Plugin::new("dbus")
-        .state(["connected", "capabilities", "tray", "notifications"])
+        .state([
+            "connected",
+            "capabilities",
+            "tray",
+            "tray_menu",
+            "notifications",
+        ])
         .method("activate_tray", false, move |args| {
             tray_call(&activate, args, "Activate")
         })
@@ -55,6 +68,15 @@ fn main() -> std::io::Result<()> {
         })
         .method("context_menu_tray", false, move |args| {
             tray_call(&menu, args, "ContextMenu")
+        })
+        .method("open_tray_menu", false, move |args| {
+            open_tray_menu(&open_menu, args)
+        })
+        .method("close_tray_menu", false, move |_| {
+            close_tray_menu(&close_menu)
+        })
+        .method("tray_menu_event", false, move |args| {
+            tray_menu_event(&menu_event, args)
         })
         .method("close_notification", false, move |args| {
             let id = argument(args, "notification")?;
@@ -120,6 +142,251 @@ fn tray_call(model: &Arc<Mutex<Model>>, args: &Value, method: &str) -> Result<Va
     Ok(Value::Null)
 }
 
+fn lookup_tray(model: &Arc<Mutex<Model>>, id: &str) -> Result<(Connection, TrayItem), String> {
+    let model = model.lock().unwrap();
+    let connection = model
+        .connection
+        .clone()
+        .ok_or_else(|| "session bus is not connected".to_owned())?;
+    let item = model
+        .tray
+        .get(id)
+        .cloned()
+        .ok_or_else(|| format!("unknown tray item: {id}"))?;
+    Ok((connection, item))
+}
+
+fn open_tray_menu(model: &Arc<Mutex<Model>>, args: &Value) -> Result<Value, String> {
+    let id = args
+        .get(0)
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "missing tray item id".to_owned())?;
+    let (connection, item) = lookup_tray(model, id)?;
+    let (revision, items, ids) = fetch_menu(&connection, &item, true)?;
+    let mut model = model.lock().unwrap();
+    model.tray_menu = Some(TrayMenu {
+        id: id.to_owned(),
+        revision,
+        items,
+        ids,
+        error: None,
+    });
+    model.dirty = true;
+    Ok(Value::Null)
+}
+
+fn close_tray_menu(model: &Arc<Mutex<Model>>) -> Result<Value, String> {
+    let mut model = model.lock().unwrap();
+    if model.tray_menu.take().is_some() {
+        model.dirty = true;
+    }
+    Ok(Value::Null)
+}
+
+fn tray_menu_event(model: &Arc<Mutex<Model>>, args: &Value) -> Result<Value, String> {
+    let id = args
+        .get(0)
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "missing tray item id".to_owned())?;
+    let menu_id = args
+        .get(1)
+        .and_then(Value::as_i64)
+        .and_then(|id| i32::try_from(id).ok())
+        .ok_or_else(|| "missing tray menu item id".to_owned())?;
+    let event = args
+        .get(2)
+        .and_then(Value::as_str)
+        .filter(|event| matches!(*event, "clicked" | "opened" | "closed" | "hovered"))
+        .ok_or_else(|| "unknown tray menu event".to_owned())?;
+    let (connection, item) = lookup_tray(model, id)?;
+    {
+        let model = model.lock().unwrap();
+        let valid = model
+            .tray_menu
+            .as_ref()
+            .is_some_and(|menu| menu.id == id && menu.ids.contains(&menu_id));
+        if !valid {
+            return Err("unknown tray menu item".to_owned());
+        }
+    }
+    let path = item
+        .menu
+        .as_deref()
+        .ok_or_else(|| "tray item has no menu".to_owned())?;
+    let proxy = Proxy::new(&connection, item.bus.as_str(), path, MENU_IFACE)
+        .map_err(|error| error.to_string())?;
+    if event == "opened" {
+        let _: Result<(bool,), _> = proxy.call("AboutToShow", &(menu_id,));
+    }
+    proxy
+        .call::<_, _, ()>("Event", &(menu_id, event, VariantValue::from(0i32), 0u32))
+        .map_err(|error| error.to_string())?;
+    Ok(Value::Null)
+}
+
+type RawLayout = (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>);
+
+fn fetch_menu(
+    connection: &Connection,
+    item: &TrayItem,
+    about_to_show: bool,
+) -> Result<(u32, Value, HashSet<i32>), String> {
+    let path = item
+        .menu
+        .as_deref()
+        .ok_or_else(|| "tray item has no menu".to_owned())?;
+    let proxy = Proxy::new(connection, item.bus.as_str(), path, MENU_IFACE)
+        .map_err(|error| error.to_string())?;
+    if about_to_show {
+        let _: Result<(bool,), _> = proxy.call("AboutToShow", &(0i32,));
+    }
+    let properties = vec![
+        "type",
+        "label",
+        "enabled",
+        "visible",
+        "children-display",
+        "icon-name",
+        "toggle-type",
+        "toggle-state",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    let layout =
+        proxy.call::<_, _, (u32, RawLayout)>("GetLayout", &(0i32, -1i32, properties.clone()));
+    let (revision, layout) = match layout {
+        Ok(layout) => layout,
+        Err(_) => proxy
+            .call::<_, _, (u32, RawLayout)>("GetLayout", &(0i32, 1i32, properties))
+            .map_err(|error| error.to_string())?,
+    };
+    let mut count = 0;
+    let mut ids = HashSet::new();
+    let root = parse_layout(layout, 0, &mut count, &mut ids)
+        .ok_or_else(|| "tray menu is empty or exceeds limits".to_owned())?;
+    let items = root
+        .get("children")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    Ok((revision, items, ids))
+}
+
+fn parse_layout(
+    raw: RawLayout,
+    depth: usize,
+    count: &mut usize,
+    ids: &mut HashSet<i32>,
+) -> Option<Value> {
+    if depth > MAX_MENU_DEPTH || *count >= MAX_MENU_ITEMS {
+        return None;
+    }
+    *count += 1;
+    let (id, properties, children) = raw;
+    let text = |key: &str| {
+        properties
+            .get(key)
+            .and_then(|value| <&str>::try_from(value).ok())
+            .unwrap_or("")
+    };
+    let flag = |key: &str, default: bool| {
+        properties
+            .get(key)
+            .and_then(|value| bool::try_from(value).ok())
+            .unwrap_or(default)
+    };
+    let number = |key: &str| {
+        properties
+            .get(key)
+            .and_then(|value| i32::try_from(value).ok())
+    };
+    if !flag("visible", true) {
+        return None;
+    }
+    ids.insert(id);
+    let kind = match text("type") {
+        "" => "standard",
+        kind => kind,
+    };
+    let label = clamp(text("label").to_owned(), MAX_MENU_TEXT);
+    let icon = clamp(text("icon-name").to_owned(), MAX_MENU_TEXT);
+    let toggle = text("toggle-type");
+    let checked = number("toggle-state").unwrap_or(0) == 1;
+    let mut items = Vec::new();
+    for child in children {
+        let Ok(child) = RawLayout::try_from(child) else {
+            continue;
+        };
+        if let Some(value) = parse_layout(child, depth + 1, count, ids) {
+            items.push(value);
+        }
+    }
+    let submenu = !items.is_empty() || text("children-display") == "submenu";
+    Some(json!({
+        "id": id,
+        "label": label,
+        "enabled": flag("enabled", true),
+        "type": kind,
+        "icon": if icon.is_empty() { Value::Null } else { json!(icon) },
+        "toggle": if toggle.is_empty() { Value::Null } else { json!(toggle) },
+        "checked": checked,
+        "submenu": submenu,
+        "children": items,
+    }))
+}
+
+fn refresh_tray_menu(connection: &Connection, model: &Arc<Mutex<Model>>) {
+    let active = {
+        let model = model.lock().unwrap();
+        model.tray_menu.as_ref().map(|menu| menu.id.clone())
+    };
+    let Some(id) = active else {
+        return;
+    };
+    let item = {
+        let model = model.lock().unwrap();
+        model.tray.get(&id).cloned()
+    };
+    let Some(item) = item else {
+        let mut model = model.lock().unwrap();
+        if model.tray_menu.as_ref().is_some_and(|menu| menu.id == id) {
+            model.tray_menu = None;
+            model.dirty = true;
+        }
+        return;
+    };
+    match fetch_menu(connection, &item, false) {
+        Ok((revision, items, ids)) => {
+            let mut model = model.lock().unwrap();
+            let changed = model.tray_menu.as_ref().is_none_or(|menu| {
+                menu.revision != revision || menu.items != items || menu.error.is_some()
+            });
+            if changed {
+                model.tray_menu = Some(TrayMenu {
+                    id,
+                    revision,
+                    items,
+                    ids,
+                    error: None,
+                });
+                model.dirty = true;
+            }
+        }
+        Err(error) => {
+            let mut model = model.lock().unwrap();
+            if let Some(menu) = &mut model.tray_menu
+                && menu.id == id
+                && menu.error.as_deref() != Some(error.as_str())
+            {
+                menu.error = Some(error);
+                model.dirty = true;
+            }
+        }
+    }
+}
+
 fn close_notification(model: &Arc<Mutex<Model>>, id: u32) -> Result<(), String> {
     let mut model = model.lock().unwrap();
     if model.notifications.remove(&id).is_some() {
@@ -152,6 +419,7 @@ fn invoke_notification_action(
 struct Model {
     connection: Option<Connection>,
     tray: BTreeMap<String, TrayItem>,
+    tray_menu: Option<TrayMenu>,
     notifications: BTreeMap<u32, Notification>,
     next_notification: u32,
     own_watcher: bool,
@@ -167,10 +435,20 @@ struct TrayItem {
     path: String,
     title: String,
     icon: String,
+    icon_theme_path: Option<String>,
     status: String,
     menu: Option<String>,
     item_is_menu: bool,
     failures: u8,
+}
+
+#[derive(Clone)]
+struct TrayMenu {
+    id: String,
+    revision: u32,
+    items: Value,
+    ids: HashSet<i32>,
+    error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -203,6 +481,7 @@ fn run(context: riced_extension_sdk::Context, model: Arc<Mutex<Model>>) {
             let mut model = model.lock().unwrap();
             model.connection = None;
             model.tray.clear();
+            model.tray_menu = None;
             model.notifications.clear();
             model.own_watcher = false;
             model.tray_available = false;
@@ -229,6 +508,7 @@ fn serve(
         let mut model = model.lock().unwrap();
         model.connection = Some(connection.clone());
         model.tray.clear();
+        model.tray_menu = None;
         model.notifications.clear();
         model.dirty = true;
     }
@@ -252,6 +532,7 @@ fn serve(
                     let _ = sync_external_watcher(connection, model);
                 }
                 refresh_tray(connection, model);
+                refresh_tray_menu(connection, model);
                 if stopped.recv_timeout(Duration::from_millis(500))
                     != Err(mpsc::RecvTimeoutError::Timeout)
                 {
@@ -391,18 +672,20 @@ fn refresh_tray(connection: &Connection, model: &Arc<Mutex<Model>>) {
     };
     for (key, item) in items {
         match item_properties(connection, &item) {
-            Ok((title, icon, status, menu, item_is_menu)) => {
+            Ok((title, icon, icon_theme_path, status, menu, item_is_menu)) => {
                 let mut model = model.lock().unwrap();
                 let mut changed = false;
                 if let Some(current) = model.tray.get_mut(&key) {
                     if current.title != title
                         || current.icon != icon
+                        || current.icon_theme_path != icon_theme_path
                         || current.status != status
                         || current.menu != menu
                         || current.item_is_menu != item_is_menu
                     {
                         current.title = title;
                         current.icon = icon;
+                        current.icon_theme_path = icon_theme_path;
                         current.status = status;
                         current.menu = menu;
                         current.item_is_menu = item_is_menu;
@@ -422,6 +705,9 @@ fn refresh_tray(connection: &Connection, model: &Arc<Mutex<Model>>) {
                         current.failures += 1;
                         if current.failures > 2 {
                             model.tray.remove(&key);
+                            if model.tray_menu.as_ref().is_some_and(|menu| menu.id == key) {
+                                model.tray_menu = None;
+                            }
                             model.dirty = true;
                             removed = model.own_watcher;
                         }
@@ -454,6 +740,12 @@ fn item_properties(connection: &Connection, item: &TrayItem) -> Result<ItemInfo,
     let icon: String = proxy
         .get_property("IconName")
         .unwrap_or_else(|_| id.clone());
+    let icon_theme_path = proxy
+        .get_property::<String>("IconThemePath")
+        .ok()
+        .filter(|path| {
+            path.len() <= 4096 && !path.contains('\0') && std::path::Path::new(path).is_absolute()
+        });
     let status: String = proxy
         .get_property("Status")
         .unwrap_or_else(|_| "Passive".to_owned());
@@ -466,6 +758,7 @@ fn item_properties(connection: &Connection, item: &TrayItem) -> Result<ItemInfo,
     Ok((
         clamp(if title.is_empty() { id } else { title }, MAX_NAME),
         clamp(icon, MAX_NAME),
+        icon_theme_path,
         clamp(status, MAX_NAME),
         menu,
         item_is_menu,
@@ -538,6 +831,7 @@ fn snapshot(model: &Model) -> Value {
                 "id": id,
                 "title": clamp(item.title.clone(), MAX_NAME),
                 "icon": clamp(item.icon.clone(), MAX_NAME),
+                "icon_theme_path": item.icon_theme_path,
                 "status": clamp(item.status.clone(), MAX_NAME),
                 "menu": item.menu.clone(),
                 "item_is_menu": item.item_is_menu,
@@ -570,6 +864,12 @@ fn snapshot(model: &Model) -> Value {
             "notifications": model.notifications_available,
         },
         "tray": bounded_array(tray, MAX_LINE / 4),
+        "tray_menu": model.tray_menu.as_ref().map(|menu| json!({
+            "id": menu.id,
+            "revision": menu.revision,
+            "items": menu.items,
+            "error": menu.error,
+        })),
         "notifications": bounded_array(notifications, MAX_LINE / 4),
     })
 }
@@ -583,6 +883,7 @@ fn empty(connected: bool) -> Value {
             "notifications": false,
         },
         "tray": [],
+        "tray_menu": Value::Null,
         "notifications": [],
     })
 }
@@ -810,6 +1111,7 @@ mod tests {
         let store = empty(false);
         assert_eq!(store["connected"], false);
         assert_eq!(store["tray"], json!([]));
+        assert_eq!(store["tray_menu"], Value::Null);
     }
 
     #[test]
@@ -926,5 +1228,102 @@ mod tests {
             [Signal::Action(action_id, action), Signal::Closed(closed, 2)]
                 if *action_id == second && action == "default" && *closed == second
         ));
+    }
+
+    fn text(value: &str) -> OwnedValue {
+        VariantValue::from(value).try_into().unwrap()
+    }
+
+    fn flag(value: bool) -> OwnedValue {
+        VariantValue::from(value).try_into().unwrap()
+    }
+
+    fn number(value: i32) -> OwnedValue {
+        VariantValue::from(value).try_into().unwrap()
+    }
+
+    fn layout(id: i32, properties: &[(&str, OwnedValue)], children: Vec<RawLayout>) -> RawLayout {
+        let properties = properties
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), value.clone()))
+            .collect();
+        let children = children
+            .into_iter()
+            .map(|child| {
+                let value: VariantValue<'static> = child.into();
+                OwnedValue::try_from(value).unwrap()
+            })
+            .collect();
+        (id, properties, children)
+    }
+
+    #[test]
+    fn parses_nested_menu_items_and_skips_hidden_entries() {
+        let child = layout(
+            7,
+            &[("label", text("Open")), ("icon-name", text("firefox"))],
+            vec![],
+        );
+        let separator = layout(8, &[("type", text("separator"))], vec![]);
+        let hidden = layout(
+            9,
+            &[("label", text("Hidden")), ("visible", flag(false))],
+            vec![],
+        );
+        let toggle = layout(
+            10,
+            &[
+                ("label", text("Enabled")),
+                ("toggle-type", text("checkmark")),
+                ("toggle-state", number(1)),
+            ],
+            vec![],
+        );
+        let root = layout(0, &[], vec![child, separator, hidden, toggle]);
+        let mut count = 0;
+        let mut ids = HashSet::new();
+        let root = parse_layout(root, 0, &mut count, &mut ids).unwrap();
+        let items = root["children"].as_array().unwrap();
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["label"], "Open");
+        assert_eq!(items[0]["icon"], "firefox");
+        assert_eq!(items[1]["type"], "separator");
+        assert_eq!(items[2]["checked"], true);
+        assert_eq!(items[2]["toggle"], "checkmark");
+        assert!(!ids.contains(&9));
+    }
+
+    #[test]
+    fn menu_parser_bounds_depth_siblings_and_text() {
+        let mut child = layout(1, &[("label", text("leaf"))], vec![]);
+        for id in 2..=MAX_MENU_DEPTH + 2 {
+            child = layout(id as i32, &[], vec![child]);
+        }
+        let mut count = 0;
+        let mut ids = HashSet::new();
+        let items = parse_layout(child, 0, &mut count, &mut ids);
+        assert!(items.is_some());
+        assert!(count <= MAX_MENU_DEPTH + 1);
+
+        let children = (1..=MAX_MENU_ITEMS + 10)
+            .map(|id| {
+                layout(
+                    id as i32,
+                    &[("label", text(&"x".repeat(MAX_MENU_TEXT + 20)))],
+                    vec![],
+                )
+            })
+            .collect();
+        let root = layout(0, &[], children);
+        let mut count = 0;
+        let mut ids = HashSet::new();
+        let root = parse_layout(root, 0, &mut count, &mut ids).unwrap();
+        let items = root["children"].as_array().unwrap();
+        assert_eq!(items.len(), MAX_MENU_ITEMS - 1);
+        assert_eq!(
+            items[0]["label"].as_str().unwrap().chars().count(),
+            MAX_MENU_TEXT
+        );
     }
 }
