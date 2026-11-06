@@ -1738,6 +1738,13 @@ impl App {
 
     fn check_reload(&mut self) -> mlua::Result<Change> {
         let change = self.reload_modules()?;
+        // The first view runs before layout, so `iced.bounds` is empty until the
+        // first draw. Rebuild once when recorded bounds appear or change.
+        let change = if widgets::measure::take_changed() {
+            Change::All
+        } else {
+            change
+        };
         let source = match std::fs::read_to_string(&self.path) {
             Ok(source) => source,
             Err(error) => {
@@ -2127,6 +2134,26 @@ mod tests {
         assert_eq!(app.redraw(&Message::Tick).unwrap(), Scope::Window(id));
         assert_eq!(app.redraw(&Message::Reloaded).unwrap(), Scope::All);
         assert_eq!(app.redraw(&Message::CheckReload).unwrap(), Scope::None);
+    }
+
+    #[test]
+    fn bounds_changes_do_not_skip_saved_shells() {
+        let file = TestShell::new();
+        let source = RELOAD_SHELL.replace(
+            "iced.text('before')",
+            "iced.measure(iced.text('before'), {id = 'reload-target'})",
+        );
+        std::fs::write(&file.0, &source).unwrap();
+        let mut app = load(&source, &file.0).unwrap();
+        let id = window::Id::unique();
+        let mut tree = iced::advanced::widget::Tree::empty();
+        for title in ["after", "after again"] {
+            animation_frame(&mut app, id, &mut tree, std::time::Instant::now());
+            std::fs::write(&file.0, source.replace("before", title)).unwrap();
+            assert!(matches!(app.check_reload().unwrap(), Change::All));
+            assert_eq!(app.title(id).unwrap().as_deref(), Some(title));
+        }
+        app.forget_window(id).unwrap();
     }
 
     #[test]
@@ -3901,6 +3928,24 @@ return m";
         assert_eq!(app.mounts.borrow()[&(id, "left".to_owned())].revision, 1);
         assert_eq!(app.mounts.borrow()[&(id, "right".to_owned())].revision, 0);
         assert!(matches!(app.check_reload().unwrap(), Change::None));
+    }
+
+    #[test]
+    fn bounds_changes_do_not_skip_saved_modules() {
+        let source = versioned("v1").replace(
+            "iced.text('left')",
+            "iced.measure(iced.text('left'), {id = 'module-target'})",
+        );
+        let profile = component_profile(&source);
+        let mut app = load(COMPONENT_SHELL, &profile.shell()).unwrap();
+        let id = window::Id::unique();
+        let mut tree = iced::advanced::widget::Tree::empty();
+        animation_frame(&mut app, id, &mut tree, std::time::Instant::now());
+        profile.write("left.lua", &versioned("v2"));
+        assert!(matches!(app.check_reload().unwrap(), Change::All));
+        app.view(id).unwrap();
+        assert_eq!(seen(&app, "seen_left"), "v2:0");
+        app.forget_window(id).unwrap();
     }
 
     #[test]

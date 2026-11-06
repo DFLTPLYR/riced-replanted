@@ -15,7 +15,10 @@ type Key = (Option<window::Id>, String);
 
 thread_local! {
     static BOUNDS: RefCell<HashMap<Key, Rectangle>> = RefCell::new(HashMap::new());
+    static LATEST: RefCell<HashMap<String, (Option<window::Id>, Rectangle)>> =
+        RefCell::new(HashMap::new());
     static CURRENT_WINDOW: Cell<Option<window::Id>> = const { Cell::new(None) };
+    static CHANGED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Makes `iced.bounds` resolve against the window currently being built.
@@ -28,6 +31,7 @@ pub(crate) fn with_window<T>(window: Option<window::Id>, build: impl FnOnce() ->
 
 pub(crate) fn forget_window(window: window::Id) {
     BOUNDS.with_borrow_mut(|bounds| bounds.retain(|(owner, _), _| *owner != Some(window)));
+    LATEST.with_borrow_mut(|bounds| bounds.retain(|_, (owner, _)| *owner != Some(window)));
 }
 
 pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -51,14 +55,27 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
 
 fn bounds(id: &str) -> Option<Rectangle> {
     let current = CURRENT_WINDOW.get();
-    // Scoped to the window being built: a popup anchor must not read the bar's bounds.
-    BOUNDS.with_borrow(|bounds| bounds.get(&(current, id.to_owned())).copied())
+    if let Some(bounds) =
+        BOUNDS.with_borrow(|bounds| bounds.get(&(current, id.to_owned())).copied())
+    {
+        return Some(bounds);
+    }
+    // Popups and other surfaces may anchor to a widget measured on the parent surface.
+    LATEST.with_borrow(|bounds| bounds.get(id).map(|(_, bounds)| *bounds))
 }
 
 fn record(id: &str, window: Option<window::Id>, bounds: Rectangle) {
-    BOUNDS.with_borrow_mut(|stored| {
-        stored.insert((window, id.to_owned()), bounds);
-    });
+    let changed = BOUNDS
+        .with_borrow_mut(|stored| stored.insert((window, id.to_owned()), bounds) != Some(bounds));
+    LATEST.with_borrow_mut(|stored| stored.insert(id.to_owned(), (window, bounds)));
+    if changed {
+        CHANGED.set(true);
+    }
+}
+
+/// True once after a measured widget's bounds change, including its first draw.
+pub(crate) fn take_changed() -> bool {
+    CHANGED.replace(false)
 }
 
 pub(super) struct Measured<'a> {
@@ -217,15 +234,28 @@ mod tests {
     use iced::Point;
 
     #[test]
-    fn bounds_are_window_scoped() {
+    fn recording_bounds_requests_one_rebuild() {
+        let id = format!("measure-change-{}", std::process::id());
+        let owner = window::Id::unique();
+        let rect = Rectangle::new(Point::new(1.0, 2.0), Size::new(3.0, 4.0));
+        while take_changed() {}
+        record(&id, Some(owner), rect);
+        assert!(take_changed());
+        record(&id, Some(owner), rect);
+        assert!(!take_changed());
+        forget_window(owner);
+    }
+
+    #[test]
+    fn bounds_fall_back_to_the_last_measured_surface() {
         let id = format!("measure-test-{}", std::process::id());
         let owner = window::Id::unique();
         let other = window::Id::unique();
         let rect = Rectangle::new(Point::new(12.0, 30.0), Size::new(32.0, 32.0));
         record(&id, Some(owner), rect);
-        assert_eq!(with_window(Some(other), || bounds(&id)), None);
+        assert_eq!(with_window(Some(other), || bounds(&id)), Some(rect));
         assert_eq!(with_window(Some(owner), || bounds(&id)), Some(rect));
         forget_window(owner);
-        assert_eq!(with_window(Some(owner), || bounds(&id)), None);
+        assert_eq!(with_window(Some(other), || bounds(&id)), None);
     }
 }
