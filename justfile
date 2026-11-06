@@ -33,7 +33,7 @@ build:
 
 test: build
     if pgrep -x -u "$(id -u)" riced >/dev/null; then pkill -x -u "$(id -u)" riced; fi
-    ./target/release/riced -c test --logs
+    ./target/release/riced -c replanted --logs
 
 # Build release and install to ~/.local/bin (already on PATH)
 install: build
@@ -46,31 +46,31 @@ uninstall:
 # Build the example system extension and install it into the test profile
 extension-system:
     {{nix}} cargo build --release -p riced-extension-system
-    install -Dm755 target/release/riced-system "{{ home_directory() }}/.config/riced/test/extensions/system/riced-system"
+    install -Dm755 target/release/riced-system "{{ home_directory() }}/.config/riced/replanted/extensions/system/riced-system"
 
 # Build the generic Wayland extension and install it into the test profile
 extension-wayland:
     {{nix}} cargo build --release -p riced-extension-wayland
-    install -Dm755 target/release/riced-wayland "{{ home_directory() }}/.config/riced/test/extensions/wayland/riced-wayland"
+    install -Dm755 target/release/riced-wayland "{{ home_directory() }}/.config/riced/replanted/extensions/wayland/riced-wayland"
 
 # Build the D-Bus tray/notification extension and install it into the test profile
 extension-dbus:
     {{nix}} cargo build --release -p riced-extension-dbus
-    install -Dm755 target/release/riced-dbus "{{ home_directory() }}/.config/riced/test/extensions/dbus/riced-dbus"
+    install -Dm755 target/release/riced-dbus "{{ home_directory() }}/.config/riced/replanted/extensions/dbus/riced-dbus"
 
 # Build the Material You theme generator and install it into the test profile
 extension-themeagen:
     {{nix}} cargo build --release -p riced-extension-themeagen
-    install -Dm755 target/release/riced-themeagen "{{ home_directory() }}/.config/riced/test/extensions/themeagen/riced-themeagen"
+    install -Dm755 target/release/riced-themeagen "{{ home_directory() }}/.config/riced/replanted/extensions/themeagen/riced-themeagen"
 
 # Build the Lucide icon extension and install it into the test profile
 extension-lucide:
     {{nix}} cargo build --release -p riced-extension-lucide
-    install -Dm755 target/release/riced-lucide "{{ home_directory() }}/.config/riced/test/extensions/lucide/riced-lucide"
-    install -Dm644 extensions/lucide/lucide.lua "{{ home_directory() }}/.config/riced/test/extensions/lucide/lucide.lua"
+    install -Dm755 target/release/riced-lucide "{{ home_directory() }}/.config/riced/replanted/extensions/lucide/riced-lucide"
+    install -Dm644 extensions/lucide/lucide.lua "{{ home_directory() }}/.config/riced/replanted/extensions/lucide/lucide.lua"
 
 # Build the Open-Meteo weather extension and its Lua widget
 extension-openmeteo:
     {{nix}} cargo build --release -p riced-extension-openmeteo
-    install -Dm755 target/release/riced-openmeteo "{{ home_directory() }}/.config/riced/test/extensions/openmeteo/riced-openmeteo"
-    install -Dm644 extensions/openmeteo/openmeteo.lua "{{ home_directory() }}/.config/riced/test/extensions/openmeteo/openmeteo.lua"
+    install -Dm755 target/release/riced-openmeteo "{{ home_directory() }}/.config/riced/replanted/extensions/openmeteo/riced-openmeteo"
+    install -Dm644 extensions/openmeteo/openmeteo.lua "{{ home_directory() }}/.config/riced/replanted/extensions/openmeteo/openmeteo.lua"
