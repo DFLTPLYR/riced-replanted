@@ -269,7 +269,7 @@ impl Plugins {
                         .and_then(|handle| handle.pending.lock().unwrap().remove(&id));
                     if let Some(key) = key {
                         let callback: Function = lua.registry_value(&key)?;
-                        let value = lua.to_value(&result)?;
+                        let value = lua_json(lua, &result)?;
                         let error = match error {
                             Some(error) => Value::String(lua.create_string(error)?),
                             None => Value::Nil,
@@ -486,15 +486,66 @@ fn call(
     }
 }
 
+pub(crate) fn lua_json(lua: &Lua, json: &Json) -> mlua::Result<Value> {
+    let value = lua.to_value(json)?;
+    if let Value::Table(table) = &value {
+        clean_nulls(table)?;
+    }
+    Ok(if value == Value::NULL {
+        Value::Nil
+    } else {
+        value
+    })
+}
+
 fn fill(lua: &Lua, table: &Table, json: &Json) -> mlua::Result<()> {
     table.clear()?;
     if json.is_null() {
         return Ok(());
     }
-    if let Value::Table(source) = lua.to_value(json)? {
+    if let Value::Table(source) = lua_json(lua, json)? {
         for pair in source.pairs::<Value, Value>() {
             let (key, value) = pair?;
             table.raw_set(key, value)?;
+        }
+    }
+    Ok(())
+}
+
+// mlua serializes JSON null as Value::NULL (light userdata). Lua expects nil,
+// and a NULL in an object would otherwise make optional fields truthy.
+fn clean_nulls(table: &Table) -> mlua::Result<()> {
+    let pairs = table
+        .clone()
+        .pairs::<Value, Value>()
+        .collect::<mlua::Result<Vec<_>>>()?;
+    let sequence = !pairs.is_empty()
+        && pairs
+            .iter()
+            .all(|(key, _)| matches!(key, Value::Integer(index) if *index > 0));
+    if sequence {
+        let length = pairs.len();
+        let mut next = 1;
+        for (_, value) in pairs {
+            if value == Value::NULL {
+                continue;
+            }
+            if let Value::Table(child) = &value {
+                clean_nulls(child)?;
+            }
+            table.raw_set(next, value)?;
+            next += 1;
+        }
+        for index in next..=length {
+            table.raw_set(index, Value::Nil)?;
+        }
+    } else {
+        for (key, value) in pairs {
+            if value == Value::NULL {
+                table.raw_set(key, Value::Nil)?;
+            } else if let Value::Table(child) = &value {
+                clean_nulls(child)?;
+            }
         }
     }
     Ok(())
@@ -986,6 +1037,37 @@ mod tests {
     }
 
     #[test]
+    fn null_store_fields_become_nil_and_arrays_compact() {
+        let (tx, mut plugins, lua) = setup();
+        let _calls = register(&tx, &[]);
+        plugins.poll(&lua).unwrap();
+        tx.send(Incoming::State {
+            conn: 1,
+            store: serde_json::json!({
+                "tray_menu": null,
+                "tray": [{"id": "item", "menu": null, "icon_theme_path": null}],
+                "items": [null, 1, null, 2]
+            }),
+        })
+        .unwrap();
+        plugins.poll(&lua).unwrap();
+        let result: (String, String, usize, u32, u32) = lua
+            .load(
+                r#"
+                local dbus = riced.plugins('demo')
+                assert(dbus.tray_menu == nil)
+                assert(dbus.tray[1].menu == nil)
+                assert(dbus.tray[1].icon_theme_path == nil)
+                assert(#dbus.items == 2)
+                return type(dbus.tray_menu), type(dbus.tray[1].menu), #dbus.items, dbus.items[1], dbus.items[2]
+            "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(result, ("nil".into(), "nil".into(), 2, 1, 2));
+    }
+
+    #[test]
     fn reading_a_store_field_subscribes_once() {
         let (tx, mut plugins, lua) = setup();
         let calls = register(&tx, &[]);
@@ -1097,6 +1179,28 @@ mod tests {
         plugins.poll(&lua).unwrap();
 
         assert_eq!(lua.globals().get::<u32>("answer").unwrap(), 42);
+    }
+
+    #[test]
+    fn null_method_results_are_nil() {
+        let (tx, mut plugins, lua) = setup();
+        let _calls = register(&tx, &["query"]);
+        plugins.poll(&lua).unwrap();
+        tx.send(Incoming::Result {
+            conn: 1,
+            id: 1,
+            ok: true,
+            result: Json::Null,
+            error: None,
+        })
+        .unwrap();
+        lua.load(
+            "seen = nil; riced.plugins('demo').query(function(result, error) seen = result == nil and error == nil end)",
+        )
+        .exec()
+        .unwrap();
+        plugins.poll(&lua).unwrap();
+        assert!(lua.globals().get::<bool>("seen").unwrap());
     }
 
     #[test]

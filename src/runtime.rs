@@ -758,7 +758,7 @@ impl App {
             let payload = self.lua.create_table()?;
             payload.set("type", "plugin")?;
             payload.set("plugin", name)?;
-            payload.set("event", self.lua.to_value(&event)?)?;
+            payload.set("event", crate::plugins::lua_json(&self.lua, &event)?)?;
             let value = self.update.call((self.state.clone(), payload))?;
             tasks.push(self.tasks(value)?);
         }
