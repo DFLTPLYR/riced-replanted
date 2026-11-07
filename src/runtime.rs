@@ -2490,6 +2490,27 @@ mod tests {
     }
 
     #[test]
+    fn custom_widget_forwards_multiple_table_arguments() {
+        let app = load(
+            r#"
+            iced.define("greeting", function()
+                local widget = {}
+                function widget:view(content, props)
+                    return iced.text(content.text .. props.suffix)
+                end
+                return widget
+            end)
+            return riced.daemon({}, 'test', function() end, function()
+                return iced.greeting({ id = "greeting", text = "hello" }, { suffix = "!" })
+            end):run()
+        "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        app.view(window::Id::unique()).unwrap();
+    }
+
+    #[test]
     fn widgets_load_from_any_path_without_a_require() {
         let profile = Profile::new(&[
             ("shell.lua", ""),

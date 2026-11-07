@@ -1946,7 +1946,9 @@ iced.counted({ count = self.count })
 The name must be a valid identifier and must not already exist on `iced`.
 Defining an existing custom definition again replaces it, so edits reload. If a
 reload fails, the previous definition is restored and the error is logged; the
-shell keeps running. The constructor takes only props. Events still go through
+shell keeps running. The constructor accepts any number of table arguments and
+forwards them to `view`/`render`; `props.id` on the first argument identifies
+the instance. Events still go through
 `app:update`; there is no per-widget update callback. Build the element inside
 `view` when it reads live state or plugin store values. Use a component module
 for mounted widgets with lifecycle hooks.

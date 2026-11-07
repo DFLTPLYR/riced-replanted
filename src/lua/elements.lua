@@ -78,7 +78,7 @@ function iced.popup(content, settings)
 	return { kind = "popup", content = content, settings = settings or {} }
 end
 
--- Named definitions: widgets use iced.name(props), values use iced.name().
+-- Named definitions: widgets use iced.name(props, ...), values use iced.name().
 -- Matching Lua files anywhere in the profile load on demand; redefining a name
 -- replaces the previous constructor so edits reload.
 -- Key by constructor so restoring iced after a failed reload also restores its kind.
@@ -251,11 +251,16 @@ function animations.track(key, node)
 	return node
 end
 
-function animations.render(key, definition, props, window)
+function animations.render(key, definition, props, window, args)
 	local instance = animations.instance(key, definition, props)
 	local previous = parent
 	parent = key
-	local ok, node = pcall(definition.view or definition.render, instance, props, window)
+	local ok, node
+	if args then
+		ok, node = pcall(definition.view or definition.render, instance, table.unpack(args, 1, args.n))
+	else
+		ok, node = pcall(definition.view or definition.render, instance, props, window)
+	end
 	parent = previous
 	if not ok then error(node, 0) end
 	return animations.track(key, node), instance
@@ -360,10 +365,13 @@ function iced.define(name, factory)
 		defined[iced[name]] = "value"
 		return
 	end
-	iced[name] = function(props)
-		assert(props == nil or type(props) == "table", "widget props must be a table")
-		props = props or {}
-		local node = animations.render("widget:" .. name .. ":" .. tostring(props.id or name), widget, props)
+	iced[name] = function(...)
+		local args = table.pack(...)
+		for index = 1, args.n do
+			assert(args[index] == nil or type(args[index]) == "table", "widget arguments must be tables")
+		end
+		args[1] = args[1] or {}
+		local node = animations.render("widget:" .. name .. ":" .. tostring(args[1].id or name), widget, args[1], nil, args)
 		return node
 	end
 	defined[iced[name]] = "widget"
