@@ -30,6 +30,7 @@ build:
         export RUSTFLAGS="-C link-args=$rpaths"
         cargo build --release
     BUILD
+    install -Dm755 "target/release/riced" "{{ home_directory() }}/.local/bin/riced"
 
 test: build
     if pgrep -x -u "$(id -u)" riced >/dev/null; then pkill -x -u "$(id -u)" riced; fi
