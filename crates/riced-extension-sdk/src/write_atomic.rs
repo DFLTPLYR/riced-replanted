@@ -56,7 +56,20 @@ pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
             file.set_permissions(mode)?;
         }
         file.sync_all()?;
-        std::fs::rename(&temporary, path)
+        std::fs::rename(&temporary, path)?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            // Best effort: some filesystems reject directory fsync.
+            let parent = if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            };
+            if let Ok(directory) = std::fs::File::open(parent) {
+                let _ = directory.sync_all();
+            }
+        }
+        Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
