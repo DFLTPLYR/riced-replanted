@@ -29,6 +29,7 @@ mlua = { version = "0.12", features = [
   "macros",
   "serialize",
 ] }
+naga = { version = "27", features = ["wgsl-in"] }
 iced = { version = "0.14.0", features = [
   "tokio",
   "advanced",

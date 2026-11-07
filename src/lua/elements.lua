@@ -54,6 +54,16 @@ for _, kind in ipairs({
 	end
 end
 
+function iced.shader(props)
+	assert(type(props) == "table", "shader props must be a table")
+	local node = {}
+	for key, value in pairs(props) do
+		node[key] = value
+	end
+	node.kind = "shader"
+	return node
+end
+
 function iced.layer(content, settings)
 	assert(type(content) == "table", "layer content must be an iced element")
 	assert(settings == nil or type(settings) == "table", "layer settings must be a table")

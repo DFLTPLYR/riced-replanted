@@ -10,9 +10,12 @@ pub(crate) mod measure;
 mod media;
 mod region;
 mod scale;
+mod shader;
 mod state;
 mod style;
 mod text;
+
+use std::path::{Path, PathBuf};
 
 use iced::{Border, Color, Element, Length, Padding, Shadow, widget};
 use iced_anim::Animate;
@@ -345,6 +348,7 @@ pub struct Ctx {
     pub component: Option<(String, u64, Option<iced::window::Id>)>,
     lua: Option<mlua::Lua>,
     window: Option<iced::window::Id>,
+    profile: Option<PathBuf>,
     owner: Value,
     rebuilding: bool,
     lifetime: Option<animation::Control>,
@@ -357,6 +361,7 @@ impl Ctx {
             component: None,
             lua: None,
             window: None,
+            profile: None,
             owner: Value::Nil,
             rebuilding: false,
             lifetime: None,
@@ -371,6 +376,15 @@ impl Ctx {
     pub fn with_window(mut self, window: iced::window::Id) -> Self {
         self.window = Some(window);
         self
+    }
+
+    pub fn with_profile(mut self, profile: Option<PathBuf>) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    fn profile(&self) -> Option<&Path> {
+        self.profile.as_deref()
     }
 
     fn window(&self) -> Option<iced::window::Id> {
@@ -393,6 +407,7 @@ pub fn element(node: Table, ctx: &Ctx) -> mlua::Result<Element<'static, Message>
                 component: Some((id, node.get::<u64>("__component_revision")?, ctx.window)),
                 lua: ctx.lua.clone(),
                 window: ctx.window,
+                profile: ctx.profile.clone(),
                 owner: ctx.owner.clone(),
                 rebuilding: ctx.rebuilding,
                 lifetime: ctx.lifetime.clone(),
@@ -611,6 +626,7 @@ fn build(
         "markdown" => &["text_size", "spacing", "on_link_click", "style"],
         "responsive" => &[],
         "canvas" => &[],
+        "shader" => &["source", "path", "extraArgs"],
         "pane_grid" => &[
             "id",
             "direction",
@@ -684,6 +700,7 @@ fn build(
         "markdown" => advanced::markdown(node, ctx)?,
         "responsive" => advanced::responsive(node, ctx, layout)?,
         "canvas" => canvas::canvas(node, layout)?,
+        "shader" => shader::shader(node, ctx, layout)?,
         "pane_grid" => advanced::pane_grid(node, ctx, layout)?,
         _ => {
             return Err(mlua::Error::runtime(format!(
@@ -733,7 +750,7 @@ fn direct_size(kind: &str) -> (bool, bool) {
         "table" => (true, false),
         "text_editor" | "combo_box" | "markdown" => (false, false),
         "responsive" | "pane_grid" | "canvas" => (true, true),
-        "list_view" => (true, true),
+        "shader" | "list_view" => (true, true),
         "region" => (false, false),
         "vertical_slider" => (false, true),
         _ => (false, false),
@@ -804,6 +821,61 @@ mod tests {
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn shader_accepts_inline_source_and_profile_paths() {
+        let shader = r#"
+            @fragment
+            fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+                return vec4<f32>(uv, 0.0, 1.0);
+            }
+        "#;
+        let lua = mlua::Lua::new();
+        let extra_shader = r#"
+            @fragment
+            fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+                return vec4<f32>(riced.extra_x, riced.extra_y, uv.x, 1.0);
+            }
+        "#;
+        let example_shader = include_str!("../../example/components/shaders/plasma.wgsl");
+        let dir = std::env::temp_dir().join(format!("riced-shader-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("test.wgsl"), shader).unwrap();
+        let ctx = Ctx::new(0).with_profile(Some(dir.clone()));
+        for source in [
+            format!("{{kind='shader',source=[[{shader}]],width=20,height=10}}"),
+
+            format!("{{kind='shader',source=[[{example_shader}]]}}"),
+
+            format!(
+                "{{kind='shader',source=[[{extra_shader}]],extraArgs={{extra_x=1.5,extra_y=2.5}}}}"
+            ),
+            "{kind='shader',path='test.wgsl',width=20,height=10}".to_owned(),
+            "{kind='shader',path='missing.wgsl'}".to_owned(),
+            "{kind='shader',source='not wgsl'}".to_owned(),
+            "{kind='shader',source='@fragment fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }'}".to_owned(),
+        ] {
+            let result = element(lua.load(&source).eval().unwrap(), &ctx);
+            assert!(result.is_ok(), "{source}: {:?}", result.err());
+        }
+        for source in [
+            "{kind='shader'}",
+            "{kind='shader',source='x',path='test.wgsl'}",
+            "{kind='shader',source='   '}",
+            "{kind='shader',path='   '}",
+            "{kind='shader',source='x',extraArgs={1,2}}",
+            "{kind='shader',source='x',extraArgs={mouse_x='x'}}",
+            "{kind='shader',source='x',extraArgs={['bad-key']=1}}",
+            "{kind='shader',source='x',extraArgs={resolution=1}}",
+            "{kind='shader',source='x',extraArgs={x=0/0}}",
+        ] {
+            assert!(
+                element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_err(),
+                "{source}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

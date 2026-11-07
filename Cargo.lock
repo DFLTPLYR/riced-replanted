@@ -3877,6 +3877,7 @@ dependencies = [
  "iced_anim",
  "iced_exwlshell",
  "mlua",
+ "naga",
  "riced-extension-sdk",
  "serde",
  "serde_json",

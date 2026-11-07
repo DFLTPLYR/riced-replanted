@@ -1,0 +1,509 @@
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    fmt::Write as _,
+    fs,
+    hash::{DefaultHasher, Hash, Hasher},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Instant, SystemTime},
+};
+
+use iced::{
+    Element, Rectangle, wgpu,
+    widget::shader::{self, Pipeline, Primitive, Program},
+};
+use mlua::{Table, Value};
+use riced_extension_sdk::log;
+
+use crate::runtime::Message;
+
+use super::{Ctx, Layout};
+
+const MAX_SOURCE: u64 = 1024 * 1024;
+const FILE_CACHE: usize = 32;
+const PIPELINE_CACHE: usize = 16;
+const VALIDATION_CACHE: usize = 16;
+
+const HEADER: &str = r#"
+struct RicedVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn riced_vertex(@builtin(vertex_index) index: u32) -> RicedVertexOutput {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(3.0, -1.0),
+        vec2<f32>(-1.0, 3.0),
+    );
+    let position = positions[index];
+    var output: RicedVertexOutput;
+    output.position = vec4<f32>(position, 0.0, 1.0);
+    output.uv = position * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+    return output;
+}
+"#;
+
+struct CachedFile {
+    modified: Option<SystemTime>,
+    len: u64,
+    source: Arc<str>,
+}
+
+thread_local! {
+    static FILES: RefCell<HashMap<PathBuf, CachedFile>> = RefCell::new(HashMap::new());
+    static VALIDATED: RefCell<HashMap<u64, Result<(), String>>> =
+        RefCell::new(HashMap::new());
+}
+
+pub(super) fn shader(
+    node: &Table,
+    ctx: &Ctx,
+    layout: Layout,
+) -> mlua::Result<Element<'static, Message>> {
+    let Some(fragment) = source(node, ctx)? else {
+        return Ok(iced::widget::Space::new().into());
+    };
+    let extra = extra_args(node)?;
+    let source: Arc<str> = format!("{}\n{fragment}", full_header(&extra)).into();
+    if let Err(error) = validate(&source) {
+        log::error!(target: "shader", "{error}");
+        return Ok(iced::widget::Space::new().into());
+    }
+    let mut widget = shader::Shader::new(ShaderProgram {
+        key: hash(&source),
+        source,
+        extra: pack_extra(&extra).into(),
+    });
+    if let Some(width) = layout.width {
+        widget = widget.width(width);
+    }
+    if let Some(height) = layout.height {
+        widget = widget.height(height);
+    }
+    Ok(widget.into())
+}
+
+fn source(node: &Table, ctx: &Ctx) -> mlua::Result<Option<Arc<str>>> {
+    let inline = node.get::<Option<String>>("source")?;
+    let path = node.get::<Option<String>>("path")?;
+    match (inline, path) {
+        (Some(_), Some(_)) => Err(mlua::Error::runtime(
+            "shader accepts source or path, not both",
+        )),
+        (None, None) => Err(mlua::Error::runtime("shader requires source or path")),
+        (Some(source), None) => {
+            if source.trim().is_empty() {
+                return Err(mlua::Error::runtime("shader source must not be empty"));
+            }
+            Ok(Some(source.into()))
+        }
+        (None, Some(path)) => {
+            if path.trim().is_empty() {
+                return Err(mlua::Error::runtime("shader path must not be empty"));
+            }
+            match read(Path::new(&path), ctx.profile()) {
+                Ok(source) => Ok(Some(source)),
+                Err(error) => {
+                    log::error!(target: "shader", "{error}");
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
+
+fn extra_args(node: &Table) -> mlua::Result<Vec<(String, f32)>> {
+    let Some(table) = node.get::<Option<Table>>("extraArgs")? else {
+        return Ok(Vec::new());
+    };
+    let mut args = Vec::new();
+    for pair in table.pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        let Value::String(key) = key else {
+            return Err(mlua::Error::runtime("extraArgs keys must be strings"));
+        };
+        let key = key.to_str()?.to_owned();
+        if !valid_extra_name(&key) {
+            return Err(mlua::Error::runtime(format!(
+                "invalid extraArgs key {key:?}; use a WGSL identifier that is not resolution, time, _pad, or starts with riced_"
+            )));
+        }
+        let value = match value {
+            Value::Integer(value) => value as f64,
+            Value::Number(value) => value,
+            _ => {
+                return Err(mlua::Error::runtime(format!(
+                    "extraArgs.{key} must be a finite number"
+                )));
+            }
+        };
+        if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
+            return Err(mlua::Error::runtime(format!(
+                "extraArgs.{key} must be a finite number"
+            )));
+        }
+        args.push((key, value as f32));
+    }
+    if args.len() > 16 {
+        return Err(mlua::Error::runtime("extraArgs supports at most 16 values"));
+    }
+    args.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(args)
+}
+
+fn valid_extra_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+        && !matches!(name, "resolution" | "time" | "_pad")
+        && !name.starts_with("riced_")
+}
+
+fn full_header(extra: &[(String, f32)]) -> String {
+    let padded = padded_fields(extra.len());
+    let mut header = String::from(
+        "struct Riced {\n    resolution: vec2<f32>,\n    time: f32,\n    _pad: f32,\n",
+    );
+    for (name, _) in extra {
+        let _ = writeln!(header, "    {name}: f32,");
+    }
+    for index in extra.len()..padded {
+        let _ = writeln!(header, "    riced_pad{index}: f32,");
+    }
+    header.push_str("};\n\n@group(0) @binding(0) var<uniform> riced: Riced;\n");
+    header.push_str(HEADER);
+    header
+}
+
+fn padded_fields(len: usize) -> usize {
+    len.max(1).div_ceil(4) * 4
+}
+
+fn pack_extra(extra: &[(String, f32)]) -> Vec<f32> {
+    let mut values = extra.iter().map(|(_, value)| *value).collect::<Vec<_>>();
+    values.resize(padded_fields(extra.len()), 0.0);
+    values
+}
+
+fn read(path: &Path, profile: Option<&Path>) -> Result<Arc<str>, String> {
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        profile.unwrap_or(Path::new(".")).join(path)
+    };
+    let metadata = fs::metadata(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if metadata.len() > MAX_SOURCE {
+        return Err(format!(
+            "{}: shader exceeds the 1 MiB limit",
+            path.display()
+        ));
+    }
+    let modified = metadata.modified().ok();
+    let len = metadata.len();
+    FILES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(cached) = cache.get(&path)
+            && cached.modified == modified
+            && cached.len == len
+        {
+            return Ok(cached.source.clone());
+        }
+        let source: Arc<str> = fs::read_to_string(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?
+            .into();
+        if cache.len() >= FILE_CACHE {
+            cache.clear();
+        }
+        cache.insert(
+            path.clone(),
+            CachedFile {
+                modified,
+                len,
+                source: source.clone(),
+            },
+        );
+        Ok(source)
+    })
+}
+
+fn hash(source: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn validate(source: &str) -> Result<(), String> {
+    let key = hash(source);
+    VALIDATED.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(result) = cache.get(&key) {
+            return result.clone();
+        }
+        let result = (|| {
+            let module = naga::front::wgsl::parse_str(source).map_err(|error| error.to_string())?;
+            let mut validator = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::default(),
+            );
+            validator
+                .validate(&module)
+                .map_err(|error| error.to_string())?;
+            fragment_entry(&module)
+        })();
+        if cache.len() >= VALIDATION_CACHE {
+            cache.clear();
+        }
+        cache.insert(key, result.clone());
+        result
+    })
+}
+
+fn fragment_entry(module: &naga::Module) -> Result<(), String> {
+    for variable in module.global_variables.iter().map(|(_, variable)| variable) {
+        if let Some(binding) = &variable.binding
+            && (binding.group, binding.binding) != (0, 0)
+        {
+            return Err("shader may only bind resources at group 0 binding 0".to_owned());
+        }
+    }
+    let entry = module
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == "fs_main" && entry.stage == naga::ShaderStage::Fragment)
+        .ok_or("shader must define @fragment fn fs_main")?;
+    let argument = entry
+        .function
+        .arguments
+        .first()
+        .filter(|_| entry.function.arguments.len() == 1)
+        .ok_or("fs_main must take one @location(0) uv: vec2<f32> argument")?;
+    let Some(naga::Binding::Location {
+        location: 0,
+        interpolation,
+        sampling,
+        ..
+    }) = argument.binding.clone()
+    else {
+        return Err("fs_main must take one @location(0) uv: vec2<f32> argument".to_owned());
+    };
+    if !matches!(interpolation, None | Some(naga::Interpolation::Perspective))
+        || !matches!(sampling, None | Some(naga::Sampling::Center))
+        || !is_vector(module, argument.ty, naga::VectorSize::Bi)
+    {
+        return Err("fs_main must take one @location(0) uv: vec2<f32> argument".to_owned());
+    }
+    let result = entry
+        .function
+        .result
+        .as_ref()
+        .ok_or("fs_main must return @location(0) vec4<f32>")?;
+    if !matches!(
+        result.binding,
+        Some(naga::Binding::Location { location: 0, .. })
+    ) || !is_vector(module, result.ty, naga::VectorSize::Quad)
+    {
+        return Err("fs_main must return @location(0) vec4<f32>".to_owned());
+    }
+    Ok(())
+}
+
+fn is_vector(module: &naga::Module, ty: naga::Handle<naga::Type>, size: naga::VectorSize) -> bool {
+    matches!(
+        module.types[ty].inner,
+        naga::TypeInner::Vector {
+            size: actual,
+            scalar: naga::Scalar {
+                kind: naga::ScalarKind::Float,
+                width: 4,
+            },
+        } if actual == size
+    )
+}
+
+#[derive(Default)]
+struct ShaderState;
+
+struct ShaderProgram {
+    source: Arc<str>,
+    key: u64,
+    extra: Arc<[f32]>,
+}
+
+impl Program<Message> for ShaderProgram {
+    type State = ShaderState;
+    type Primitive = ShaderPrimitive;
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        _cursor: iced::mouse::Cursor,
+        bounds: Rectangle,
+    ) -> Self::Primitive {
+        ShaderPrimitive {
+            source: self.source.clone(),
+            key: self.key,
+            extra: self.extra.clone(),
+            size: bounds.size(),
+            gpu: Mutex::new(None),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ShaderPrimitive {
+    source: Arc<str>,
+    key: u64,
+    extra: Arc<[f32]>,
+    size: iced::Size,
+    gpu: Mutex<Option<GpuState>>,
+}
+
+#[derive(Debug)]
+struct GpuState {
+    uniforms: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
+impl Primitive for ShaderPrimitive {
+    type Pipeline = ShaderPipeline;
+
+    fn prepare(
+        &self,
+        pipeline: &mut Self::Pipeline,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _bounds: &Rectangle,
+        _viewport: &shader::Viewport,
+    ) {
+        let time = pipeline.start.elapsed().as_secs_f32();
+        pipeline.render(device, &self.source, self.key);
+
+        let size = (16 + self.extra.len() * 4) as u64;
+        let mut gpu = self.gpu.lock().unwrap();
+        if gpu.is_none() {
+            let layout = pipeline.layout.clone();
+            let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("riced shader uniforms"),
+                size,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("riced shader uniforms"),
+                layout: &layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniforms.as_entire_binding(),
+                }],
+            });
+            *gpu = Some(GpuState {
+                uniforms,
+                bind_group,
+            });
+        }
+        if let Some(gpu) = gpu.as_ref() {
+            let mut bytes = Vec::with_capacity(size as usize);
+            for value in [self.size.width, self.size.height, time, 0.0]
+                .into_iter()
+                .chain(self.extra.iter().copied())
+            {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            queue.write_buffer(&gpu.uniforms, 0, &bytes);
+        }
+    }
+
+    fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
+        let gpu = self.gpu.lock().unwrap();
+        let Some(gpu) = gpu.as_ref() else {
+            return false;
+        };
+        let Some(render_pipeline) = pipeline.pipelines.get(&self.key) else {
+            return false;
+        };
+        render_pass.set_pipeline(render_pipeline);
+        render_pass.set_bind_group(0, &gpu.bind_group, &[]);
+        render_pass.draw(0..3, 0..1);
+        true
+    }
+}
+
+struct ShaderPipeline {
+    start: Instant,
+    format: wgpu::TextureFormat,
+    layout: wgpu::BindGroupLayout,
+    pipelines: HashMap<u64, wgpu::RenderPipeline>,
+}
+
+impl Pipeline for ShaderPipeline {
+    fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("riced shader uniforms"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        Self {
+            start: Instant::now(),
+            format,
+            layout,
+            pipelines: HashMap::new(),
+        }
+    }
+}
+
+impl ShaderPipeline {
+    fn render(&mut self, device: &wgpu::Device, source: &str, key: u64) -> &wgpu::RenderPipeline {
+        if !self.pipelines.contains_key(&key) {
+            if self.pipelines.len() >= PIPELINE_CACHE {
+                self.pipelines.clear();
+            }
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("riced shader"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("riced shader"),
+                bind_group_layouts: &[&self.layout],
+                push_constant_ranges: &[],
+            });
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("riced shader"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("riced_vertex"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview: None,
+                cache: None,
+            });
+            self.pipelines.insert(key, pipeline);
+        }
+        self.pipelines.get(&key).expect("shader pipeline inserted")
+    }
+}

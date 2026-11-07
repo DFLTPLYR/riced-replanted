@@ -1472,6 +1472,58 @@ layout.
 Coordinates default to 0. `border.width` defaults to 1. Arbitrary Iced canvas
 programs are not supported.
 
+#### `iced.shader(props)`
+
+`source`: inline WGSL fragment shader. `path`: WGSL file resolved against the
+profile directory (absolute paths allowed). Exactly one is required. See
+[`example/components/shaders/plasma.wgsl`](example/components/shaders/plasma.wgsl)
+for a runnable shader.
+
+`extraArgs`: optional table of named finite numbers. Riced generates the fields
+from the keys and exposes them as `riced.<name>`:
+
+```lua
+iced.shader({
+    source = [[
+        @fragment
+        fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+            return vec4<f32>(riced.extra_x, riced.extra_y, 0.0, 1.0);
+        }
+    ]],
+    extraArgs = { extra_x = 0.5, extra_y = 0.75 },
+})
+```
+
+Keys must be WGSL identifiers that do not start with `riced_`; `resolution`,
+`time`, and `_pad` are reserved. At most 16 values. Keys are sorted for a stable
+layout; changing the key set recompiles the pipeline, while changing values only
+updates the uniform buffer.
+
+Riced supplies the vertex stage and this reserved interface:
+
+```wgsl
+struct Riced {
+    resolution: vec2<f32>,
+    time: f32,
+    _pad: f32,
+    // extraArgs fields are appended here
+};
+
+@group(0) @binding(0) var<uniform> riced: Riced;
+
+@fragment
+fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32>;
+```
+
+`uv` runs from 0 to 1 across the widget. `riced.time` is seconds since the
+first shader render; `riced.resolution` is the widget size. `width` and `height`
+use the common props.
+
+
+Shaders render only with the wgpu backend; the tiny-skia fallback draws nothing.
+Invalid WGSL, a missing file, or a wrong `fs_main` signature logs an error and
+renders empty space. Files are re-read when their mtime or size changes.
+
 #### `iced.pane_grid(content, props)`
 
 `content`: nonempty array of pane elements. Requires a nonempty `id`.
@@ -2232,6 +2284,9 @@ it.
   color; text selection is not exposed.
 - `canvas` supports `rect`, `circle`, `line`, `path`, and `text`; arbitrary Iced
   canvas programs are not supported.
+- `shader` is wgpu-only; the tiny-skia fallback renders nothing. Shaders use a
+  fixed vertex stage, `resolution`/`time` uniforms, and up to 16 named
+  `extraArgs` floats.
 - `responsive` runs Lua during layout; its callback must not mutate app state.
   Errors fall back to empty space.
 - `pane_grid` delivers resize and drag events, but resize ratios cannot be set

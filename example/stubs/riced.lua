@@ -209,6 +209,11 @@ config = {}
 
 ---@alias iced.CanvasShape iced.CanvasRect|iced.CanvasCircle|iced.CanvasLine|iced.CanvasPath|iced.CanvasText
 
+---@class iced.ShaderProps: iced.Props
+---@field source? string Inline WGSL fragment shader defining `fs_main`
+---@field path? string WGSL file resolved against the profile directory; mutually exclusive with `source`
+---@field extraArgs? table<string, number> Named f32 uniforms exposed as `riced.<name>`
+
 ---@class iced.Task
 ---@field type "focus"|"scroll_to"|"clipboard_read"|"clipboard_write"|"font"|"window"|"exit"
 ---@field id? string
@@ -242,6 +247,7 @@ config = {}
 ---@field max_height? number
 ---@field direction? "horizontal"|"vertical"|"both"
 ---@field scrollbar_hidden? boolean Hide scrollbars with zero width; wheel/touch scrolling stays enabled.
+---@field auto_scroll? boolean
 ---@field thickness? number
 ---@field value? number|boolean|string
 ---@field girth? number
@@ -666,6 +672,10 @@ function iced.responsive(content, props) end
 ---@return iced.Element
 function iced.canvas(content, props) end
 
+---@param props iced.ShaderProps
+---@return iced.Element
+function iced.shader(props) end
+
 ---@param content iced.Element[]
 ---@param props? iced.Props
 ---@return iced.Element
@@ -815,3 +825,11 @@ function riced.plugins(name) end
 ---@param name string
 ---@return riced.Extension
 function riced.plugin(name) end
+
+---@param name string
+---@return riced.Extension
+function iced.plugin(name) end
+
+---@param name string
+---@return riced.Extension
+function iced.plugins(name) end

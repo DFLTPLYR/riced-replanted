@@ -1440,7 +1440,8 @@ impl App {
             node,
             &Ctx::new(self.generation)
                 .with_lua(self.lua.clone())
-                .with_window(id),
+                .with_window(id)
+                .with_profile(self.path.parent().map(Path::to_path_buf)),
         )?;
         let leaving: Table = self.animations()?.get::<Function>("finish")?.call(())?;
         self.destroy_unmounted(id, &ids)?;
@@ -1451,7 +1452,8 @@ impl App {
                 node?,
                 &Ctx::new(self.generation)
                     .with_lua(self.lua.clone())
-                    .with_window(id),
+                    .with_window(id)
+                    .with_profile(self.path.parent().map(Path::to_path_buf)),
             )?;
             elements.push(iced::widget::pin(child).into());
         }

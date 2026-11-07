@@ -42,10 +42,13 @@ A profile looks like:
 ├── .luarc.json            -- editor setup for this profile
 ├── components/            -- watched modules used by iced.component
 │   ├── panel.lua
+│   ├── shader.lua         -- optional iced.shader example
 │   ├── system.lua
 │   ├── wayland.lua
-│   └── layers/
-│       └── background.lua
+│   ├── layers/
+│   │   └── background.lua
+│   └── shaders/
+│       └── plasma.wgsl    -- fragment shader using riced.resolution/time
 ├── extensions/            -- optional extension executables and stubs
 │   ├── system/riced-system
 │   │   └── stub.lua       -- extension-owned LuaLS definitions
@@ -254,8 +257,8 @@ application event to Lua.
 | Native windows | [`iced.window`](API.md#native-windows) |
 | Known limits | [Known limits](API.md#known-limits) |
 
-`list_view`, `table`, `markdown`, `canvas`, `pane_grid`, and the remaining
-widgets are documented in the [widget reference](API.md#widget-reference).
+`list_view`, `table`, `markdown`, `canvas`, `shader`, `pane_grid`, and the
+remaining widgets are documented in the [widget reference](API.md#widget-reference).
 
 ## Building
 
