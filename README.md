@@ -46,11 +46,12 @@ A profile looks like:
 │   ├── wayland.lua
 │   └── layers/
 │       └── background.lua
-├── extensions/            -- optional extension executables
+├── extensions/            -- optional extension executables and stubs
 │   ├── system/riced-system
+│   │   └── stub.lua       -- extension-owned LuaLS definitions
 │   ├── wayland/riced-wayland
 │   └── dbus/riced-dbus
-└── stubs/riced.lua        -- lua-language-server definitions
+└── stubs/riced.lua        -- core lua-language-server definitions
 ```
 
 See [`example/shell.lua`](example/shell.lua) for a working profile.
@@ -80,8 +81,13 @@ injected globals (`riced`, `iced`, `theme`, `config`). `example/.luarc.json`
 loads it, so completions and undefined-global diagnostics work while editing a
 profile copied from `example/`. Copy both, or point `workspace.library` at
 `example/stubs`. Each profile needs its own `.luarc.json` because `require`
-resolves from the profile directory. The stub is hand-written; update it when
-the Lua API changes.
+resolves from the profile directory. The core stub is hand-written; update it
+when the core Lua API changes.
+
+Extensions own their editor definitions in a `stub.lua` beside the binary.
+`riced extension build` installs it into `<profile>/extensions/<name>/`, and
+lua-language-server indexes the profile workspace, so extension globals and
+proxy methods complete without editing the core stub.
 
 ## Extensions
 

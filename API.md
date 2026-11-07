@@ -6,8 +6,9 @@ subscriptions, files, and extensions. For installation, profile layout, reload
 behavior, and examples, see [README.md](README.md).
 
 The injected API is defined in `src/lua/`, `src/file.rs`, `src/plugins.rs`, and
-`src/widgets/`. Editor definitions live in `example/stubs/riced.lua`; update the
-stub when this document changes.
+`src/widgets/`. Core editor definitions live in `example/stubs/riced.lua`;
+extension definitions live in each extension's `stub.lua`. Update them when the
+Lua API changes.
 
 ## Contents
 
