@@ -1,6 +1,6 @@
 //! Material You theme generation and Matugen-compatible template rendering.
 //!
-//! Reads the existing `<config>/riced/data/templates/config.toml`, renders every
+//! Reads the running profile's `data/templates/config.toml`, renders every
 //! `[templates.*]` entry with `{{ colors.* }}` variables, and publishes both
 //! palettes as `riced.plugins("themeagen").colors`.
 
@@ -886,14 +886,22 @@ fn config_path() -> Result<PathBuf, String> {
     if let Some(path) = env::var_os("RICED_THEMEAGEN_CONFIG") {
         return Ok(PathBuf::from(path));
     }
-    Ok(config_root()?.join("riced/data/templates/config.toml"))
+    Ok(data_root()?.join("templates/config.toml"))
 }
 
 fn state_path() -> Result<PathBuf, String> {
     if let Some(path) = env::var_os("RICED_THEMEAGEN_STATE") {
         return Ok(PathBuf::from(path));
     }
-    Ok(config_root()?.join("riced/data/theme/themeagen.json"))
+    Ok(data_root()?.join("theme/themeagen.json"))
+}
+
+/// The running profile's `data/` when the daemon spawned us, else the shared one.
+fn data_root() -> Result<PathBuf, String> {
+    if let Some(dir) = env::var_os("RICED_PROFILE_DIR") {
+        return Ok(PathBuf::from(dir).join("data"));
+    }
+    Ok(config_root()?.join("riced/data"))
 }
 
 fn config_root() -> Result<PathBuf, String> {
@@ -968,6 +976,15 @@ mod tests {
 
     fn terminal_of<'a>(palette: &'a Value, mode: &str) -> &'a Map<String, Value> {
         palette[mode]["terminal"].as_object().unwrap()
+    }
+
+    #[test]
+    fn profile_dir_selects_the_running_profile_data() {
+        let dir = TempDir::new("profile");
+        // Safe: no other test reads this variable.
+        unsafe { env::set_var("RICED_PROFILE_DIR", &dir.0) };
+        assert_eq!(data_root().unwrap(), dir.0.join("data"));
+        unsafe { env::remove_var("RICED_PROFILE_DIR") };
     }
 
     #[test]

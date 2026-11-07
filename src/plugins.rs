@@ -104,9 +104,14 @@ impl Plugins {
             .join(format!("{}.sock", crate::ipc::profile_id(profile_dir)?));
         let (incoming, stop) = listen(&socket)?;
         let dir = profile_dir.join("extensions");
-        let supervisor = dir
-            .is_dir()
-            .then(|| Supervisor::new(dir, socket.clone(), profile.clone()));
+        let supervisor = dir.is_dir().then(|| {
+            Supervisor::new(
+                dir,
+                socket.clone(),
+                profile.clone(),
+                profile_dir.to_path_buf(),
+            )
+        });
         Ok(Self {
             socket: Some(socket),
             incoming,
@@ -720,6 +725,7 @@ struct Supervisor {
     dir: PathBuf,
     socket: PathBuf,
     profile: String,
+    profile_dir: PathBuf,
     children: HashMap<PathBuf, ChildEntry>,
     last_scan: Instant,
 }
@@ -742,11 +748,12 @@ fn restart_delay(failures: u32) -> Duration {
 }
 
 impl Supervisor {
-    fn new(dir: PathBuf, socket: PathBuf, profile: String) -> Self {
+    fn new(dir: PathBuf, socket: PathBuf, profile: String, profile_dir: PathBuf) -> Self {
         Self {
             dir,
             socket,
             profile,
+            profile_dir,
             children: HashMap::new(),
             last_scan: Instant::now() - SCAN_EVERY,
         }
@@ -837,6 +844,7 @@ impl Supervisor {
             .current_dir(path.parent().unwrap_or(Path::new(".")))
             .env("RICED_SOCKET", &self.socket)
             .env("RICED_PROFILE", &self.profile)
+            .env("RICED_PROFILE_DIR", &self.profile_dir)
             .stderr(Stdio::piped())
             .spawn();
         match result {
@@ -1583,7 +1591,12 @@ mod tests {
         fs::write(&companion, "return {}").unwrap();
         fs::set_permissions(&companion, fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(scan(&root), vec![script.clone()]);
-        let mut supervisor = Supervisor::new(root.clone(), root.join("socket"), "test".to_owned());
+        let mut supervisor = Supervisor::new(
+            root.clone(),
+            root.join("socket"),
+            "test".to_owned(),
+            root.clone(),
+        );
 
         supervisor.poll();
         assert!(supervisor.children.get(&script).unwrap().child.is_some());

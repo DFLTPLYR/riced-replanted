@@ -26,8 +26,12 @@ riced extension build extensions/themeagen -o <profile>/extensions/themeagen
 
 Default paths:
 
-- Config: `$XDG_CONFIG_HOME/riced/data/templates/config.toml`
-- State: `$XDG_CONFIG_HOME/riced/data/theme/themeagen.json`
+- Config: `<profile>/data/templates/config.toml`
+- State: `<profile>/data/theme/themeagen.json`
+
+`<profile>` is the directory riced was started from, e.g.
+`~/.config/riced/replanted` for `riced -c replanted`. Extensions started
+outside riced fall back to `$XDG_CONFIG_HOME/riced/data/...`.
 
 `RICED_THEMEAGEN_CONFIG` and `RICED_THEMEAGEN_STATE` override those paths.
 
@@ -37,9 +41,11 @@ directory; `~/` in `output_path` expands to `$HOME`.
 ## Common plugin behavior
 
 The proxy is live: `alive` is false and the store is empty until the process
-connects. Reads are synchronous; each publish replaces the snapshot while the
-proxy table identity stays the same. Methods are asynchronous and take a
-callback as the last argument. On success the callback receives
+connects, and `generate`/`populate`/`regenerate` are `nil` until then. Guard
+calls from `app:theme` (which runs before the first poll) with
+`themeagen.alive`. Reads are synchronous; each publish replaces the snapshot
+while the proxy table identity stays the same. Methods are asynchronous and
+take a callback as the last argument. On success the callback receives
 `(result, nil)`; on failure it receives `(nil, error)`. Without a callback,
 method failures are not surfaced to Lua.
 

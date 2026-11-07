@@ -465,14 +465,22 @@ method calls its callback with `(nil, error)`. Without a callback, method
 failures are not surfaced to Lua. Use a callback when an action can fail. `?`
 below means the field or value may be absent or `nil`.
 
+Methods exist only after the extension connects. During the first style pass
+(before the host polls the extension), proxy methods are `nil`, so guard calls
+made from `app:theme` with `plugin.alive`.
+
 #### Themeagen extension
 
 `riced-themeagen` builds Material You palettes from a seed color or image and
 renders Matugen-style `[templates.*]` entries. It reads the existing template
 directory by default:
 
-- config: `$XDG_CONFIG_HOME/riced/data/templates/config.toml`
-- state: `$XDG_CONFIG_HOME/riced/data/theme/themeagen.json`
+- config: `<profile>/data/templates/config.toml`
+- state: `<profile>/data/theme/themeagen.json`
+
+`<profile>` is the directory riced was started from, e.g.
+`~/.config/riced/replanted` for `riced -c replanted`; standalone extensions
+fall back to `$XDG_CONFIG_HOME/riced/data/...`.
 
 `RICED_THEMEAGEN_CONFIG` and `RICED_THEMEAGEN_STATE` override those paths.
 Relative `input_path` and `output_path` values resolve against the config
