@@ -1495,7 +1495,7 @@ iced.shader({
 ```
 
 Keys must be WGSL identifiers that do not start with `riced_`; `resolution`,
-`time`, and `_pad` are reserved. At most 16 values. Keys are sorted for a stable
+`time`, `mouse`, `hover`, and `_pad` are reserved. At most 16 values. Keys are sorted for a stable
 layout; changing the key set recompiles the pipeline, while changing values only
 updates the uniform buffer.
 
@@ -1505,7 +1505,9 @@ Riced supplies the vertex stage and this reserved interface:
 struct Riced {
     resolution: vec2<f32>,
     time: f32,
-    _pad: f32,
+    hover: f32,
+    mouse: vec2<f32>,
+    _pad: vec2<f32>,
     // extraArgs fields are appended here
 };
 
@@ -1515,10 +1517,29 @@ struct Riced {
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32>;
 ```
 
+`riced.mouse` is the cursor position in widget pixels; `x` is negative when the
+cursor is outside. `riced.hover` is `1.0` inside and `0.0` outside. Cursor
+updates require the shader's surface to receive pointer events, so an
+`events_transparent` background layer stays centered.
+
 `uv` runs from 0 to 1 across the widget. `riced.time` is seconds since the
 first shader render; `riced.resolution` is the widget size. `width` and `height`
 use the common props.
 
+`animated = true` makes the shader request redraws so `riced.time` keeps
+advancing without a Lua `iced.frames()` subscription. `fps` caps those redraws
+(1–240, default 60); use a lower value for a full-screen background.
+
+```lua
+iced.shader({
+    path = "components/shaders/water.wgsl",
+    width = "fill",
+    height = "fill",
+    animated = true,
+    fps = 30,
+    extraArgs = { opacity = 0.35, speed = 1.0 },
+})
+```
 
 Shaders render only with the wgpu backend; the tiny-skia fallback draws nothing.
 Invalid WGSL, a missing file, or a wrong `fs_main` signature logs an error and

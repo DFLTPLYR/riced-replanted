@@ -626,7 +626,7 @@ fn build(
         "markdown" => &["text_size", "spacing", "on_link_click", "style"],
         "responsive" => &[],
         "canvas" => &[],
-        "shader" => &["source", "path", "extraArgs"],
+        "shader" => &["source", "path", "extraArgs", "animated", "fps"],
         "pane_grid" => &[
             "id",
             "direction",
@@ -839,6 +839,17 @@ mod tests {
             }
         "#;
         let example_shader = include_str!("../../example/components/shaders/plasma.wgsl");
+        let mouse_shader = r#"
+            @fragment
+            fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+                let center = select(
+                    vec2<f32>(0.5),
+                    riced.mouse / max(riced.resolution, vec2<f32>(1.0)),
+                    riced.mouse.x >= 0.0,
+                );
+                return vec4<f32>(uv, center.x, riced.hover);
+            }
+        "#;
         let dir = std::env::temp_dir().join(format!("riced-shader-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("test.wgsl"), shader).unwrap();
@@ -851,6 +862,7 @@ mod tests {
             format!(
                 "{{kind='shader',source=[[{extra_shader}]],extraArgs={{extra_x=1.5,extra_y=2.5}}}}"
             ),
+            format!("{{kind='shader',source=[[{mouse_shader}]],animated=true,fps=30}}"),
             "{kind='shader',path='test.wgsl',width=20,height=10}".to_owned(),
             "{kind='shader',path='missing.wgsl'}".to_owned(),
             "{kind='shader',source='not wgsl'}".to_owned(),
@@ -869,9 +881,19 @@ mod tests {
             "{kind='shader',source='x',extraArgs={['bad-key']=1}}",
             "{kind='shader',source='x',extraArgs={resolution=1}}",
             "{kind='shader',source='x',extraArgs={x=0/0}}",
+            "{kind='shader',source='x',extraArgs={mouse=1}}",
+            "{kind='shader',source='x',extraArgs={hover=1}}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_err(),
+                "{source}"
+            );
+        }
+        let minimal = "@fragment fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> { return vec4<f32>(uv, 0.0, 1.0); }";
+        for fps in [0, 241] {
+            let source = format!("{{kind='shader',source=[[{minimal}]],animated=true,fps={fps}}}");
+            assert!(
+                element(lua.load(&source).eval().unwrap(), &Ctx::new(0)).is_err(),
                 "{source}"
             );
         }

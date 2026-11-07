@@ -76,6 +76,15 @@ pub(super) fn shader(
         key: hash(&source),
         source,
         extra: pack_extra(&extra).into(),
+        animated: node.get::<Option<bool>>("animated")?.unwrap_or(false),
+        fps: match node.get::<Option<u16>>("fps")? {
+            Some(0) => return Err(mlua::Error::runtime("shader fps must be from 1 to 240")),
+            Some(fps) if fps > 240 => {
+                return Err(mlua::Error::runtime("shader fps must be from 1 to 240"));
+            }
+            Some(fps) => fps,
+            None => 60,
+        },
     });
     if let Some(width) = layout.width {
         widget = widget.width(width);
@@ -128,7 +137,7 @@ fn extra_args(node: &Table) -> mlua::Result<Vec<(String, f32)>> {
         let key = key.to_str()?.to_owned();
         if !valid_extra_name(&key) {
             return Err(mlua::Error::runtime(format!(
-                "invalid extraArgs key {key:?}; use a WGSL identifier that is not resolution, time, _pad, or starts with riced_"
+                "invalid extraArgs key {key:?}; use a WGSL identifier that is not resolution, time, mouse, hover, _pad, or starts with riced_"
             )));
         }
         let value = match value {
@@ -158,14 +167,14 @@ fn valid_extra_name(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
         && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
-        && !matches!(name, "resolution" | "time" | "_pad")
+        && !matches!(name, "resolution" | "time" | "mouse" | "hover" | "_pad")
         && !name.starts_with("riced_")
 }
 
 fn full_header(extra: &[(String, f32)]) -> String {
     let padded = padded_fields(extra.len());
     let mut header = String::from(
-        "struct Riced {\n    resolution: vec2<f32>,\n    time: f32,\n    _pad: f32,\n",
+        "struct Riced {\n    resolution: vec2<f32>,\n    time: f32,\n    hover: f32,\n    mouse: vec2<f32>,\n    _pad: vec2<f32>,\n",
     );
     for (name, _) in extra {
         let _ = writeln!(header, "    {name}: f32,");
@@ -324,30 +333,53 @@ fn is_vector(module: &naga::Module, ty: naga::Handle<naga::Type>, size: naga::Ve
 }
 
 #[derive(Default)]
-struct ShaderState;
+struct ShaderState {
+    gpu: Arc<Mutex<Option<(u64, GpuState)>>>,
+}
 
 struct ShaderProgram {
     source: Arc<str>,
     key: u64,
     extra: Arc<[f32]>,
+    animated: bool,
+    fps: u16,
 }
 
 impl Program<Message> for ShaderProgram {
     type State = ShaderState;
     type Primitive = ShaderPrimitive;
 
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        _event: &iced::Event,
+        _bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Option<shader::Action<Message>> {
+        self.animated.then(|| {
+            let step = std::time::Duration::from_secs_f32(1.0 / f32::from(self.fps));
+            shader::Action::request_redraw_at(std::time::Instant::now() + step)
+        })
+    }
+
     fn draw(
         &self,
-        _state: &Self::State,
-        _cursor: iced::mouse::Cursor,
+        state: &Self::State,
+        cursor: iced::mouse::Cursor,
         bounds: Rectangle,
     ) -> Self::Primitive {
+        let (mouse, hover) = match cursor.position_in(bounds) {
+            Some(point) => (point, 1.0),
+            None => (iced::Point::new(-1.0, -1.0), 0.0),
+        };
         ShaderPrimitive {
             source: self.source.clone(),
             key: self.key,
             extra: self.extra.clone(),
+            mouse,
+            hover,
             size: bounds.size(),
-            gpu: Mutex::new(None),
+            gpu: state.gpu.clone(),
         }
     }
 }
@@ -357,8 +389,10 @@ struct ShaderPrimitive {
     source: Arc<str>,
     key: u64,
     extra: Arc<[f32]>,
+    mouse: iced::Point,
+    hover: f32,
     size: iced::Size,
-    gpu: Mutex<Option<GpuState>>,
+    gpu: Arc<Mutex<Option<(u64, GpuState)>>>,
 }
 
 #[derive(Debug)]
@@ -381,9 +415,9 @@ impl Primitive for ShaderPrimitive {
         let time = pipeline.start.elapsed().as_secs_f32();
         pipeline.render(device, &self.source, self.key);
 
-        let size = (16 + self.extra.len() * 4) as u64;
+        let size = (32 + self.extra.len() * 4) as u64;
         let mut gpu = self.gpu.lock().unwrap();
-        if gpu.is_none() {
+        if gpu.as_ref().is_none_or(|(existing, _)| *existing != size) {
             let layout = pipeline.layout.clone();
             let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("riced shader uniforms"),
@@ -399,16 +433,28 @@ impl Primitive for ShaderPrimitive {
                     resource: uniforms.as_entire_binding(),
                 }],
             });
-            *gpu = Some(GpuState {
-                uniforms,
-                bind_group,
-            });
+            *gpu = Some((
+                size,
+                GpuState {
+                    uniforms,
+                    bind_group,
+                },
+            ));
         }
-        if let Some(gpu) = gpu.as_ref() {
+        if let Some((_, gpu)) = gpu.as_ref() {
             let mut bytes = Vec::with_capacity(size as usize);
-            for value in [self.size.width, self.size.height, time, 0.0]
-                .into_iter()
-                .chain(self.extra.iter().copied())
+            for value in [
+                self.size.width,
+                self.size.height,
+                time,
+                self.hover,
+                self.mouse.x,
+                self.mouse.y,
+                0.0,
+                0.0,
+            ]
+            .into_iter()
+            .chain(self.extra.iter().copied())
             {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
@@ -418,7 +464,7 @@ impl Primitive for ShaderPrimitive {
 
     fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         let gpu = self.gpu.lock().unwrap();
-        let Some(gpu) = gpu.as_ref() else {
+        let Some((_, gpu)) = gpu.as_ref() else {
             return false;
         };
         let Some(render_pipeline) = pipeline.pipelines.get(&self.key) else {

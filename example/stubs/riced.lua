@@ -213,6 +213,8 @@ config = {}
 ---@field source? string Inline WGSL fragment shader defining `fs_main`
 ---@field path? string WGSL file resolved against the profile directory; mutually exclusive with `source`
 ---@field extraArgs? table<string, number> Named f32 uniforms exposed as `riced.<name>`
+---@field animated? boolean Request redraws so `riced.time` advances
+---@field fps? integer Redraw cap for animated shaders, 1..240 (default 60)
 
 ---@class iced.Task
 ---@field type "focus"|"scroll_to"|"clipboard_read"|"clipboard_write"|"font"|"window"|"exit"

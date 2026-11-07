@@ -12,6 +12,8 @@ function shader.view(props)
         path = "components/shaders/plasma.wgsl",
         width = props and props.width or "fill",
         height = props and props.height or "fill",
+        animated = true,
+        fps = 30,
     })
 end
 
