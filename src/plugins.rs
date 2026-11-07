@@ -183,7 +183,6 @@ impl Plugins {
     /// Applies extension messages. Returns whether anything should be redrawn, plus events
     /// that the caller must feed into `app:update`.
     pub fn poll(&mut self, lua: &Lua) -> mlua::Result<(bool, Vec<Update>)> {
-        crate::logs::prune();
         if let Some(supervisor) = &mut self.supervisor {
             supervisor.poll();
         }

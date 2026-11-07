@@ -5,10 +5,11 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, IsTerminal, Read, Seek, SeekFrom, Write},
+    io::{self, IsTerminal, Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     sync::Mutex,
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -88,6 +89,17 @@ pub fn start(profile: &str, retention: Option<Duration>, mirror: bool) -> io::Re
     });
     let _ = log::set_logger(&LOGGER);
     log::set_max_level(LevelFilter::Info);
+    if retention.is_some() {
+        thread::Builder::new()
+            .name("riced-logs".into())
+            .stack_size(128 * 1024)
+            .spawn(|| {
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                    prune();
+                }
+            })?;
+    }
     Ok(())
 }
 
@@ -135,8 +147,8 @@ pub fn show(profile: &str, clear: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// Drops expired lines even while the daemon is otherwise quiet.
-pub fn prune() {
+/// Drops expired lines from the background prune thread.
+fn prune() {
     let mut sink = SINK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(sink) = sink.as_mut() else {
         return;
@@ -161,12 +173,6 @@ fn write_line(sink: &mut Sink, line: &str) {
     }
     let _ = sink.file.flush();
     let _ = sink.file.unlock();
-    if let Some(retention) = sink.retention
-        && sink.last_prune.elapsed() >= Duration::from_secs(1)
-    {
-        sink.last_prune = Instant::now();
-        let _ = prune_sink(sink, retention);
-    }
 }
 
 fn prune_sink(sink: &mut Sink, retention: Duration) -> io::Result<()> {
@@ -182,9 +188,32 @@ fn prune_sink(sink: &mut Sink, retention: Duration) -> io::Result<()> {
     if kept.len() == contents.len() {
         return Ok(());
     }
-    file.seek(SeekFrom::Start(0))?;
-    file.write_all(kept.as_bytes())?;
-    file.set_len(kept.len() as u64)
+    let temp = sink.path.with_extension("log.tmp");
+    let result = (|| -> io::Result<File> {
+        let mut out = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temp)?;
+        out.write_all(kept.as_bytes())?;
+        out.sync_all()?;
+        // Keep the append handle on the same inode so no write lands in the
+        // replaced file between rename and reopen.
+        let append = OpenOptions::new().append(true).open(&temp)?;
+        fs::rename(&temp, &sink.path)?;
+        Ok(append)
+    })();
+    match result {
+        Ok(file) => {
+            sink.file = file;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            Err(error)
+        }
+    }
 }
 
 fn prune_lines(contents: &str, cutoff: u128) -> String {
