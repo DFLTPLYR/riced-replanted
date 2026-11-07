@@ -69,6 +69,10 @@ pub(super) fn button(
         }
     };
     let mut button = widget::button(content);
+    // Keep iced's default button padding unless Lua asks for a specific value.
+    if node.contains_key("padding")? {
+        button = button.padding(layout.padding);
+    }
     if let Some(width) = layout.width {
         button = button.width(width);
     }

@@ -706,6 +706,7 @@ fn finish(
     let needs_height =
         !sized_height && layout.height.is_some_and(|height| height != Length::Shrink);
     if kind == "container"
+        || kind == "button"
         || (layout.padding == Padding::default() && !needs_width && !needs_height)
     {
         return element;
