@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use iced::widget::operation;
@@ -295,6 +295,9 @@ pub struct App {
     namespace: String,
     path: PathBuf,
     source: Option<String>,
+    reload_attempt: Option<Instant>,
+    reload_failed: Option<String>,
+    reload_error: Option<String>,
     generation: u64,
     windows: Rc<RefCell<Vec<window::Id>>>,
     layers: Vec<Layer>,
@@ -477,6 +480,9 @@ pub fn load_with_plugins(
         lua,
         path: path.to_owned(),
         source: Some(source.to_owned()),
+        reload_attempt: None,
+        reload_failed: None,
+        reload_error: None,
         generation: 0,
         windows: Rc::new(RefCell::new(Vec::new())),
         layers: Vec::new(),
@@ -1726,6 +1732,9 @@ impl App {
     }
 
     fn replace(&mut self, source: &str) -> mlua::Result<()> {
+        // The previous reload's element tree has been replaced by now; free its
+        // widget state before retiring another generation.
+        widgets::free_retired();
         let mut candidate = load_with_plugins(source, &self.path, Rc::clone(&self.plugins))?;
         let current = self.settings()?;
         let next = candidate.settings()?;
@@ -1746,22 +1755,30 @@ impl App {
         candidate.popups = self.popups.clone();
         *candidate.windows.borrow_mut() = self.windows.borrow().clone();
         *candidate.sizes.borrow_mut() = self.sizes.borrow().clone();
-        candidate.reconcile_layers()?;
-        for layer in &candidate.layers {
-            candidate.view(layer.window)?;
+        let result = (|| {
+            candidate.reconcile_layers()?;
+            for layer in &candidate.layers {
+                candidate.view(layer.window)?;
+            }
+            for toplevel in &candidate.toplevels {
+                candidate.view(toplevel.window)?;
+            }
+            for popup in &candidate.popups {
+                candidate.view(popup.window)?;
+            }
+            for &id in candidate.windows.borrow().clone().iter() {
+                candidate.view(id)?;
+                candidate.title(id)?;
+                candidate.style(&candidate.theme(id)?)?;
+            }
+            let _ = candidate.subscription()?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            // Views may have created widget state for the rejected generation.
+            widgets::forget_generation(candidate.generation);
+            return Err(error);
         }
-        for toplevel in &candidate.toplevels {
-            candidate.view(toplevel.window)?;
-        }
-        for popup in &candidate.popups {
-            candidate.view(popup.window)?;
-        }
-        for &id in candidate.windows.borrow().clone().iter() {
-            candidate.view(id)?;
-            candidate.title(id)?;
-            candidate.style(&candidate.theme(id)?)?;
-        }
-        let _ = candidate.subscription()?;
         candidate
             .pending
             .splice(0..0, std::mem::take(&mut self.pending));
@@ -1794,23 +1811,47 @@ impl App {
         if self.source.as_deref() == Some(&source) {
             return Ok(change);
         }
-        self.source = Some(source.clone());
-        self.reload(&source)?;
-        log::info!(target: "reload.shell", "reloaded {}", self.path.display());
-        Ok(Change::All)
+        if self.reload_failed.as_deref() == Some(source.as_str())
+            && self
+                .reload_attempt
+                .is_some_and(|attempt| attempt.elapsed() < Duration::from_secs(1))
+        {
+            return Ok(change);
+        }
+        self.reload_attempt = Some(Instant::now());
+        match self.reload(&source) {
+            Ok(()) => {
+                self.source = Some(source);
+                self.reload_failed = None;
+                self.reload_error = None;
+                log::info!(target: "reload.shell", "reloaded {}", self.path.display());
+                Ok(Change::All)
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.reload_failed = Some(source);
+                if self.reload_error.as_deref() == Some(message.as_str()) {
+                    Ok(change)
+                } else {
+                    self.reload_error = Some(message);
+                    Err(error)
+                }
+            }
+        }
     }
 
     // Re-renders every window that shows a changed module. A broken module restores the
     // previous one so the current UI keeps running, matching shell.lua reload behaviour.
     fn reload_modules(&mut self) -> mlua::Result<Change> {
-        let snapshot = self.modules.borrow().snapshot(&self.lua)?;
-        let changed = {
-            let mut modules = self.modules.borrow_mut();
-            modules.poll(&self.lua)?
-        };
+        let changed = self.modules.borrow_mut().detect_changes();
         if changed.is_empty() {
             return Ok(Change::None);
         }
+        let snapshot = self.modules.borrow().snapshot(&self.lua)?;
+        let changed = {
+            let mut modules = self.modules.borrow_mut();
+            modules.apply_changes(&self.lua, changed)?
+        };
         let previous_layers = self.layers.clone();
         let previous_toplevels = self.toplevels.clone();
         let previous_popups = self.popups.clone();
@@ -2210,7 +2251,7 @@ mod tests {
             assert!(app.check_reload().is_err());
             assert!(
                 matches!(app.check_reload().unwrap(), Change::None),
-                "do not retry/log the same failed save"
+                "retries are rate-limited to once per second"
             );
             assert_eq!(app.state.get::<u32>("count").unwrap(), 1);
             app.view(id).unwrap();
@@ -2222,6 +2263,31 @@ mod tests {
             Change::All | Change::Windows(_)
         ));
         assert_eq!(app.title(id).unwrap().as_deref(), Some("fixed"));
+    }
+
+    #[test]
+    fn failed_shell_reload_retries_without_another_save() {
+        let source = "return riced.daemon({}, 'test', function() end, function() return iced.text('before') end):run()";
+        let profile = Profile::new(&[("shell.lua", source)]);
+        let mut app = load(source, &profile.shell()).unwrap();
+        let id = window::Id::unique();
+        app.view(id).unwrap();
+
+        let data = profile.0.join("data.lua");
+        let next = format!(
+            "local label = dofile('{}')\nlocal app = {{}}\nfunction app:update() end\nfunction app:view() return iced.text(label) end\nfunction app:title() return label end\nreturn riced.daemon(app, 'test', app.update, app.view):title(app.title):run()",
+            data.display()
+        );
+        profile.write("shell.lua", &next);
+        assert!(app.check_reload().is_err());
+        assert!(matches!(app.check_reload().unwrap(), Change::None));
+
+        // The file is unchanged; only the missing dependency appears.
+        std::fs::write(&data, "return 'after'").unwrap();
+        app.reload_attempt = Some(Instant::now() - Duration::from_secs(2));
+        assert!(matches!(app.check_reload().unwrap(), Change::All));
+        assert_eq!(app.source.as_deref(), Some(next.as_str()));
+        assert_eq!(app.title(id).unwrap().as_deref(), Some("after"));
     }
 
     #[test]

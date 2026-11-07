@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
+    time::SystemTime,
 };
 
 use mlua::{FromLua, Function, Lua, Table, Value};
@@ -11,6 +12,8 @@ pub struct Loaded {
     path: PathBuf,
     source: String,
     warned: bool,
+    modified: Option<SystemTime>,
+    size: u64,
 }
 
 #[derive(Clone, Default)]
@@ -169,6 +172,7 @@ impl Modules {
                 "cannot find module {name} in package.path"
             )));
         };
+        let metadata = std::fs::metadata(&path).ok();
         let source = std::fs::read_to_string(&path)
             .map_err(|error| mlua::Error::runtime(format!("cannot read {path}: {error}")))?;
         self.loaded.insert(
@@ -177,19 +181,39 @@ impl Modules {
                 path: path.into(),
                 source,
                 warned: false,
+                modified: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.modified().ok()),
+                size: metadata.map(|metadata| metadata.len()).unwrap_or(0),
             },
         );
         Ok(())
     }
 
-    // Polls watched module files and evicts changed modules plus their dependents.
-    // A changed file becomes the new baseline immediately, so a broken save is not retried.
-    pub fn poll(&mut self, lua: &Lua) -> mlua::Result<Vec<String>> {
+    // Stats watched files; reads only those whose mtime or size changed.
+    pub fn detect_changes(&mut self) -> Vec<String> {
         let mut changed = Vec::new();
         for (name, loaded) in &mut self.loaded {
+            let metadata = match std::fs::metadata(&loaded.path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    if !loaded.warned {
+                        loaded.warned = true;
+                        log::warn!(target: "module.watch", "cannot watch {}: {error}", loaded.path.display());
+                    }
+                    continue;
+                }
+            };
+            let modified = metadata.modified().ok();
+            let size = metadata.len();
+            if modified.is_some() && loaded.modified == modified && loaded.size == size {
+                continue;
+            }
             match std::fs::read_to_string(&loaded.path) {
                 Ok(source) => {
                     loaded.warned = false;
+                    loaded.modified = modified;
+                    loaded.size = size;
                     if source != loaded.source {
                         loaded.source = source;
                         changed.push(name.clone());
@@ -203,9 +227,16 @@ impl Modules {
                 }
             }
         }
+        changed
+    }
+
+    // Evicts changed modules plus their dependents. A changed file becomes the new
+    // baseline immediately, so a broken save is not retried.
+    pub fn apply_changes(&mut self, lua: &Lua, changed: Vec<String>) -> mlua::Result<Vec<String>> {
         if changed.is_empty() {
             return Ok(changed);
         }
+        let mut changed = changed;
         changed.sort();
         let mut dirty = changed.iter().cloned().collect::<HashSet<_>>();
         loop {
@@ -227,6 +258,12 @@ impl Modules {
         let mut dirty = dirty.into_iter().collect::<Vec<_>>();
         dirty.sort();
         Ok(dirty)
+    }
+
+    #[cfg(test)]
+    pub fn poll(&mut self, lua: &Lua) -> mlua::Result<Vec<String>> {
+        let changed = self.detect_changes();
+        self.apply_changes(lua, changed)
     }
 
     pub fn snapshot(&self, lua: &Lua) -> mlua::Result<Snapshot> {
