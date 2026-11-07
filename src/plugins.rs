@@ -3,7 +3,7 @@ use std::{
     env, fs,
     io::{self, BufRead, BufReader, Write},
     os::unix::{
-        fs::PermissionsExt,
+        fs::{MetadataExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
@@ -77,6 +77,8 @@ enum Incoming {
 
 pub struct Plugins {
     socket: Option<PathBuf>,
+    socket_id: Option<(u64, u64)>,
+    _lock: Option<fs::File>,
     incoming: Receiver<Incoming>,
     conns: HashMap<u64, String>,
     handles: HashMap<String, Handle>,
@@ -102,7 +104,10 @@ impl Plugins {
         let socket = PathBuf::from(runtime)
             .join("riced")
             .join(format!("{}.sock", crate::ipc::profile_id(profile_dir)?));
-        let (incoming, stop) = listen(&socket)?;
+        let (incoming, stop, lock) = listen(&socket)?;
+        let socket_id = fs::metadata(&socket)
+            .ok()
+            .map(|metadata| (metadata.dev(), metadata.ino()));
         let dir = profile_dir.join("extensions");
         let supervisor = dir.is_dir().then(|| {
             Supervisor::new(
@@ -114,6 +119,8 @@ impl Plugins {
         });
         Ok(Self {
             socket: Some(socket),
+            socket_id,
+            _lock: Some(lock),
             incoming,
             conns: HashMap::new(),
             handles: HashMap::new(),
@@ -132,6 +139,8 @@ impl Plugins {
         let (_tx, rx) = mpsc::channel();
         Self {
             socket: None,
+            socket_id: None,
+            _lock: None,
             incoming: rx,
             conns: HashMap::new(),
             handles: HashMap::new(),
@@ -142,8 +151,15 @@ impl Plugins {
 
     #[cfg(test)]
     pub(crate) fn with_event(event: Json) -> Self {
+        Self::with_events([event])
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_events(events: impl IntoIterator<Item = Json>) -> Self {
         let (tx, rx) = mpsc::channel();
-        tx.send(Incoming::Event { conn: 1, event }).unwrap();
+        for event in events {
+            tx.send(Incoming::Event { conn: 1, event }).unwrap();
+        }
         let mut plugins = Self::test(rx);
         plugins.conns.insert(1, "demo".into());
         plugins
@@ -153,6 +169,8 @@ impl Plugins {
     fn test(incoming: Receiver<Incoming>) -> Self {
         Self {
             socket: None,
+            socket_id: None,
+            _lock: None,
             incoming,
             conns: HashMap::new(),
             handles: HashMap::new(),
@@ -214,6 +232,13 @@ impl Plugins {
                         reject(&writer, "name must match [a-z0-9_-]{1,32}");
                         continue;
                     }
+                    if let Some(method) = methods
+                        .keys()
+                        .find(|method| matches!(method.as_str(), "name" | "alive" | "store"))
+                    {
+                        reject(&writer, &format!("method {method} is reserved"));
+                        continue;
+                    }
                     if self.handles.get(&name).is_some_and(|handle| handle.alive) {
                         reject(&writer, &format!("duplicate plugin {name}"));
                         continue;
@@ -272,18 +297,25 @@ impl Plugins {
                         .get_mut(&name)
                         .and_then(|handle| handle.pending.lock().unwrap().remove(&id));
                     if let Some(key) = key {
-                        let callback: Function = lua.registry_value(&key)?;
-                        let value = lua_json(lua, &result)?;
-                        let error = match error {
-                            Some(error) => Value::String(lua.create_string(error)?),
-                            None => Value::Nil,
-                        };
-                        if ok {
-                            callback.call::<()>((value, Value::Nil))?;
-                        } else {
-                            callback.call::<()>((Value::Nil, error))?;
+                        let called = (|| -> mlua::Result<()> {
+                            let callback: Function = lua.registry_value(&key)?;
+                            let value = lua_json(lua, &result)?;
+                            let error = match error {
+                                Some(error) => Value::String(lua.create_string(error)?),
+                                None => Value::Nil,
+                            };
+                            if ok {
+                                callback.call::<()>((value, Value::Nil))
+                            } else {
+                                callback.call::<()>((Value::Nil, error))
+                            }
+                        })();
+                        if let Err(error) = called {
+                            log::error!(target: "plugin.callback", "plugin {name} callback failed: {error}");
                         }
-                        lua.remove_registry_value(key)?;
+                        if let Err(error) = lua.remove_registry_value(key) {
+                            log::error!(target: "plugin.callback", "plugin {name} callback cleanup failed: {error}");
+                        }
                         changed = true;
                     }
                 }
@@ -302,12 +334,19 @@ impl Plugins {
                         handle.pending.lock().unwrap().drain().collect::<Vec<_>>()
                     };
                     for (_, key) in pending {
-                        let callback: Function = lua.registry_value(&key)?;
-                        callback.call::<()>((
-                            Value::Nil,
-                            Value::String(lua.create_string("plugin disconnected")?),
-                        ))?;
-                        lua.remove_registry_value(key)?;
+                        let called = (|| -> mlua::Result<()> {
+                            let callback: Function = lua.registry_value(&key)?;
+                            callback.call::<()>((
+                                Value::Nil,
+                                Value::String(lua.create_string("plugin disconnected")?),
+                            ))
+                        })();
+                        if let Err(error) = called {
+                            log::error!(target: "plugin.callback", "plugin {name} disconnect callback failed: {error}");
+                        }
+                        if let Err(error) = lua.remove_registry_value(key) {
+                            log::error!(target: "plugin.callback", "plugin {name} callback cleanup failed: {error}");
+                        }
                     }
                     self.set_alive(lua, &name, false)?;
                     changed = true;
@@ -430,7 +469,10 @@ impl Drop for Plugins {
         if let Some(supervisor) = &mut self.supervisor {
             supervisor.stop();
         }
-        if let Some(socket) = &self.socket {
+        if let (Some(socket), Some(id)) = (&self.socket, self.socket_id)
+            && let Ok(metadata) = fs::metadata(socket)
+            && (metadata.dev(), metadata.ino()) == id
+        {
             let _ = fs::remove_file(socket);
         }
     }
@@ -580,10 +622,32 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-'))
 }
 
-fn listen(socket: &Path) -> io::Result<(Receiver<Incoming>, Arc<AtomicBool>)> {
-    if let Some(parent) = socket.parent() {
-        fs::create_dir_all(parent)?;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+fn listen(socket: &Path) -> io::Result<(Receiver<Incoming>, Arc<AtomicBool>, fs::File)> {
+    let parent = socket
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    let profile = socket
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid profile socket name")
+        })?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(parent.join(format!("{profile}.lock")))?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!("{} is already in use", socket.display()),
+            ));
+        }
+        Err(fs::TryLockError::Error(error)) => return Err(error),
     }
     if UnixStream::connect(socket).is_ok() {
         return Err(io::Error::new(
@@ -597,10 +661,7 @@ fn listen(socket: &Path) -> io::Result<(Receiver<Incoming>, Arc<AtomicBool>)> {
         Err(error) => return Err(error),
     }
     // Discard requests for the previous instance before clients can connect.
-    if let (Some(parent), Some(profile)) = (socket.parent(), socket.file_stem()) {
-        let profile = profile.to_str().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "invalid profile socket name")
-        })?;
+    if let Some(parent) = socket.parent() {
         match fs::remove_dir_all(parent.join("ipc").join(profile)) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -642,7 +703,7 @@ fn listen(socket: &Path) -> io::Result<(Receiver<Incoming>, Arc<AtomicBool>)> {
                 }
             }
         })?;
-    Ok((rx, stop))
+    Ok((rx, stop, lock))
 }
 
 fn read_conn(stream: UnixStream, id: u64, tx: SyncSender<Incoming>, stop: Arc<AtomicBool>) {
@@ -1466,7 +1527,7 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let socket = root.join("test.sock");
-        let (incoming, _stop) = listen(&socket).unwrap();
+        let (incoming, _stop, _lock) = listen(&socket).unwrap();
         let mut plugins = Plugins::test(incoming);
         let lua = Lua::new();
         crate::lua::load(&lua).unwrap();
@@ -1559,7 +1620,7 @@ mod tests {
         let socket = root.join("test.sock");
         // A crashed instance can leave both a socket and queued requests behind.
         drop(UnixListener::bind(&socket).unwrap());
-        let (_incoming, stop) = listen(&socket).unwrap();
+        let (_incoming, stop, _lock) = listen(&socket).unwrap();
         assert!(!queue.exists());
         assert!(other.join("keep.ready").exists());
 
@@ -1605,6 +1666,160 @@ mod tests {
         supervisor.poll();
         assert!(!supervisor.children.contains_key(&script));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_reserved_method_names() {
+        let (tx, mut plugins, lua) = setup();
+        let calls = register(&tx, &["store"]);
+        plugins.poll(&lua).unwrap();
+        let ToPlugin::Error { error } = serde_json::from_slice(&calls.recv().unwrap()).unwrap()
+        else {
+            panic!("expected a rejection");
+        };
+        assert!(error.contains("reserved"));
+        assert!(plugins.handles.is_empty());
+    }
+
+    #[test]
+    fn callback_errors_do_not_skip_other_results_or_leak() {
+        let (tx, mut plugins, lua) = setup();
+        let calls = register(&tx, &["query"]);
+        plugins.poll(&lua).unwrap();
+        lua.load(
+            r#"
+            bad = 0
+            good = nil
+            riced.plugins('demo').query(function() bad = bad + 1; error('boom') end)
+            riced.plugins('demo').query(function(result) good = result end)
+            "#,
+        )
+        .exec()
+        .unwrap();
+        let ToPlugin::Call { id: bad, .. } =
+            serde_json::from_slice(&calls.recv().unwrap()).unwrap()
+        else {
+            panic!("expected a call");
+        };
+        let ToPlugin::Call { id: good, .. } =
+            serde_json::from_slice(&calls.recv().unwrap()).unwrap()
+        else {
+            panic!("expected a call");
+        };
+
+        tx.send(Incoming::Result {
+            conn: 1,
+            id: bad,
+            ok: true,
+            result: serde_json::json!(1),
+            error: None,
+        })
+        .unwrap();
+        plugins.poll(&lua).unwrap();
+        assert_eq!(lua.globals().get::<u32>("bad").unwrap(), 1);
+        assert_eq!(plugins.handles["demo"].pending.lock().unwrap().len(), 1);
+
+        tx.send(Incoming::Result {
+            conn: 1,
+            id: good,
+            ok: true,
+            result: serde_json::json!(2),
+            error: None,
+        })
+        .unwrap();
+        plugins.poll(&lua).unwrap();
+        assert_eq!(lua.globals().get::<u32>("good").unwrap(), 2);
+    }
+
+    #[test]
+    fn disconnect_callback_errors_do_not_skip_remaining_callbacks() {
+        let (tx, mut plugins, lua) = setup();
+        let calls = register(&tx, &["query"]);
+        plugins.poll(&lua).unwrap();
+        lua.load(
+            r#"
+            bad = 0
+            good = nil
+            riced.plugins('demo').query(function() bad = bad + 1; error('boom') end)
+            riced.plugins('demo').query(function(_, error) good = error end)
+            "#,
+        )
+        .exec()
+        .unwrap();
+        calls.recv().unwrap();
+        calls.recv().unwrap();
+
+        tx.send(Incoming::Closed { conn: 1 }).unwrap();
+        plugins.poll(&lua).unwrap();
+        assert_eq!(lua.globals().get::<u32>("bad").unwrap(), 1);
+        assert_eq!(
+            lua.globals().get::<String>("good").unwrap(),
+            "plugin disconnected"
+        );
+        let proxy: Table = lua
+            .globals()
+            .get::<Table>("__riced_plugins")
+            .unwrap()
+            .get("demo")
+            .unwrap();
+        assert!(!proxy.get::<bool>("alive").unwrap());
+        assert!(plugins.handles["demo"].pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_listeners_have_one_owner() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "riced-plugins-lock-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let socket = root.join("test.sock");
+        let results = std::thread::scope(|scope| {
+            let a = scope.spawn(|| listen(&socket).map(|(_, stop, lock)| (stop, lock)));
+            let b = scope.spawn(|| listen(&socket).map(|(_, stop, lock)| (stop, lock)));
+            [a.join().unwrap(), b.join().unwrap()]
+        });
+        let mut owners = results
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        assert_eq!(owners.len(), 1);
+        assert!(
+            UnixStream::connect(&socket).is_ok(),
+            "the loser must not replace the winner's socket"
+        );
+        let (stop, _lock) = owners.pop().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn drop_removes_only_the_socket_it_bound() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "riced-plugins-drop-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let socket = root.join("test.sock");
+        let (incoming, stop, lock) = listen(&socket).unwrap();
+        let metadata = fs::metadata(&socket).unwrap();
+        let plugins = Plugins {
+            socket: Some(socket.clone()),
+            socket_id: Some((metadata.dev(), metadata.ino())),
+            _lock: Some(lock),
+            incoming,
+            conns: HashMap::new(),
+            handles: HashMap::new(),
+            supervisor: None,
+            stop,
+        };
+        fs::remove_file(&socket).unwrap();
+        fs::write(&socket, "replacement").unwrap();
+        drop(plugins);
+        assert_eq!(fs::read_to_string(&socket).unwrap(), "replacement");
         let _ = fs::remove_dir_all(root);
     }
 
