@@ -757,12 +757,20 @@ impl App {
         let mut fired = false;
         for plugins::Update::Event(name, event) in events {
             fired = true;
-            let payload = self.lua.create_table()?;
-            payload.set("type", "plugin")?;
-            payload.set("plugin", name)?;
-            payload.set("event", crate::plugins::lua_json(&self.lua, &event)?)?;
-            let value = self.update.call((self.state.clone(), payload))?;
-            tasks.push(self.tasks(value)?);
+            let result = (|| -> mlua::Result<Task<Message>> {
+                let payload = self.lua.create_table()?;
+                payload.set("type", "plugin")?;
+                payload.set("plugin", name.as_str())?;
+                payload.set("event", crate::plugins::lua_json(&self.lua, &event)?)?;
+                let value = self.update.call((self.state.clone(), payload))?;
+                self.tasks(value)
+            })();
+            match result {
+                Ok(task) => tasks.push(task),
+                Err(error) => {
+                    log::error!(target: "plugin.event", "plugin {name} event failed: {error}");
+                }
+            }
         }
         Ok((changed || fired, Task::batch(tasks)))
     }
@@ -3949,6 +3957,28 @@ return m";
         let (changed, tasks) = app.poll_plugins().unwrap();
         assert!(changed);
         assert!(tasks.units() > 0);
+    }
+
+    #[test]
+    fn one_bad_plugin_event_does_not_drop_the_rest() {
+        let plugins = Rc::new(RefCell::new(plugins::Plugins::with_events([
+            serde_json::json!({"n": 1}),
+            serde_json::json!({"n": 2}),
+        ])));
+        let shell = r#"
+            local app = { seen = {} }
+            function app:update(event)
+                if event.event.n == 1 then error('bad event') end
+                self.seen[#self.seen + 1] = event.event.n
+            end
+            function app:view() return iced.text('x') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let mut app = load_with_plugins(shell, Path::new("shell.lua"), plugins).unwrap();
+        let (changed, _) = app.poll_plugins().unwrap();
+        assert!(changed);
+        let seen: Table = app.state.get("seen").unwrap();
+        assert_eq!(seen.get::<u32>(1).unwrap(), 2);
     }
 
     #[test]
