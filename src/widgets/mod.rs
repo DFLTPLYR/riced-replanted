@@ -22,7 +22,7 @@ use mlua::{Table, Value};
 use crate::runtime::Message;
 
 pub(crate) use region::root as with_input_regions;
-pub(crate) use state::{forget_generation, forget_window, sweep_animations};
+pub(crate) use state::{forget_generation, forget_window, free_retired, sweep_animations};
 
 pub fn color(value: &str) -> mlua::Result<Color> {
     if !value.is_ascii() {

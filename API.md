@@ -1243,8 +1243,8 @@ Props: `value` (initial text, default `""`), `placeholder`, `id`, `size`
 `on_input`, and `style`.
 
 State is kept by `id` for the lifetime of the process or until `riced` reloads
-the shell. Passing a `value` that differs from the current text replaces the
-text; changing the id starts a fresh editor.
+the shell. Typing is preserved across renders; changing `value` from the
+previous render replaces the text, and changing the id starts a fresh editor.
 
 If `on_action` is set, it takes precedence over `on_input`. `on_action` sends:
 

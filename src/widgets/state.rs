@@ -2,9 +2,8 @@
 //!
 //! Iced recreates elements every render, so stateful widgets need a stable
 //! allocation. Entries are keyed by Lua generation and widget id; a shell
-//! reload gets a fresh generation. Replaced entries are leaked:
-//! `shortcut: state is kept for the process lifetime, add a generation sweep
-//! if profiles churn through ids or options`.
+//! reload gets a fresh generation. Retired generations are kept for one reload
+//! so iced can drop the old element tree, then freed.
 
 use std::{
     cell::{Cell, RefCell},
@@ -16,16 +15,28 @@ use super::animation::Control;
 use iced::widget::{combo_box, pane_grid, text_editor};
 use mlua::Value;
 
-type PaneState = &'static RefCell<pane_grid::State<usize>>;
+type PaneState = Rc<RefCell<pane_grid::State<usize>>>;
+type ComboState = Rc<combo_box::State<String>>;
 type ListKey = (u64, Option<iced::window::Id>, String);
 
+struct EditorState {
+    value: String,
+    cell: Rc<RefCell<text_editor::Content>>,
+}
+
+#[allow(dead_code)] // Fields only keep the allocations alive.
+enum Retired {
+    Editor(Rc<RefCell<text_editor::Content>>),
+    Combo(ComboState),
+    Pane(PaneState),
+}
+
 thread_local! {
-    static EDITORS: RefCell<HashMap<(u64, String), &'static RefCell<text_editor::Content>>> =
-        RefCell::new(HashMap::new());
-    static COMBOS: RefCell<HashMap<(u64, String), &'static combo_box::State<String>>> =
-        RefCell::new(HashMap::new());
+    static EDITORS: RefCell<HashMap<(u64, String), EditorState>> = RefCell::new(HashMap::new());
+    static COMBOS: RefCell<HashMap<(u64, String), ComboState>> = RefCell::new(HashMap::new());
     static PANES: RefCell<HashMap<(u64, String, u8, usize), PaneState>> =
         RefCell::new(HashMap::new());
+    static RETIRED: RefCell<Vec<Retired>> = const { RefCell::new(Vec::new()) };
     static MARKDOWN: RefCell<HashMap<String, Rc<Vec<iced::widget::markdown::Item>>>> =
         RefCell::new(HashMap::new());
     static LISTS: RefCell<HashMap<ListKey, ListEntry>> = RefCell::new(HashMap::new());
@@ -40,6 +51,49 @@ pub(crate) fn forget_window(generation: u64, window: iced::window::Id) {
 
 pub(crate) fn forget_generation(generation: u64) {
     LISTS.with_borrow_mut(|lists| lists.retain(|(owner, _, _), _| *owner != generation));
+    let mut retiring = Vec::new();
+    EDITORS.with_borrow_mut(|editors| {
+        editors.retain(|(owner, _), state| {
+            if *owner == generation {
+                retiring.push(Retired::Editor(Rc::clone(&state.cell)));
+                false
+            } else {
+                true
+            }
+        });
+    });
+    COMBOS.with_borrow_mut(|combos| {
+        combos.retain(|(owner, _), state| {
+            if *owner == generation {
+                retiring.push(Retired::Combo(Rc::clone(&*state)));
+                false
+            } else {
+                true
+            }
+        });
+    });
+    PANES.with_borrow_mut(|panes| {
+        panes.retain(|(owner, _, _, _), state| {
+            if *owner == generation {
+                retiring.push(Retired::Pane(Rc::clone(state)));
+                false
+            } else {
+                true
+            }
+        });
+    });
+    RETIRED.with_borrow_mut(|retired| retired.extend(retiring));
+}
+
+/// Drops state retired by the previous reload. Call before building a new
+/// generation so iced has replaced the element tree that referenced it.
+pub(crate) fn free_retired() {
+    RETIRED.with_borrow_mut(Vec::clear);
+}
+
+fn static_ref<T>(value: &T) -> &'static T {
+    // SAFETY: the owning Rc lives in a thread-local map or the retired list.
+    unsafe { &*(value as *const T) }
 }
 
 #[derive(Default)]
@@ -83,8 +137,8 @@ pub(crate) fn sweep_animations() {
     });
 }
 
-/// Stable editor content. `value` wins when it differs from the stored text, so
-/// a profile can reset the document; ordinary typing does not allocate.
+/// Stable editor content. `value` is the last value prop; when it changes the
+/// text is replaced in place, so a static value does not erase typing.
 pub(super) fn editor(
     generation: u64,
     id: &str,
@@ -93,21 +147,31 @@ pub(super) fn editor(
     EDITORS.with(|editors| {
         let mut editors = editors.borrow_mut();
         let key = (generation, id.to_owned());
-        if let Some(existing) = editors.get(&key)
-            && existing.borrow().text() == value
-        {
-            return *existing;
+        if let Some(existing) = editors.get_mut(&key) {
+            if existing.value != value {
+                let mut content = existing.cell.borrow_mut();
+                content.perform(text_editor::Action::SelectAll);
+                content.perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+                    std::sync::Arc::new(value.to_owned()),
+                )));
+                existing.value = value.to_owned();
+            }
+            return static_ref(&*existing.cell);
         }
-        let state = Box::leak(Box::new(RefCell::new(text_editor::Content::with_text(
-            value,
-        ))));
-        editors.insert(key, state);
-        state
+        let cell = Rc::new(RefCell::new(text_editor::Content::with_text(value)));
+        editors.insert(
+            key,
+            EditorState {
+                value: value.to_owned(),
+                cell: Rc::clone(&cell),
+            },
+        );
+        static_ref(&*cell)
     })
 }
 
 /// # Safety
-/// `cell` is a leaked `RefCell`, so the pointer is valid for the process.
+/// `cell` is owned by the editor map or the retired list.
 pub(super) fn read_editor(
     cell: &'static RefCell<text_editor::Content>,
 ) -> &'static text_editor::Content {
@@ -117,8 +181,8 @@ pub(super) fn read_editor(
 pub(super) fn perform(generation: u64, id: &str, action: text_editor::Action) -> Option<String> {
     EDITORS.with(|editors| {
         let editors = editors.borrow();
-        let cell = editors.get(&(generation, id.to_owned()))?;
-        let mut content = cell.borrow_mut();
+        let state = editors.get(&(generation, id.to_owned()))?;
+        let mut content = state.cell.borrow_mut();
         content.perform(action);
         Some(content.text())
     })
@@ -127,8 +191,8 @@ pub(super) fn perform(generation: u64, id: &str, action: text_editor::Action) ->
 pub(super) fn text(generation: u64, id: &str) -> Option<String> {
     EDITORS.with(|editors| {
         let editors = editors.borrow();
-        let cell = editors.get(&(generation, id.to_owned()))?;
-        Some(cell.borrow().text())
+        let state = editors.get(&(generation, id.to_owned()))?;
+        Some(state.cell.borrow().text())
     })
 }
 
@@ -144,11 +208,13 @@ pub(super) fn combo(
         if let Some(existing) = combos.get(&key)
             && existing.options() == options
         {
-            return *existing;
+            return static_ref(&**existing);
         }
-        let state = Box::leak(Box::new(combo_box::State::new(options.to_vec())));
-        combos.insert(key, state);
-        state
+        let state = Rc::new(combo_box::State::new(options.to_vec()));
+        if let Some(old) = combos.insert(key, Rc::clone(&state)) {
+            RETIRED.with_borrow_mut(|retired| retired.push(Retired::Combo(old)));
+        }
+        static_ref(&*state)
     })
 }
 
@@ -290,7 +356,7 @@ pub(super) fn panes(
         let mut panes = panes.borrow_mut();
         let key = (generation, id.to_owned(), axis_key, count);
         if let Some(existing) = panes.get(&key) {
-            return *existing;
+            return static_ref(&**existing);
         }
         let (mut state, mut current) = pane_grid::State::new(0);
         for index in 1..count {
@@ -299,14 +365,16 @@ pub(super) fn panes(
             };
             current = next;
         }
-        let state = Box::leak(Box::new(RefCell::new(state)));
-        panes.insert(key, state);
-        state
+        let state = Rc::new(RefCell::new(state));
+        if let Some(old) = panes.insert(key, Rc::clone(&state)) {
+            RETIRED.with_borrow_mut(|retired| retired.push(Retired::Pane(old)));
+        }
+        static_ref(&*state)
     })
 }
 
 /// # Safety
-/// `cell` is a leaked `RefCell`, so the pointer is valid for the process.
+/// `cell` is owned by the pane map or the retired list.
 pub(super) fn read_panes(
     cell: &'static RefCell<pane_grid::State<usize>>,
 ) -> &'static pane_grid::State<usize> {
@@ -361,6 +429,49 @@ mod tests {
         assert_eq!(restored.controls[0].state().event, "enter");
         forget_generation(992);
         assert!(!initial.controls[0].state().alive);
+    }
+
+    #[test]
+    fn editor_keeps_typed_text_until_the_value_prop_changes() {
+        let generation = 993;
+        editor(generation, "doc", "start");
+        let typed = perform(
+            generation,
+            "doc",
+            text_editor::Action::Edit(text_editor::Edit::Insert('!')),
+        );
+        assert_ne!(typed.as_deref(), Some("start"));
+        editor(generation, "doc", "start");
+        assert_eq!(text(generation, "doc"), typed);
+        editor(generation, "doc", "reset");
+        assert_eq!(text(generation, "doc").as_deref(), Some("reset"));
+        forget_generation(generation);
+        free_retired();
+    }
+
+    #[test]
+    fn generation_sweep_frees_widget_state_after_one_reload() {
+        let generation = 994;
+        editor(generation, "doc", "text");
+        combo(generation, "pick", &["a".to_owned()]);
+        panes(generation, "grid", 2, pane_grid::Axis::Horizontal);
+        let editor = EDITORS
+            .with_borrow(|editors| Rc::downgrade(&editors[&(generation, "doc".to_owned())].cell));
+        let combo =
+            COMBOS.with_borrow(|combos| Rc::downgrade(&combos[&(generation, "pick".to_owned())]));
+        let pane = PANES
+            .with_borrow(|panes| Rc::downgrade(&panes[&(generation, "grid".to_owned(), 0, 2)]));
+
+        forget_generation(generation);
+        assert!(
+            editor.upgrade().is_some(),
+            "iced may still hold the old tree"
+        );
+
+        free_retired();
+        assert!(editor.upgrade().is_none());
+        assert!(combo.upgrade().is_none());
+        assert!(pane.upgrade().is_none());
     }
 
     #[test]

@@ -4721,6 +4721,13 @@ return m";
             Some("x")
         );
         assert_eq!(app.state.get::<String>("got").unwrap(), "x");
+
+        // A static value prop must not reset the editor on the next render.
+        app.view(window::Id::unique()).unwrap();
+        assert_eq!(
+            widgets::editor_text(app.generation, "editor").as_deref(),
+            Some("x")
+        );
     }
 
     #[test]
