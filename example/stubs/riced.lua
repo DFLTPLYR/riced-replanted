@@ -217,7 +217,7 @@ config = {}
 ---@field fps? integer Redraw cap for animated shaders, 1..240 (default 60)
 
 ---@class iced.Task
----@field type "focus"|"scroll_to"|"clipboard_read"|"clipboard_write"|"font"|"window"|"exit"
+---@field type "focus"|"scroll_to"|"clipboard_read"|"clipboard_write"|"font"|"window"|"lock"|"unlock"|"exit"
 ---@field id? string
 ---@field x? number
 ---@field y? number

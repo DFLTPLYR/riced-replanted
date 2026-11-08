@@ -741,6 +741,19 @@ impl App {
                 let content: String = task.get("content")?;
                 Ok(iced::clipboard::write::<Message>(content))
             }
+            "lock" | "unlock" => {
+                keys(task, &["type"])?;
+                Ok(Task::done(Message::Surface(
+                    ExWlShellCustomActionWithId::new(
+                        None,
+                        if kind == "lock" {
+                            ExWlShellCustomAction::Lock
+                        } else {
+                            ExWlShellCustomAction::UnLock
+                        },
+                    ),
+                )))
+            }
             "font" => {
                 keys(task, &["type", "path"])?;
                 let path: String = task.get("path")?;

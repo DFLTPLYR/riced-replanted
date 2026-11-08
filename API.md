@@ -285,6 +285,12 @@ function app:view(props)
 end
 ```
 
+Request a session lock with the `lock` task and release it with `unlock`:
+
+```lua
+return { type = "lock" }
+```
+
 When an `input_panel` or `session_lock` surface closes, `update` receives
 `{ type = "shell_closed", window = <props.window>, shell = <string> }`.
 
@@ -1944,6 +1950,8 @@ return {
 | `clipboard_write` | `content` (string)                     | Write text to the clipboard                                   |
 | `font`            | `path`                                 | Load a font file at runtime                                   |
 | `window`          | `window`, `action`, plus action fields | Resize, move, close, fullscreen, or window the surface        |
+| `lock`            | —                                      | Request a session lock                                        |
+| `unlock`          | —                                      | Release the session lock                                      |
 | `exit`            | —                                      | Exit `riced`                                                  |
 
 Window actions:
