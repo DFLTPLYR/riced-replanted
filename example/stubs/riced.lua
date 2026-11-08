@@ -773,6 +773,10 @@ function riced.file(options) end
 ---@field id? string
 ---@field layer_settings? riced.LayerSettings
 
+---@class riced.ShellInfo
+---@field window any
+---@field shell "layer"|"popup"|"window"|"input_panel"|"session_lock"
+
 ---@class riced.Daemon
 ---@field app table
 ---@field namespace string
@@ -781,7 +785,7 @@ local Daemon = {}
 ---@param app table
 ---@param namespace string
 ---@param update fun(self: table, event: any, component: string?): nil|iced.Task|iced.Task[]
----@param view fun(self: table, props: { window: any, width: number?, height: number? }): iced.Element|iced.Element[]|nil
+---@param view fun(self: table, props: { window: any, width: number?, height: number?, shell: "layer"|"popup"|"window"|"input_panel"|"session_lock"? }): iced.Element|iced.Element[]|nil
 ---@return riced.Daemon
 function riced.daemon(app, namespace, update, view) end
 
@@ -808,6 +812,10 @@ function Daemon:redraw_scope(value) end
 ---@param value riced.Settings
 ---@return riced.Daemon
 function Daemon:settings(value) end
+
+---@param value fun(self: table, info: riced.ShellInfo): any?
+---@return riced.Daemon
+function Daemon:on_new_shell(value) end
 
 ---@return riced.Daemon
 function Daemon:run() end

@@ -13,7 +13,7 @@ function riced.daemon(app, namespace, update, view)
 	return setmetatable({ app = app, namespace = namespace, update = update, view = view, options = {} }, builder)
 end
 
-for _, name in ipairs({ "title", "subscription", "theme", "style", "redraw_scope", "settings" }) do
+for _, name in ipairs({ "title", "subscription", "theme", "style", "redraw_scope", "settings", "on_new_shell" }) do
 	builder[name] = function(self, value)
 		self.options[name] = value
 		return self

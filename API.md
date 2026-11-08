@@ -210,6 +210,7 @@ Arguments:
 | `:style(value)`        | `function(self, palette) -> style table?`      |
 | `:redraw_scope(value)` | `function(self, event) -> scope`               |
 | `:settings(value)`     | settings table                                 |
+| `:on_new_shell(value)` | `function(self, info) -> event?`               |
 
 Every callback except `update` and `view` is optional.
 
@@ -235,6 +236,7 @@ events. See [Widget events](#widget-events).
 | `window` | opaque userdata | Surface identifier for this render; use with window tasks        |
 | `width`  | number or nil   | Current logical surface width; available after the first resize  |
 | `height` | number or nil   | Current logical surface height; available after the first resize |
+| `shell`  | string or nil   | `"layer"`, `"popup"`, `"window"`, `"input_panel"`, or `"session_lock"` |
 
 `redraw_scope` runs for every incoming message before `update`. Return `nil` or
 `"all"` to redraw every window, `"none"` to skip redraws, or `props.window` to
@@ -255,6 +257,36 @@ redraw only that window.
 `start_mode = "active"` is the usual choice for visible widget-only views.
 `"background"` starts without a surface. Layer views created with `iced.layer`
 get their own surfaces independently. `"all_screens"` is also accepted.
+
+### Shell surfaces
+
+`:on_new_shell(function(self, info) return event end)` runs for every surface
+the runtime creates, synchronously before that surface's first frame. `info`
+has:
+
+| Field    | Type            | Meaning                                                        |
+| -------- | --------------- | -------------------------------------------------------------- |
+| `window` | opaque userdata | Surface identifier; the same value as `props.window`           |
+| `shell`  | string          | `"layer"`, `"popup"`, `"window"`, `"input_panel"`, or `"session_lock"` |
+
+Return an event to deliver it to `update` before the first view, or `nil`.
+`props.shell` in `view` is the same string.
+
+Declared surfaces (`layer`, `popup`, `window`) still return surface descriptors
+from `view`. `input_panel` and `session_lock` surfaces must return an element
+instead; it is rendered to fill the surface:
+
+```lua
+function app:view(props)
+    if props.shell == "session_lock" then
+        return lock.view(props)
+    end
+    return { bar.view(props) }
+end
+```
+
+When an `input_panel` or `session_lock` surface closes, `update` receives
+`{ type = "shell_closed", window = <props.window>, shell = <string> }`.
 
 ### `riced.ipc`
 

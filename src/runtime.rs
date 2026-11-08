@@ -14,6 +14,7 @@ use iced_exwlshell::{
     redraw::Scope,
     reexport::KeyboardInteractivity,
     settings::StartMode,
+    shell::{ShellInfo, ShellType},
 };
 use mlua::{Function, Lua, LuaSerdeExt, Table, UserData, Value};
 use riced_extension_sdk::log;
@@ -286,6 +287,41 @@ impl TryFrom<Message> for ExWlShellCustomActionWithId {
 struct Window(window::Id);
 impl UserData for Window {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SurfaceKind {
+    Layer,
+    Popup,
+    Window,
+    InputPanel,
+    SessionLock,
+}
+
+impl SurfaceKind {
+    fn from_shell(shell: ShellType) -> Self {
+        match shell {
+            ShellType::LayerShell => Self::Layer,
+            ShellType::PopUp => Self::Popup,
+            ShellType::XdgTopLevel => Self::Window,
+            ShellType::InputPanel => Self::InputPanel,
+            ShellType::SessionLock => Self::SessionLock,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Layer => "layer",
+            Self::Popup => "popup",
+            Self::Window => "window",
+            Self::InputPanel => "input_panel",
+            Self::SessionLock => "session_lock",
+        }
+    }
+
+    fn declared(self) -> bool {
+        matches!(self, Self::Layer | Self::Popup | Self::Window)
+    }
+}
+
 pub struct App {
     lua: Lua,
     state: Table,
@@ -309,6 +345,7 @@ pub struct App {
     mounts: Mounts,
     windows_of: Rc<RefCell<HashMap<String, Vec<window::Id>>>>,
     sizes: RefCell<HashMap<window::Id, Size>>,
+    extras: RefCell<HashMap<window::Id, SurfaceKind>>,
     plugins: Rc<RefCell<plugins::Plugins>>,
 }
 
@@ -494,9 +531,16 @@ pub fn load_with_plugins(
         mounts: Rc::new(RefCell::new(HashMap::new())),
         windows_of: Rc::new(RefCell::new(HashMap::new())),
         sizes: RefCell::new(HashMap::new()),
+        extras: RefCell::new(HashMap::new()),
         plugins,
     };
-    for name in ["title", "subscription", "style", "redraw_scope"] {
+    for name in [
+        "title",
+        "subscription",
+        "style",
+        "redraw_scope",
+        "on_new_shell",
+    ] {
         app.options.get::<Option<Function>>(name)?;
     }
     match app.options.get::<Value>("theme")? {
@@ -801,7 +845,80 @@ impl App {
         Ok(Task::batch(tasks))
     }
 
+    fn surface_kind(&self, id: window::Id) -> Option<SurfaceKind> {
+        if let Some(kind) = self.extras.borrow().get(&id) {
+            return Some(*kind);
+        }
+        if self.layers.iter().any(|layer| layer.window == id) {
+            return Some(SurfaceKind::Layer);
+        }
+        if self.toplevels.iter().any(|window| window.window == id) {
+            return Some(SurfaceKind::Window);
+        }
+        if self.popups.iter().any(|popup| popup.window == id) {
+            return Some(SurfaceKind::Popup);
+        }
+        None
+    }
+
+    fn new_shell(&mut self, info: ShellInfo) -> Option<Message> {
+        let kind = SurfaceKind::from_shell(info.shell);
+        if !kind.declared() {
+            self.extras.borrow_mut().insert(info.window, kind);
+        }
+        let callback = match self.options.get::<Option<Function>>("on_new_shell") {
+            Ok(Some(callback)) => callback,
+            Ok(None) => return None,
+            Err(error) => {
+                log::error!(target: "shell.new", "on_new_shell is invalid: {error}");
+                return None;
+            }
+        };
+        let payload = match (|| -> mlua::Result<Table> {
+            let payload = self.lua.create_table()?;
+            payload.set("window", self.window(info.window)?)?;
+            payload.set("shell", kind.name())?;
+            Ok(payload)
+        })() {
+            Ok(payload) => payload,
+            Err(error) => {
+                log::error!(target: "shell.new", "on_new_shell payload failed: {error}");
+                return None;
+            }
+        };
+        match callback.call::<Value>((self.state.clone(), payload)) {
+            Ok(Value::Nil) => None,
+            Ok(value) => Some(Message::Lua(self.generation, None, value)),
+            Err(error) => {
+                log::error!(target: "shell.new", "on_new_shell failed: {error}");
+                None
+            }
+        }
+    }
+
     fn window_closed(&mut self, id: window::Id) -> mlua::Result<Task<Message>> {
+        let extra = self.extras.borrow_mut().remove(&id);
+        if let Some(kind) = extra {
+            self.forget_window(id)?;
+            let event = self.lua.create_table()?;
+            event.set("type", "shell_closed")?;
+            event.set("window", self.window(id)?)?;
+            event.set("shell", kind.name())?;
+            let task = match self.update.call::<Value>((self.state.clone(), event)) {
+                Ok(value) => match self.tasks(value) {
+                    Ok(task) => task,
+                    Err(error) => {
+                        log::error!(target: "shell.close", "shell close handler returned an invalid task: {error}");
+                        Task::none()
+                    }
+                },
+                Err(error) => {
+                    log::error!(target: "shell.close", "shell close handler failed: {error}");
+                    Task::none()
+                }
+            };
+            return Ok(task.chain(self.surface_tasks()));
+        }
         let (surface, on_closed) = if let Some(toplevel) = self
             .toplevels
             .iter_mut()
@@ -874,6 +991,9 @@ impl App {
             .call::<()>((format!("{id:?}"), self.windows.borrow().contains(&id)))?;
         let props = self.lua.create_table()?;
         props.set("window", self.window(id)?)?;
+        if let Some(kind) = self.surface_kind(id) {
+            props.set("shell", kind.name())?;
+        }
         if let Some(size) = self.sizes.borrow().get(&id) {
             props.set("width", size.width)?;
             props.set("height", size.height)?;
@@ -1351,8 +1471,11 @@ impl App {
         if !self.windows.borrow().contains(&id) {
             self.windows.borrow_mut().push(id);
         }
+        let declared = self.surface_kind(id).is_none_or(|kind| kind.declared());
         let mut node = self.view_node(id)?;
-        if !self.layers.is_empty() || !self.toplevels.is_empty() || !self.popups.is_empty() {
+        if declared
+            && (!self.layers.is_empty() || !self.toplevels.is_empty() || !self.popups.is_empty())
+        {
             let nodes = layers::nodes(node)?;
             if nodes.len() != self.layers.len() + self.toplevels.len() + self.popups.len() {
                 self.surfaces_dirty.set(true);
@@ -1757,6 +1880,7 @@ impl App {
         candidate.popups = self.popups.clone();
         *candidate.windows.borrow_mut() = self.windows.borrow().clone();
         *candidate.sizes.borrow_mut() = self.sizes.borrow().clone();
+        *candidate.extras.borrow_mut() = self.extras.borrow().clone();
         let result = (|| {
             candidate.reconcile_layers()?;
             for layer in &candidate.layers {
@@ -1968,6 +2092,7 @@ impl App {
         let namespace = self.namespace.clone();
         let state = Rc::new(RefCell::new(self));
         let redraw = Rc::clone(&state);
+        let new_shell = Rc::clone(&state);
         iced_exwlshell::daemon(
             move || (Rc::clone(&state), state.borrow().layer_tasks()),
             move || namespace.clone(),
@@ -2023,6 +2148,13 @@ impl App {
             ])
         })
         .theme(|app: &Rc<RefCell<App>>, id| checked_fallback(app.borrow().theme(id), Theme::Dark, "theme"))
+        .on_new_shell(move |info: ShellInfo| match new_shell.try_borrow_mut() {
+            Ok(mut app) => app.new_shell(info),
+            Err(_) => {
+                log::error!(target: "shell.new", "on_new_shell could not borrow the app");
+                None
+            }
+        })
         .style(|app, theme| checked_fallback(app.borrow().style(theme), theme::Style { background_color: iced::Color::TRANSPARENT, text_color: iced::Color::TRANSPARENT }, "style"))
         .redraw_scope(move |message| checked_fallback(redraw.borrow().redraw(message), Scope::None, "redraw_scope"))
         .settings(settings)
@@ -4866,6 +4998,67 @@ return m";
             .update(Message::Clipboard(app.generation, Some("copied".into())))
             .unwrap();
         assert_eq!(app.state.get::<String>("result").unwrap(), "copied");
+    }
+
+    #[test]
+    fn on_new_shell_updates_state_before_the_first_view() {
+        let mut app = load(
+            r#"
+            local app = { last = nil, closed = nil }
+            function app:update(event)
+                if type(event) == 'table' and event.type == 'shell' then
+                    self.last = event.shell
+                elseif type(event) == 'table' and event.type == 'shell_closed' then
+                    self.closed = event.shell
+                end
+            end
+            function app:view(props)
+                if props.shell == 'session_lock' then
+                    return iced.text('locked')
+                end
+                return iced.text('main')
+            end
+            return riced.daemon(app, 'test', app.update, app.view)
+                :on_new_shell(function(self, info)
+                    return { type = 'shell', shell = info.shell, window = info.window }
+                end)
+                :run()
+            "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        let window = window::Id::unique();
+        let message = app
+            .new_shell(ShellInfo {
+                window,
+                shell: ShellType::SessionLock,
+            })
+            .unwrap();
+        let _ = app.update(message).unwrap();
+        assert_eq!(app.state.get::<String>("last").unwrap(), "session_lock");
+        assert_eq!(
+            app.extras.borrow().get(&window).copied(),
+            Some(SurfaceKind::SessionLock)
+        );
+        app.view(window).unwrap();
+
+        let _ = app.update(Message::WindowClosed(window)).unwrap();
+        assert_eq!(app.state.get::<String>("closed").unwrap(), "session_lock");
+        assert!(!app.extras.borrow().contains_key(&window));
+    }
+
+    #[test]
+    fn lock_and_unlock_tasks_build() {
+        let mut app = load(
+            r#"
+            return riced.daemon({}, 'test', function()
+                return { { type = 'lock' }, { type = 'unlock' } }
+            end, function() return iced.text('x') end):run()
+            "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        assert!(app.update(Message::Tick).unwrap().units() >= 2);
     }
 
     #[test]
