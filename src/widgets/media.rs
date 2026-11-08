@@ -1,33 +1,120 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::{Rc, Weak};
 
-use iced::Element;
-use iced::widget;
+use iced::advanced::widget::{Tree, tree};
+use iced::advanced::{Layout as IcedLayout, Widget, layout, mouse, renderer};
+use iced::{Element, Length, Rectangle, Size, Theme, widget};
 use mlua::Table;
 
 use crate::runtime::Message;
 
 use super::enums::content_fit;
-use super::style::{progress_bar_patch, qr_patch, rule_patch};
+use super::style::{QrPatch, progress_bar_patch, qr_patch, rule_patch};
 use super::{Layout, number};
 
 thread_local! {
-    // QR data borrows into the widget for its whole lifetime; cache by content so a
-    // steady profile leaks once per distinct value instead of once per frame.
-    // shortcut: unbounded unique QR contents are leaked, switch to an arena if that shows up in profiles.
-    static QR_DATA: RefCell<HashMap<String, &'static widget::qr_code::Data>> =
+    // Widgets only need QR data while they are rendered. Keep a weak cache so
+    // changing content releases the old data instead of leaking it.
+    static QR_DATA: RefCell<HashMap<String, Weak<widget::qr_code::Data>>> =
         RefCell::new(HashMap::new());
 }
 
-fn qr_data(contents: &str) -> Result<&'static widget::qr_code::Data, widget::qr_code::Error> {
+fn qr_data(contents: &str) -> Result<Rc<widget::qr_code::Data>, widget::qr_code::Error> {
     QR_DATA.with_borrow_mut(|cache| {
-        if let Some(data) = cache.get(contents) {
-            return Ok(*data);
+        if let Some(data) = cache.get(contents).and_then(Weak::upgrade) {
+            return Ok(data);
         }
-        let data: &'static _ = Box::leak(Box::new(widget::qr_code::Data::new(contents)?));
-        cache.insert(contents.to_owned(), data);
+        let data = Rc::new(widget::qr_code::Data::new(contents)?);
+        cache.retain(|_, weak| weak.strong_count() > 0);
+        cache.insert(contents.to_owned(), Rc::downgrade(&data));
         Ok(data)
     })
+}
+
+/// Owns the QR data so the cache can drop it when the last widget is gone.
+struct OwnedQrCode {
+    data: Rc<widget::qr_code::Data>,
+    cell_size: Option<f32>,
+    total_size: Option<f32>,
+    style: Option<QrPatch>,
+}
+
+impl OwnedQrCode {
+    fn qr(&self) -> widget::qr_code::QRCode<'_, Theme> {
+        let mut code = widget::qr_code::QRCode::new(&self.data);
+        if let Some(cell_size) = self.cell_size {
+            code = code.cell_size(cell_size);
+        }
+        if let Some(total_size) = self.total_size {
+            code = code.total_size(total_size);
+        }
+        if let Some(patch) = self.style {
+            code = code.style(move |theme| {
+                let mut style = widget::qr_code::default(theme);
+                if let Some(cell) = patch.cell {
+                    style.cell = cell;
+                }
+                if let Some(background) = patch.background {
+                    style.background = background;
+                }
+                style
+            });
+        }
+        code
+    }
+}
+
+impl Widget<Message, Theme, iced::Renderer> for OwnedQrCode {
+    fn tag(&self) -> tree::Tag {
+        Widget::<Message, Theme, iced::Renderer>::tag(&self.qr())
+    }
+
+    fn state(&self) -> tree::State {
+        Widget::<Message, Theme, iced::Renderer>::state(&self.qr())
+    }
+
+    fn size(&self) -> Size<Length> {
+        Widget::<Message, Theme, iced::Renderer>::size(&self.qr())
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        let mut code = self.qr();
+        Widget::<Message, Theme, iced::Renderer>::layout(&mut code, tree, renderer, limits)
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: IcedLayout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        Widget::<Message, Theme, iced::Renderer>::draw(
+            &self.qr(),
+            tree,
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+}
+
+impl From<OwnedQrCode> for Element<'static, Message> {
+    fn from(code: OwnedQrCode) -> Self {
+        Element::new(code)
+    }
 }
 
 pub(super) fn image(node: &Table, layout: Layout) -> mlua::Result<Element<'static, Message>> {
@@ -155,14 +242,19 @@ pub(super) fn qr_code(node: &Table) -> mlua::Result<Element<'static, Message>> {
     }
     let data = qr_data(&contents)
         .map_err(|error| mlua::Error::runtime(format!("invalid qr_code content: {error}")))?;
-    let mut code = widget::qr_code::QRCode::new(data);
+    let mut code = OwnedQrCode {
+        data,
+        cell_size: None,
+        total_size: None,
+        style: None,
+    };
     if let Some(cell_size) = node.get::<Option<f32>>("cell_size")? {
         if !cell_size.is_finite() || cell_size <= 0.0 {
             return Err(mlua::Error::runtime(
                 "qr_code cell_size must be finite and positive",
             ));
         }
-        code = code.cell_size(cell_size);
+        code.cell_size = Some(cell_size);
     }
     if let Some(total_size) = node.get::<Option<f32>>("total_size")? {
         if !total_size.is_finite() || total_size <= 0.0 {
@@ -170,20 +262,34 @@ pub(super) fn qr_code(node: &Table) -> mlua::Result<Element<'static, Message>> {
                 "qr_code total_size must be finite and positive",
             ));
         }
-        code = code.total_size(total_size);
+        code.total_size = Some(total_size);
     }
     if let Some(style) = node.get::<Option<Table>>("style")? {
-        let patch = qr_patch(&style)?;
-        code = code.style(move |theme| {
-            let mut style = widget::qr_code::default(theme);
-            if let Some(cell) = patch.cell {
-                style.cell = cell;
-            }
-            if let Some(background) = patch.background {
-                style.background = background;
-            }
-            style
-        });
+        code.style = Some(qr_patch(&style)?);
     }
     Ok(code.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qr_data_is_shared_while_used_and_released_when_unused() {
+        QR_DATA.with_borrow_mut(HashMap::clear);
+
+        let first = qr_data("shared").unwrap();
+        let second = qr_data("shared").unwrap();
+        assert!(Rc::ptr_eq(&first, &second));
+
+        drop(first);
+        drop(second);
+        let other = qr_data("other").unwrap();
+        assert_eq!(QR_DATA.with_borrow(HashMap::len), 1);
+
+        drop(other);
+        let third = qr_data("third").unwrap();
+        assert_eq!(QR_DATA.with_borrow(HashMap::len), 1);
+        drop(third);
+    }
 }

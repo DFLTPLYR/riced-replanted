@@ -1226,6 +1226,9 @@ Props: `value` (0 to 1, default 0), `girth` (positive), `vertical` (boolean), an
 Props: `cell_size` (positive), `total_size` (positive), and `style`
 (`{ cell, background }`).
 
+QR data is cached by content while a widget uses it and released once no
+rendered widget references it.
+
 #### `iced.row(content, props)` and `iced.column(content, props)`
 
 `content`: array of elements.
@@ -1328,9 +1331,10 @@ Props: `value` (initial text, default `""`), `placeholder`, `id`, `size`
 (positive), `font`, `wrapping` (boolean or the text `wrap` values), `on_action`,
 `on_input`, and `style`.
 
-State is kept by `id` for the lifetime of the process or until `riced` reloads
-the shell. Typing is preserved across renders; changing `value` from the
-previous render replaces the text, and changing the id starts a fresh editor.
+State is kept by `id` until `riced` reloads the shell. The runtime retains at
+most 256 editor states; exceeding that resets the editor cache. Typing is
+preserved across renders; changing `value` from the previous render replaces
+the text, and changing the id starts a fresh editor.
 
 If `on_action` is set, it takes precedence over `on_input`. `on_action` sends:
 
@@ -2390,8 +2394,10 @@ it.
   Errors fall back to empty space.
 - `pane_grid` delivers resize and drag events, but resize ratios cannot be set
   from Lua; the host keeps the live layout per `id` until a shell reload.
-- `text_editor`, `combo_box`, and `pane_grid` state is keyed by `id` inside the
-  process and is not shared between multiple `riced` instances.
+- `text_editor`, `combo_box`, and `pane_grid` state is keyed by `id`, bounded to
+  256 entries per widget kind, and is not shared between multiple `riced`
+  instances. Reuse ids to preserve state; exceeding the limit resets that
+  widget's state cache at the next shell reload.
 - `list_view` identity is `key` when set, otherwise value equality. With
   recreated table items, set `key` (for example `"id"`) or middle
   inserts/removals fall back to index matching and do not displace.

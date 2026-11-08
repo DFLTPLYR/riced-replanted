@@ -43,6 +43,9 @@ thread_local! {
     static NEXT_LIST_TOKEN: Cell<u64> = const { Cell::new(0) };
 }
 
+/// Upper bound for id-keyed state; bounds configs that generate unique ids.
+const LIMIT: usize = 256;
+
 pub(crate) fn forget_window(generation: u64, window: iced::window::Id) {
     LISTS.with_borrow_mut(|lists| {
         lists.retain(|(owner, id, _), _| *owner != generation || *id != Some(window))
@@ -159,6 +162,15 @@ pub(super) fn editor(
             return static_ref(&*existing.cell);
         }
         let cell = Rc::new(RefCell::new(text_editor::Content::with_text(value)));
+        if editors.len() >= LIMIT {
+            RETIRED.with_borrow_mut(|retired| {
+                retired.extend(
+                    editors
+                        .drain()
+                        .map(|(_, state)| Retired::Editor(state.cell)),
+                );
+            });
+        }
         editors.insert(
             key,
             EditorState {
@@ -211,6 +223,11 @@ pub(super) fn combo(
             return static_ref(&**existing);
         }
         let state = Rc::new(combo_box::State::new(options.to_vec()));
+        if combos.len() >= LIMIT && !combos.contains_key(&key) {
+            RETIRED.with_borrow_mut(|retired| {
+                retired.extend(combos.drain().map(|(_, state)| Retired::Combo(state)));
+            });
+        }
         if let Some(old) = combos.insert(key, Rc::clone(&state)) {
             RETIRED.with_borrow_mut(|retired| retired.push(Retired::Combo(old)));
         }
@@ -366,6 +383,11 @@ pub(super) fn panes(
             current = next;
         }
         let state = Rc::new(RefCell::new(state));
+        if panes.len() >= LIMIT && !panes.contains_key(&key) {
+            RETIRED.with_borrow_mut(|retired| {
+                retired.extend(panes.drain().map(|(_, state)| Retired::Pane(state)));
+            });
+        }
         if let Some(old) = panes.insert(key, Rc::clone(&state)) {
             RETIRED.with_borrow_mut(|retired| retired.push(Retired::Pane(old)));
         }
@@ -510,5 +532,33 @@ mod tests {
             assert!(lists.contains_key(&(0, Some(b), "rows".into())));
         });
         forget_window(0, b);
+    }
+
+    #[test]
+    fn stateful_widget_maps_are_bounded() {
+        let generation = 987_654_321;
+        for index in 0..LIMIT + 8 {
+            editor(generation, &format!("editor-{index}"), "");
+            combo(generation, &format!("combo-{index}"), &[]);
+            panes(
+                generation,
+                &format!("pane-{index}"),
+                1,
+                pane_grid::Axis::Horizontal,
+            );
+        }
+        assert!(
+            EDITORS.with_borrow(|editors| editors.keys().filter(|key| key.0 == generation).count())
+                <= LIMIT
+        );
+        assert!(
+            COMBOS.with_borrow(|combos| combos.keys().filter(|key| key.0 == generation).count())
+                <= LIMIT
+        );
+        assert!(
+            PANES.with_borrow(|panes| panes.keys().filter(|key| key.0 == generation).count())
+                <= LIMIT
+        );
+        free_retired();
     }
 }

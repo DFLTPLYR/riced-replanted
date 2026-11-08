@@ -3486,6 +3486,27 @@ return m",
     }
 
     #[test]
+    fn qr_code_renders_through_the_owned_widget() {
+        let mut app = load(
+            r#"
+            local codes = { "one", "two" }
+            return riced.daemon({}, "test", function() end, function()
+                local children = {}
+                for _, code in ipairs(codes) do
+                    children[#children + 1] = iced.qr_code(code, { cell_size = 4 })
+                end
+                return iced.column(children)
+            end):run()
+            "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        let window = window::Id::unique();
+        let mut tree = iced::advanced::widget::Tree::empty();
+        assert!(animation_frame(&mut app, window, &mut tree, std::time::Instant::now()) > 0);
+    }
+
+    #[test]
     fn early_exit_completes_once_stays_hidden_and_can_reenter() {
         let shell = r#"
             iced.define('card', function()
