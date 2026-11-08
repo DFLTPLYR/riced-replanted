@@ -9,7 +9,7 @@
   `notifications`
 - Methods: `activate_tray`, `secondary_activate_tray`, `context_menu_tray`,
   `open_tray_menu`, `close_tray_menu`, `tray_menu_event`, `close_notification`,
-  `invoke_notification_action`
+  `invoke_notification_action`, `pick_file`
 - Events: none
 
 ## Install
@@ -30,8 +30,9 @@ The proxy is live: `alive` is false and the store is empty until the process
 connects. Reads are synchronous; each publish replaces the snapshot while the
 proxy table identity stays the same. All methods are asynchronous and take an
 optional callback as the last argument. On success the callback receives
-`(nil, nil)`; on failure it receives `(nil, error)`. Without a callback, method
-failures are not surfaced to Lua.
+`(nil, nil)`, except `pick_file`, which returns the selected paths. On failure it
+receives `(nil, error)`. Without a callback, method failures are not surfaced to
+Lua.
 
 See the [riced API](../../API.md#plugins-and-extensions) for shared plugin and
 extension semantics.
@@ -131,6 +132,48 @@ expires. The extension emits the standard D-Bus `ActionInvoked` and
 `NotificationClosed` signals; closed reasons are 1 for expiry, 2 for dismissal,
 3 for an explicit close, and 4 for eviction.
 
+## File picker
+
+`pick_file` opens the desktop file chooser through
+`org.freedesktop.portal.FileChooser`. It needs a running
+`xdg-desktop-portal` with a file-chooser backend (for example
+`xdg-desktop-portal-gtk`); the dialog belongs to the portal, not to `riced`.
+
+Options:
+
+| Option      | Type    | Meaning                                              |
+| ----------- | ------- | ---------------------------------------------------- |
+| `title`     | string  | Dialog title                                         |
+| `multiple`  | boolean | Allow several selections                             |
+| `directory` | boolean | Select directories instead of files                  |
+| `path`      | string  | Absolute starting directory; a leading `~/` is expanded |
+
+```lua
+local dbus = riced.plugin("dbus")
+
+dbus.pick_file({
+    title = "Choose a shader",
+    path = "~/Pictures",
+}, function(paths, error)
+    if error == "cancelled" then return end
+    if error then log(error) return end
+    log("picked", paths[1])
+end)
+```
+
+The callback always receives a non-empty array of absolute paths, even when
+`multiple` is false. Cancelling the dialog returns `(nil, "cancelled")`; a
+dismissed or failed chooser returns another error string. Options may be
+omitted. The callback is the only way to get the selection or see a cancel, and
+`error(error)` inside it only logs through riced's callback wrapper; it does not
+propagate to the calling code.
+
+The chooser is served synchronously on the extension's method thread, so other
+`riced-dbus` method calls wait until the dialog closes. Store updates and tray
+refreshes keep running. A chooser left open for 120 seconds is closed and the
+callback receives `(nil, "the file chooser timed out")`. The dialog times out after 120 seconds; the request is
+closed and the callback receives `(nil, "the file chooser timed out")`.
+
 ## Methods
 
 | Method                                | Arguments               | Behavior                                                                                             |
@@ -143,6 +186,7 @@ expires. The extension emits the standard D-Bus `ActionInvoked` and
 | `tray_menu_event(id, menu_id, event, callback?)` | string, integer, string | Sends `clicked`, `opened`, `closed`, or `hovered` for a menu item |
 | `close_notification(id)`              | integer                 | Removes the notification if present and emits `NotificationClosed`; unknown ids are ignored          |
 | `invoke_notification_action(id, key)` | integer, string         | Validates the action key, removes the notification, and emits `ActionInvoked` + `NotificationClosed` |
+| `pick_file(options?, callback?)`      | table                   | Opens the XDG desktop portal file chooser; the callback receives selected absolute paths              |
 
 Tray methods fail if the item id is unknown, the session bus is disconnected, or
 the D-Bus call fails. They use a one-second D-Bus method timeout.
@@ -150,7 +194,8 @@ the D-Bus call fails. They use a one-second D-Bus method timeout.
 `tray_menu_event` rejects unknown menu ids and events, and only the active menu
 is accepted. `invoke_notification_action` fails if the notification exists but
 the key is not one of its actions. A missing or unknown notification id is
-ignored. All methods return no value on success; use callbacks to observe errors.
+ignored. All methods except `pick_file` return no value on success; use callbacks
+to observe errors.
 
 Snapshots are bounded by the protocol line limit. Tray text and notification
 names are clamped as shown; very large arrays may omit entries with a

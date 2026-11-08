@@ -863,16 +863,41 @@ expires. The extension emits the standard D-Bus `ActionInvoked` and
 
 Methods:
 
-| Method                                | Arguments       | Behavior                                                                                             |
-| ------------------------------------- | --------------- | ---------------------------------------------------------------------------------------------------- |
-| `activate_tray(id)`                   | string          | Calls `Activate(0, 0)` on the tray item                                                              |
-| `secondary_activate_tray(id)`         | string          | Calls `SecondaryActivate(0, 0)` on the tray item                                                     |
-| `context_menu_tray(id)`               | string          | Calls `ContextMenu(0, 0)` on the tray item                                                           |
-| `open_tray_menu(id, callback?)`       | string          | Reads the item's `com.canonical.dbusmenu` layout into `tray_menu`; errors if it has no menu          |
-| `close_tray_menu()`                   | none            | Clears `tray_menu`; safe to call repeatedly                                                          |
-| `tray_menu_event(id, menu_id, event, callback?)` | string, integer, string | Sends `clicked`, `opened`, `closed`, or `hovered` for a menu item |
-| `close_notification(id)`              | integer         | Removes the notification if present and emits `NotificationClosed`; unknown ids are ignored          |
-| `invoke_notification_action(id, key)` | integer, string | Validates the action key, removes the notification, and emits `ActionInvoked` + `NotificationClosed` |
+| Method                                           | Arguments               | Behavior                                                                                             |
+| ------------------------------------------------ | ----------------------- | ---------------------------------------------------------------------------------------------------- |
+| `activate_tray(id)`                              | string                  | Calls `Activate(0, 0)` on the tray item                                                              |
+| `secondary_activate_tray(id)`                    | string                  | Calls `SecondaryActivate(0, 0)` on the tray item                                                     |
+| `context_menu_tray(id)`                          | string                  | Calls `ContextMenu(0, 0)` on the tray item                                                           |
+| `open_tray_menu(id, callback?)`                  | string                  | Reads the item's `com.canonical.dbusmenu` layout into `tray_menu`; errors if it has no menu          |
+| `close_tray_menu()`                              | none                    | Clears `tray_menu`; safe to call repeatedly                                                          |
+| `tray_menu_event(id, menu_id, event, callback?)` | string, integer, string | Sends `clicked`, `opened`, `closed`, or `hovered` for a menu item                                    |
+| `close_notification(id)`                         | integer                 | Removes the notification if present and emits `NotificationClosed`; unknown ids are ignored          |
+| `invoke_notification_action(id, key)`            | integer, string         | Validates the action key, removes the notification, and emits `ActionInvoked` + `NotificationClosed` |
+| `pick_file(options?, callback?)`                 | table                   | Opens the XDG desktop portal file chooser; the callback receives selected absolute paths              |
+
+`pick_file` options: `title` (string), `multiple` (boolean), `directory`
+(boolean), and `path` (absolute starting directory; a leading `~/` is expanded).
+On success the callback receives `(paths, nil)`, where `paths` is a non-empty
+array of absolute paths. A cancel or dismissed dialog is not success: the
+callback receives `(nil, "cancelled")`. Other failures receive `(nil, error)`.
+The callback is the only way to get the selection or see a cancel. The dialog
+times out after 120 seconds; it is closed and the callback receives
+`(nil, "the file chooser timed out")`.
+
+```lua
+dbus.pick_file({ title = "Open image", multiple = true }, function(paths, error)
+    if error then
+        if error ~= "cancelled" then log(error) end
+        return
+    end
+    for _, path in ipairs(paths) do
+        log(path)
+    end
+end)
+```
+
+`error(error)` inside the callback only logs through riced's callback wrapper;
+it does not propagate to the calling code.
 
 Tray methods fail if the item id is unknown, the session bus is disconnected, or
 the D-Bus call fails. They use a one-second D-Bus method timeout.
@@ -880,7 +905,8 @@ the D-Bus call fails. They use a one-second D-Bus method timeout.
 `tray_menu_event` rejects unknown menu ids and events, and only the active menu
 is accepted. `invoke_notification_action` fails if the notification exists but
 the key is not one of its actions. A missing or unknown notification id is
-ignored. All methods return no value on success; use callbacks to observe errors.
+ignored. All methods except `pick_file` return no value on success; use callbacks
+to observe errors.
 
 Snapshots are bounded by the protocol line limit. Tray text and notification
 names are clamped as shown; very large arrays may omit entries with a

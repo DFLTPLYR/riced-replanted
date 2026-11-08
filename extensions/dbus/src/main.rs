@@ -7,7 +7,12 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     error::Error,
-    sync::{Arc, Mutex, mpsc},
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -17,10 +22,11 @@ use serde_json::{Value, json};
 type ItemInfo = (String, String, Option<String>, String, Option<String>, bool);
 
 use zbus::{
-    blocking::{Connection, Proxy},
+    MatchRule,
+    blocking::{Connection, MessageIterator, Proxy},
     fdo::RequestNameFlags,
     interface,
-    message::Header,
+    message::{Header, Type as MessageType},
     zvariant::{OwnedObjectPath, OwnedValue, Value as VariantValue},
 };
 
@@ -31,7 +37,14 @@ const ITEM_IFACE: &str = "org.kde.StatusNotifierItem";
 const MENU_IFACE: &str = "com.canonical.dbusmenu";
 const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
+const PORTAL: &str = "org.freedesktop.portal.Desktop";
+const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+const FILE_CHOOSER_IFACE: &str = "org.freedesktop.portal.FileChooser";
+const REQUEST_IFACE: &str = "org.freedesktop.portal.Request";
 const METHOD_TIMEOUT: Duration = Duration::from_secs(1);
+const PICKER_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_PICKER_PATH: usize = 4096;
+static PICKER_TOKEN: AtomicU64 = AtomicU64::new(1);
 const MAX_TEXT: usize = 1024;
 const MAX_NAME: usize = 256;
 const MAX_ACTIONS: usize = 16;
@@ -51,6 +64,7 @@ fn main() -> std::io::Result<()> {
     let menu_event = Arc::clone(&model);
     let close = Arc::clone(&model);
     let invoke = Arc::clone(&model);
+    let picker = Arc::clone(&model);
 
     Plugin::new("dbus")
         .state([
@@ -93,6 +107,7 @@ fn main() -> std::io::Result<()> {
             invoke_notification_action(&invoke, id, action)?;
             Ok(Value::Null)
         })
+        .method("pick_file", false, move |args| pick_file(&picker, args))
         .serve(move |context| run(context, model))
 }
 
@@ -428,6 +443,191 @@ fn invoke_notification_action(
         model.dirty = true;
     }
     Ok(())
+}
+
+/// Opens the desktop file chooser. Returns the selected absolute paths; a user
+/// cancel or a dismissed dialog is an error so callers can tell it from success.
+fn pick_file(model: &Arc<Mutex<Model>>, args: &Value) -> Result<Value, String> {
+    let connection = {
+        let model = model.lock().unwrap();
+        model
+            .connection
+            .clone()
+            .ok_or_else(|| "session bus is not connected".to_owned())?
+    };
+    let mut options = match args.get(0) {
+        None | Some(Value::Null) => serde_json::Map::new(),
+        Some(Value::Object(options)) => options.clone(),
+        Some(_) => return Err("pick_file options must be a table".to_owned()),
+    };
+    if let Some(key) = options
+        .keys()
+        .find(|key| !matches!(key.as_str(), "title" | "multiple" | "directory" | "path"))
+    {
+        return Err(format!("unsupported pick_file option: {key}"));
+    }
+    let flag = |options: &mut serde_json::Map<String, Value>, key: &str, default: bool| {
+        options.remove(key).map_or(Ok(default), |value| {
+            value
+                .as_bool()
+                .ok_or_else(|| format!("pick_file {key} must be a boolean"))
+        })
+    };
+    let multiple = flag(&mut options, "multiple", false)?;
+    let directory = flag(&mut options, "directory", false)?;
+    let title = options
+        .remove("title")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|title| title.len() <= MAX_PICKER_PATH)
+                .map(str::to_owned)
+                .ok_or_else(|| "pick_file title must be a short string".to_owned())
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    let token = format!(
+        "riced_pick_{}",
+        PICKER_TOKEN.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut portal_options: HashMap<String, VariantValue<'static>> = HashMap::new();
+    portal_options.insert("handle_token".into(), VariantValue::from(token));
+    if multiple {
+        portal_options.insert("multiple".into(), VariantValue::from(true));
+    }
+    if directory {
+        portal_options.insert("directory".into(), VariantValue::from(true));
+    }
+    if let Some(path) = options.remove("path") {
+        let path = path
+            .as_str()
+            .ok_or_else(|| "pick_file path must be a string".to_owned())?;
+        let path = expand_home(path);
+        if !path.is_absolute() || path.as_os_str().as_encoded_bytes().contains(&0) {
+            return Err("pick_file path must be an absolute directory".to_owned());
+        }
+        let mut bytes = path.as_os_str().as_encoded_bytes().to_vec();
+        bytes.push(0);
+        portal_options.insert("current_folder".into(), VariantValue::from(bytes));
+    }
+
+    // Subscribe before OpenFile so a very fast response cannot be missed.
+    let responses = response_signals(&connection)?;
+    let proxy = Proxy::new(&connection, PORTAL, PORTAL_PATH, FILE_CHOOSER_IFACE)
+        .map_err(|error| error.to_string())?;
+    let handle: OwnedObjectPath = proxy
+        .call("OpenFile", &("", title, portal_options))
+        .map_err(|error| format!("cannot open the file chooser: {error}"))?;
+    let handle = handle.to_string();
+    let (sender, receiver) = mpsc::channel();
+    let picked = handle.clone();
+    thread::spawn(move || {
+        let _ = sender.send(picker_response(responses, &picked));
+    });
+    match receiver.recv_timeout(PICKER_TIMEOUT) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // Dismiss the dialog so the waiting iterator can finish.
+            let _ = connection.call_method(
+                Some(PORTAL),
+                handle.as_str(),
+                Some(REQUEST_IFACE),
+                "Close",
+                &(),
+            );
+            Err("the file chooser timed out".to_owned())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("the file chooser closed without a response".to_owned())
+        }
+    }
+}
+
+fn picker_response(responses: MessageIterator, handle: &str) -> Result<Value, String> {
+    for message in responses {
+        let message = message.map_err(|error| error.to_string())?;
+        if message.header().path().map(|path| path.as_str()) != Some(handle) {
+            continue;
+        }
+        let (response, mut results) = message
+            .body()
+            .deserialize::<(u32, HashMap<String, OwnedValue>)>()
+            .map_err(|error| format!("cannot read the file chooser response: {error}"))?;
+        return match response {
+            0 => {
+                let uris = results
+                    .remove("uris")
+                    .and_then(|value| Vec::<String>::try_from(value).ok())
+                    .unwrap_or_default();
+                if uris.is_empty() {
+                    return Err("the file chooser returned nothing".to_owned());
+                }
+                uris.iter()
+                    .map(|uri| file_uri_path(uri))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|paths| json!(paths))
+            }
+            1 => Err("cancelled".to_owned()),
+            code => Err(format!("the file chooser failed (response {code})")),
+        };
+    }
+    Err("the file chooser closed without a response".to_owned())
+}
+
+fn response_signals(connection: &Connection) -> Result<MessageIterator, String> {
+    let rule = MatchRule::builder()
+        .msg_type(MessageType::Signal)
+        .sender(PORTAL)
+        .map_err(|error| error.to_string())?
+        .interface(REQUEST_IFACE)
+        .map_err(|error| error.to_string())?
+        .member("Response")
+        .map_err(|error| error.to_string())?
+        .build();
+    MessageIterator::for_match_rule(rule, connection, Some(8)).map_err(|error| error.to_string())
+}
+
+fn expand_home(path: &str) -> PathBuf {
+    let Some(rest) = path.strip_prefix("~/") else {
+        return PathBuf::from(path);
+    };
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map_or_else(
+            || PathBuf::from(path),
+            |home| PathBuf::from(home).join(rest),
+        )
+}
+
+/// Converts a `file://` URI from the portal into a local path. Percent escapes
+/// are decoded; non-file and non-UTF-8 URIs are rejected.
+fn file_uri_path(uri: &str) -> Result<String, String> {
+    let rest = uri
+        .strip_prefix("file://")
+        .ok_or_else(|| format!("unsupported URI from the file chooser: {uri}"))?;
+    let path = rest
+        .find('/')
+        .map(|index| &rest[index..])
+        .ok_or_else(|| format!("invalid file URI: {uri}"))?;
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let byte = bytes
+                .get(index + 1..index + 3)
+                .and_then(|pair| std::str::from_utf8(pair).ok())
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                .ok_or_else(|| format!("invalid escape in file URI: {uri}"))?;
+            decoded.push(byte);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| format!("file path is not UTF-8: {uri}"))
 }
 
 #[derive(Default)]
@@ -1138,6 +1338,26 @@ mod tests {
         assert_eq!(store["connected"], false);
         assert_eq!(store["tray"], json!([]));
         assert_eq!(store["tray_menu"], Value::Null);
+    }
+
+    #[test]
+    fn file_uris_decode_to_local_paths() {
+        assert_eq!(
+            file_uri_path("file:///home/user/My%20File.txt").unwrap(),
+            "/home/user/My File.txt"
+        );
+        assert_eq!(
+            file_uri_path("file://localhost/tmp/a%2Bb").unwrap(),
+            "/tmp/a+b"
+        );
+        for uri in [
+            "file:///bad%2",
+            "file:///bad%zz",
+            "https://example.com/x",
+            "file://",
+        ] {
+            assert!(file_uri_path(uri).is_err(), "{uri}");
+        }
     }
 
     #[test]
