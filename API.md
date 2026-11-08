@@ -210,15 +210,15 @@ Every callback except `update` and `view` is optional.
 
 ### Daemon callbacks
 
-| Callback       | Signature                  | Return                                                              |
-| -------------- | -------------------------- | ------------------------------------------------------------------- |
-| `update`       | `(self, event, component)` | `nil`, a task, or a list of tasks                                   |
+| Callback       | Signature                  | Return                                                                           |
+| -------------- | -------------------------- | -------------------------------------------------------------------------------- |
+| `update`       | `(self, event, component)` | `nil`, a task, or a list of tasks                                                |
 | `view`         | `(self, props)`            | element, `iced.layer`/`iced.window`/`iced.popup`, or a nonempty list of surfaces |
-| `title`        | `(self, window)`           | string or `nil`                                                     |
-| `subscription` | `(self, active)`           | subscription, list of subscriptions, or `nil`                       |
-| `theme`        | `(self, window)`           | palette table or `nil`                                              |
-| `style`        | `(self, palette)`          | `{ background_color?, text_color? }` or `nil`                       |
-| `redraw_scope` | `(self, event)`            | `"all"`, `"none"`, `props.window`, or `nil`                         |
+| `title`        | `(self, window)`           | string or `nil`                                                                  |
+| `subscription` | `(self, active)`           | subscription, list of subscriptions, or `nil`                                    |
+| `theme`        | `(self, window)`           | palette table or `nil`                                                           |
+| `style`        | `(self, palette)`          | `{ background_color?, text_color? }` or `nil`                                    |
+| `redraw_scope` | `(self, event)`            | `"all"`, `"none"`, `props.window`, or `nil`                                      |
 
 `component` is the component id that raised the event, or `nil` for global
 events. See [Widget events](#widget-events).
@@ -782,8 +782,8 @@ Store fields:
 | --------------- | --------------------------------------------------------------------------------- |
 | `connected`     | boolean; session bus connection                                                   |
 | `capabilities`  | `{ tray = boolean, tray_host = boolean, notifications = boolean }`                |
-| `tray`          | array of `{ id, title, icon, icon_theme_path, status, menu, item_is_menu }`                        |
-| `tray_menu`     | active menu `{ id, revision, items, error }`, or nil                                                |
+| `tray`          | array of `{ id, title, icon, icon_theme_path, status, menu, item_is_menu }`       |
+| `tray_menu`     | active menu `{ id, revision, items, error }`, or nil                              |
 | `notifications` | array of `{ id, app_name, app_icon, summary, body, actions, timeout, timestamp }` |
 
 `capabilities.tray` means a StatusNotifier watcher is available.
@@ -796,15 +796,15 @@ empty.
 
 Tray item fields:
 
-| Field          | Meaning                                                                                                                  |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `id`           | Opaque string (`bus + object path`), for example `:1.42/StatusNotifierItem`; pass to methods                             |
-| `title`        | Item title, falling back to the item `Id`; clamped to 256 characters                                                     |
-| `icon`         | Sender's `IconName`, or a normalized fallback derived from the item `Id` (for example `vesktop_status_icon_1` becomes `vesktop`); clamped to 256 characters. Resolve with `iced.icon_path`. |
-| `icon_theme_path` | Sender's optional absolute `IconThemePath` directory, or nil; paths over 4096 bytes or containing NUL are ignored. |
-| `status`       | Raw StatusNotifier status such as `Active`, `Passive`, or `NeedsAttention`, clamped to 256 characters; default `Passive` |
-| `menu`         | D-Bus object path string or nil; `/` is treated as no menu                                                               |
-| `item_is_menu` | Whether activating the item should open the menu instead                                                                 |
+| Field             | Meaning                                                                                                                                                                                     |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`              | Opaque string (`bus + object path`), for example `:1.42/StatusNotifierItem`; pass to methods                                                                                                |
+| `title`           | Item title, falling back to the item `Id`; clamped to 256 characters                                                                                                                        |
+| `icon`            | Sender's `IconName`, or a normalized fallback derived from the item `Id` (for example `vesktop_status_icon_1` becomes `vesktop`); clamped to 256 characters. Resolve with `iced.icon_path`. |
+| `icon_theme_path` | Sender's optional absolute `IconThemePath` directory, or nil; paths over 4096 bytes or containing NUL are ignored.                                                                          |
+| `status`          | Raw StatusNotifier status such as `Active`, `Passive`, or `NeedsAttention`, clamped to 256 characters; default `Passive`                                                                    |
+| `menu`            | D-Bus object path string or nil; `/` is treated as no menu                                                                                                                                  |
+| `item_is_menu`    | Whether activating the item should open the menu instead                                                                                                                                    |
 
 Tray properties are refreshed about every 500 ms. An item that fails to answer
 three times is removed from the store.
@@ -977,15 +977,15 @@ coordinates (`-90..90`, `-180..180`). Success acknowledges configuration, with
 `(nil, nil)`; the weather arrives separately in the store. Call only once the
 extension is alive. Configuration is in memory; resend it after reconnection.
 
-| Store field | Meaning |
-| --- | --- |
-| `ready` | A successful reading exists for the configured location |
-| `latitude`, `longitude` | Requested coordinates, absent until configured |
-| `current` | Open-Meteo values: `time`, `interval`, `temperature_2m`, `relative_humidity_2m`, `apparent_temperature`, `is_day`, `precipitation`, `weather_code`, `wind_speed_10m`, `wind_direction_10m` |
-| `current_units` | Units returned by Open-Meteo: Celsius, km/h, mm, percent, etc. |
-| `timezone` | Resolved IANA timezone; `current.time` is local to it |
-| `updated_at` | Unix seconds of the last successful fetch |
-| `error` | Last fetch error, absent after a successful refresh |
+| Store field             | Meaning                                                                                                                                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ready`                 | A successful reading exists for the configured location                                                                                                                                    |
+| `latitude`, `longitude` | Requested coordinates, absent until configured                                                                                                                                             |
+| `current`               | Open-Meteo values: `time`, `interval`, `temperature_2m`, `relative_humidity_2m`, `apparent_temperature`, `is_day`, `precipitation`, `weather_code`, `wind_speed_10m`, `wind_direction_10m` |
+| `current_units`         | Units returned by Open-Meteo: Celsius, km/h, mm, percent, etc.                                                                                                                             |
+| `timezone`              | Resolved IANA timezone; `current.time` is local to it                                                                                                                                      |
+| `updated_at`            | Unix seconds of the last successful fetch                                                                                                                                                  |
+| `error`                 | Last fetch error, absent after a successful refresh                                                                                                                                        |
 
 Fetching starts after configuration and repeats every 15 minutes without a Lua
 timer. Failures retry after 60 seconds and keep the last reading. Changing the
@@ -2226,18 +2226,18 @@ a row containing the popup from the widget's `view`. Popups returned from a
 `list_view` `render` callback are not hoisted; declare them as siblings of the
 list instead.
 
-| Key              | Values                                       | Default        |
-| ---------------- | -------------------------------------------- | -------------- |
-| `id`             | nonempty string                              | position-based |
-| `visible`        | boolean                                      | true           |
-| `parent`         | `iced.layer` id                              | containing layer for nested popups; required at root |
-| `width`, `height`| number in 1..32768, rounded                  | required       |
-| `x`, `y`         | finite number, rounded                       | 0, 0           |
-| `anchor`         | widget id string, or `{ x, y, width, height }` | none           |
-| `anchor_edge`    | `iced.PopupAnchor` value                     | `"bottom_left"`|
-| `gravity`        | `iced.PopupGravity` value                    | `"bottom_right"`|
-| `constraint_adjustment` | `iced.PopupConstraintAdjustment` value or list | flip and slide both axes |
-| `on_closed`      | function                                     | none           |
+| Key                     | Values                                         | Default                                              |
+| ----------------------- | ---------------------------------------------- | ---------------------------------------------------- |
+| `id`                    | nonempty string                                | position-based                                       |
+| `visible`               | boolean                                        | true                                                 |
+| `parent`                | `iced.layer` id                                | containing layer for nested popups; required at root |
+| `width`, `height`       | number in 1..32768, rounded                    | required                                             |
+| `x`, `y`                | finite number, rounded                         | 0, 0                                                 |
+| `anchor`                | widget id string, or `{ x, y, width, height }` | none                                                 |
+| `anchor_edge`           | `iced.PopupAnchor` value                       | `"bottom_left"`                                      |
+| `gravity`               | `iced.PopupGravity` value                      | `"bottom_right"`                                     |
+| `constraint_adjustment` | `iced.PopupConstraintAdjustment` value or list | flip and slide both axes                             |
+| `on_closed`             | function                                       | none                                                 |
 
 `width`, `height`, `x`, `y`, and anchor values are logical pixels. `x` and `y`
 are relative to the parent layer surface and are used when `anchor` is absent.
