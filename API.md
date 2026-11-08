@@ -119,7 +119,7 @@ end
   `icon_theme_path`. Direct files in this directory take precedence over themed
   icons. An empty directory string is treated as absent.
 - `thumbnail`: when true, raster icons are decoded and downscaled to `size *
-  scale` pixels (capped at 256) and cached under `$XDG_CACHE_HOME/riced/icons`
+  scale` pixels (capped at 4096) and cached under `$XDG_CACHE_HOME/riced/icons`
   (default `~/.cache/riced/icons`). SVG icons and decode failures return the
   original path. Repeated lookups reuse the cached file until the source
   changes; the cache keeps at most 256 files and removes the oldest.

@@ -384,7 +384,7 @@ fn install_with_paths(
         lua.create_function_mut(move |lua, (icon, options): (String, Option<Table>)| {
             let iced = lua.globals().get::<Table>("iced")?;
             let (query, wants_thumbnail) = query(&iced, icon, options)?;
-            let pixels = query.size.saturating_mul(query.scale).min(256);
+            let pixels = query.size.saturating_mul(query.scale).min(4096);
             let path = resolver.resolve(query);
             Ok(path.map(|path| {
                 let path = if wants_thumbnail {
