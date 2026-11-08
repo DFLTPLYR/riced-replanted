@@ -132,6 +132,12 @@ pub(super) fn image(node: &Table, layout: Layout) -> mlua::Result<Element<'stati
     if let Some(fit) = node.get::<Option<String>>("content_fit")? {
         image = image.content_fit(content_fit(&fit)?);
     }
+    if let Some(opacity) = node.get::<Option<f32>>("opacity")? {
+        if !(0.0..=1.0).contains(&opacity) {
+            return Err(mlua::Error::runtime("image opacity must be from 0 to 1"));
+        }
+        image = image.opacity(opacity);
+    }
     Ok(image.into())
 }
 

@@ -515,7 +515,7 @@ fn build(
             "font",
         ],
         "icon" => &["size", "color", "center", "align_x", "align_y"],
-        "image" => &["content_fit"],
+        "image" => &["content_fit", "opacity"],
         "svg" => &["content_fit", "opacity"],
         "rule" => &["direction", "thickness", "style"],
         "progress_bar" => &["value", "girth", "vertical", "style"],
@@ -1518,6 +1518,7 @@ mod tests {
         for source in [
             "{kind='image',content='/tmp/x.png'}",
             "{kind='image',content='x.png',content_fit='cover',width=64,height=64}",
+            "{kind='image',content='x.png',opacity=0.5}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_ok(),
@@ -1527,6 +1528,7 @@ mod tests {
         for source in [
             "{kind='image',content=''}",
             "{kind='image',content='x.png',content_fit='bogus'}",
+            "{kind='image',content='x.png',opacity=2}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_err(),

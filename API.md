@@ -1248,7 +1248,7 @@ so set `width` or `height` when aligning.
 `content`: nonempty file path.
 
 Props: `content_fit` (`"contain"`, `"cover"`, `"fill"`, `"none"`,
-`"scale_down"`). `svg` also accepts `opacity` from 0 to 1.
+`"scale_down"`) and `opacity` from 0 to 1.
 
 #### `iced.rule(content, props)`
 
