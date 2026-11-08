@@ -3885,6 +3885,7 @@ dependencies = [
  "iced",
  "iced_anim",
  "iced_exwlshell",
+ "image",
  "mlua",
  "naga",
  "riced-extension-sdk",

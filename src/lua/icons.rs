@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     env,
+    hash::{Hash, Hasher},
     path::{Component, Path, PathBuf},
 };
 
@@ -217,7 +218,7 @@ impl Resolver {
     }
 }
 
-fn query(iced: &Table, icon: String, options: Option<Table>) -> mlua::Result<Query> {
+fn query(iced: &Table, icon: String, options: Option<Table>) -> mlua::Result<(Query, bool)> {
     let theme = iced.get::<String>("icon_theme")?;
     if !name(&theme) {
         return Err(mlua::Error::runtime(
@@ -236,8 +237,9 @@ fn query(iced: &Table, icon: String, options: Option<Table>) -> mlua::Result<Que
         scale: 1,
         path: None,
     };
+    let mut thumbnail = false;
     if let Some(options) = options {
-        crate::runtime::keys(&options, &["size", "scale", "path"])?;
+        crate::runtime::keys(&options, &["size", "scale", "path", "thumbnail"])?;
         let integer = |key, default, max| -> mlua::Result<u32> {
             let value = options.get::<Option<f64>>(key)?.unwrap_or(default as f64);
             if !(1.0..=max as f64).contains(&value) || value.fract() != 0.0 {
@@ -260,16 +262,98 @@ fn query(iced: &Table, icon: String, options: Option<Table>) -> mlua::Result<Que
                 "icon path must be an absolute directory",
             ));
         }
+        thumbnail = options.get::<Option<bool>>("thumbnail")?.unwrap_or(false);
     }
-    Ok(query)
+    Ok((query, thumbnail))
+}
+
+/// Cache directory for downscaled icon copies.
+fn thumbnail_root() -> Option<PathBuf> {
+    env::var_os("XDG_CACHE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".cache"))
+        })
+        .map(|root| root.join("riced/icons"))
+}
+
+/// Downscales a raster icon to `pixels` and caches it by source path, size,
+/// and mtime. Returns None for vector icons and decode or write failures.
+fn thumbnail_path(source: &Path, pixels: u32, cache: &Path) -> Option<PathBuf> {
+    let format = source.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(
+        format.as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif"
+    ) {
+        return None;
+    }
+    let metadata = source.metadata().ok()?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())?
+        .as_nanos();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    metadata.len().hash(&mut hasher);
+    modified.hash(&mut hasher);
+    pixels.hash(&mut hasher);
+    let target = cache.join(format!("{:016x}.png", hasher.finish()));
+    if target.is_file() {
+        return Some(target);
+    }
+
+    let image = image::open(source).ok()?;
+    std::fs::create_dir_all(cache).ok()?;
+    let temp = cache.join(format!(".{}.tmp", std::process::id()));
+    image
+        .thumbnail(pixels, pixels)
+        .save_with_format(&temp, image::ImageFormat::Png)
+        .ok()?;
+    std::fs::rename(&temp, &target).ok()?;
+    prune(cache);
+    Some(target)
+}
+
+/// Keeps the thumbnail cache bounded by removing the oldest files.
+fn prune(cache: &Path) {
+    const LIMIT: usize = 256;
+    let Ok(entries) = std::fs::read_dir(cache) else {
+        return;
+    };
+    let mut files = entries
+        .flatten()
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            metadata
+                .is_file()
+                .then(|| (metadata.modified().ok(), entry.path()))
+        })
+        .collect::<Vec<_>>();
+    if files.len() <= LIMIT {
+        return;
+    }
+    files.sort_by_key(|(modified, _)| *modified);
+    let excess = files.len() - LIMIT;
+    for (_, path) in files.into_iter().take(excess) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let (roots, pixmaps) = search_paths();
-    install_with_paths(lua, roots, pixmaps)
+    install_with_paths(lua, roots, pixmaps, thumbnail_root())
 }
 
-fn install_with_paths(lua: &Lua, roots: Vec<PathBuf>, pixmaps: Vec<PathBuf>) -> mlua::Result<()> {
+fn install_with_paths(
+    lua: &Lua,
+    roots: Vec<PathBuf>,
+    pixmaps: Vec<PathBuf>,
+    cache: Option<PathBuf>,
+) -> mlua::Result<()> {
     let iced: Table = lua.globals().get("iced")?;
     iced.set("icon_theme", "hicolor")?;
     let theme_roots = roots.clone();
@@ -299,10 +383,20 @@ fn install_with_paths(lua: &Lua, roots: Vec<PathBuf>, pixmaps: Vec<PathBuf>) -> 
         "icon_path",
         lua.create_function_mut(move |lua, (icon, options): (String, Option<Table>)| {
             let iced = lua.globals().get::<Table>("iced")?;
-            let query = query(&iced, icon, options)?;
-            Ok(resolver
-                .resolve(query)
-                .map(|path| path.to_string_lossy().into_owned()))
+            let (query, wants_thumbnail) = query(&iced, icon, options)?;
+            let pixels = query.size.saturating_mul(query.scale).min(256);
+            let path = resolver.resolve(query);
+            Ok(path.map(|path| {
+                let path = if wants_thumbnail {
+                    cache
+                        .as_deref()
+                        .and_then(|cache| thumbnail_path(&path, pixels, cache))
+                        .unwrap_or(path)
+                } else {
+                    path
+                };
+                path.to_string_lossy().into_owned()
+            }))
         })?,
     )?;
     iced.set(
@@ -347,6 +441,14 @@ mod tests {
             std::fs::write(path, data).unwrap();
         }
 
+        fn png(&self, path: &str, width: u32, height: u32) {
+            let path = self.0.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            image::RgbaImage::from_pixel(width, height, image::Rgba([200, 30, 40, 255]))
+                .save(&path)
+                .unwrap();
+        }
+
         fn theme(&self, root: &str, theme: &str, inherits: &str) {
             self.write(&format!("{root}/{theme}/index.theme"), &format!(
                 "[Icon Theme]\nName=Display {theme}\nDirectories=16/apps,32/apps,16@2/apps,scalable/apps\nInherits={inherits}\n\n[16/apps]\nSize=16\nType=Fixed\n\n[32/apps]\nSize=32\nType=Fixed\n\n[16@2/apps]\nSize=16\nScale=2\nType=Fixed\n\n[scalable/apps]\nSize=24\nType=Scalable\nMinSize=16\nMaxSize=64\n"
@@ -362,6 +464,7 @@ mod tests {
                 &lua,
                 vec![self.0.join("user"), self.0.join("system")],
                 vec![self.0.join("pixmaps")],
+                Some(self.0.join("cache")),
             )
             .unwrap();
             lua.globals().set("root", self.0.to_str().unwrap()).unwrap();
@@ -457,5 +560,54 @@ mod tests {
         )
         .exec()
         .unwrap();
+    }
+
+    #[test]
+    fn thumbnails_downscale_raster_icons_and_reuse_the_cache() {
+        let icons = Icons::new();
+        icons.png("icon.png", 64, 64);
+        let source = icons.0.join("icon.png");
+        let cache = icons.0.join("cache");
+
+        let first = thumbnail_path(&source, 24, &cache).unwrap();
+        assert!(first.starts_with(&cache));
+        assert_eq!(image::image_dimensions(&first).unwrap(), (24, 24));
+
+        let modified = first.metadata().unwrap().modified().unwrap();
+        let second = thumbnail_path(&source, 24, &cache).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            modified,
+            second.metadata().unwrap().modified().unwrap(),
+            "unchanged sources should reuse the cached thumbnail"
+        );
+
+        icons.write("icon.svg", "<svg/>");
+        assert!(thumbnail_path(&icons.0.join("icon.svg"), 24, &cache).is_none());
+    }
+
+    #[test]
+    fn thumbnail_option_returns_a_cached_copy() {
+        let icons = Icons::new();
+        icons.png("icon.png", 96, 96);
+        icons.write("icon.svg", "<svg/>");
+        let lua = icons.lua();
+        lua.load(
+            r#"
+            local png = iced.icon_path(root .. '/icon.png', {size = 24, thumbnail = true})
+            assert(png and png ~= root .. '/icon.png')
+            assert(png:match('/cache/'))
+            local svg = iced.icon_path(root .. '/icon.svg', {thumbnail = true})
+            assert(svg == root .. '/icon.svg')
+        "#,
+        )
+        .exec()
+        .unwrap();
+        let cache = icons.0.join("cache");
+        assert_eq!(
+            std::fs::read_dir(cache).unwrap().count(),
+            1,
+            "one source produces one cached thumbnail"
+        );
     }
 }

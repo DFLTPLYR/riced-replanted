@@ -412,7 +412,7 @@ iced.icon_theme = "hicolor"
 function iced.icon_themes() end
 
 ---@param name string Icon name or absolute filename.
----@param options? { size?: integer, scale?: integer, path?: string } Size defaults to 24, scale to 1; path is an application's extra icon directory.
+---@param options? { size?: integer, scale?: integer, path?: string, thumbnail?: boolean } Size defaults to 24, scale to 1; path is an application's extra icon directory; thumbnail caches a downscaled raster copy.
 ---@return string|nil path
 function iced.icon_path(name, options) end
 

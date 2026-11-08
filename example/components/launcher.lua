@@ -110,7 +110,7 @@ function launcher.update(app, event)
 end
 
 local function icon(entry)
-    local path = entry.icon and iced.icon_path(entry.icon, { size = 24 })
+    local path = entry.icon and iced.icon_path(entry.icon, { size = 24, thumbnail = true })
     if not path then
         return iced.space(nil, { width = 24, height = 24 })
     end

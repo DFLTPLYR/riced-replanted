@@ -102,7 +102,7 @@ names, suitable for assigning to `iced.icon_theme`.
 ```lua
 iced.icon_theme = "Papirus-Dark"
 local themes = iced.icon_themes()
-local path = iced.icon_path("firefox", { size = 24, scale = 1 })
+local path = iced.icon_path("firefox", { size = 24, scale = 1, thumbnail = true })
 local icon = iced.text("?")
 if path then
     local image = path:lower():match("%.svg$") and iced.svg or iced.image
@@ -118,6 +118,11 @@ end
 - `path`: optional absolute application icon directory, such as a tray item's
   `icon_theme_path`. Direct files in this directory take precedence over themed
   icons. An empty directory string is treated as absent.
+- `thumbnail`: when true, raster icons are decoded and downscaled to `size *
+  scale` pixels (capped at 256) and cached under `$XDG_CACHE_HOME/riced/icons`
+  (default `~/.cache/riced/icons`). SVG icons and decode failures return the
+  original path. Repeated lookups reuse the cached file until the source
+  changes; the cache keeps at most 256 files and removes the oldest.
 
 Theme lookup searches `~/.icons`, `$XDG_DATA_HOME/icons` (default
 `~/.local/share/icons`), and each `$XDG_DATA_DIRS/icons` (default
