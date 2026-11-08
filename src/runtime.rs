@@ -2936,6 +2936,22 @@ mod tests {
         app.view(app.layers[0].window).unwrap();
     }
 
+    #[test]
+    fn ripple_example_renders_without_compositor() {
+        let mut app = load(
+            r#"
+            local ripple = require("components.ripple")
+            return riced.daemon({}, "test", function() end, function()
+                return ripple.view()
+            end):run()
+            "#,
+            Path::new("example/shell.lua"),
+        )
+        .unwrap();
+        app.prepare_layers().unwrap();
+        app.view(app.layers[0].window).unwrap();
+    }
+
     const LAYER_SHELL: &str = r#"
         local app = {count = 0}
         function app:update(event) self.count = self.count + 1 end

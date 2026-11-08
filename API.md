@@ -1549,7 +1549,8 @@ programs are not supported.
 `source`: inline WGSL fragment shader. `path`: WGSL file resolved against the
 profile directory (absolute paths allowed). Exactly one is required. See
 [`example/components/shaders/plasma.wgsl`](example/components/shaders/plasma.wgsl)
-for a runnable shader.
+for a runnable shader; `example/components/ripple.lua` shows an animated,
+centered shader overlay.
 
 `extraArgs`: optional table of named finite numbers. Riced generates the fields
 from the keys and exposes them as `riced.<name>`:

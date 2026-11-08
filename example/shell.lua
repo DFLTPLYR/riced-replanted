@@ -22,6 +22,10 @@ riced.ipc({
 -- Optional generic Wayland UI (requires the wayland extension):
 -- local wayland = require("components.wayland")
 -- return wayland.view()
+--
+-- Optional centered ripple overlay (requires the wgpu renderer):
+-- local ripple = require("components.ripple")
+-- then add `surfaces[#surfaces + 1] = ripple.view()` in app:view
 function app:view(props)
     local surfaces = { background.view(self.count) }
     if self.launcher_open then
