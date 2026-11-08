@@ -1602,6 +1602,12 @@ profile directory (absolute paths allowed). Exactly one is required. See
 for a runnable shader; `example/components/ripple.lua` shows an animated,
 centered shader overlay.
 
+`textures`: optional array of up to two raster image paths (absolute, or
+relative to the profile directory). They are bound as `riced_texture0` /
+`riced_sampler0` and `riced_texture1` / `riced_sampler1`; sample them with
+`textureSample(riced_texture0, riced_sampler0, uv)`. Unused slots are a 1x1
+white texture. Images are decoded as sRGB RGBA8.
+
 `extraArgs`: optional table of named finite numbers. Riced generates the fields
 from the keys and exposes them as `riced.<name>`:
 
@@ -1635,6 +1641,10 @@ struct Riced {
 };
 
 @group(0) @binding(0) var<uniform> riced: Riced;
+@group(0) @binding(1) var riced_texture0: texture_2d<f32>;
+@group(0) @binding(2) var riced_sampler0: sampler;
+@group(0) @binding(3) var riced_texture1: texture_2d<f32>;
+@group(0) @binding(4) var riced_sampler1: sampler;
 
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32>;
@@ -1661,6 +1671,15 @@ iced.shader({
     animated = true,
     fps = 30,
     extraArgs = { opacity = 0.35, speed = 1.0 },
+})
+
+-- Two textures are available for crossfades and transitions:
+iced.shader({
+    path = "components/shaders/wallpaper.wgsl",
+    width = "fill",
+    height = "fill",
+    textures = { old_path, new_path },
+    extraArgs = { progress = 0.5 },
 })
 ```
 

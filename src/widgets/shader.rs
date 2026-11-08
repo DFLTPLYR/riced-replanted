@@ -11,6 +11,7 @@ use std::{
 
 use iced::{
     Element, Rectangle, wgpu,
+    wgpu::util::DeviceExt as _,
     widget::shader::{self, Pipeline, Primitive, Program},
 };
 use mlua::{Table, Value};
@@ -67,6 +68,7 @@ pub(super) fn shader(
         return Ok(iced::widget::Space::new().into());
     };
     let extra = extra_args(node)?;
+    let textures = textures(node, ctx)?;
     let source: Arc<str> = format!("{}\n{fragment}", full_header(&extra)).into();
     if let Err(error) = validate(&source) {
         log::error!(target: "shader", "{error}");
@@ -77,6 +79,7 @@ pub(super) fn shader(
         source,
         extra: pack_extra(&extra).into(),
         animated: node.get::<Option<bool>>("animated")?.unwrap_or(false),
+        textures,
         fps: match node.get::<Option<u16>>("fps")? {
             Some(0) => return Err(mlua::Error::runtime("shader fps must be from 1 to 240")),
             Some(fps) if fps > 240 => {
@@ -122,6 +125,66 @@ fn source(node: &Table, ctx: &Ctx) -> mlua::Result<Option<Arc<str>>> {
             }
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct ShaderTexture {
+    path: PathBuf,
+    key: u64,
+}
+
+fn textures(node: &Table, ctx: &Ctx) -> mlua::Result<[Option<ShaderTexture>; 2]> {
+    let Some(table) = node.get::<Option<Table>>("textures")? else {
+        return Ok([None, None]);
+    };
+    let mut result = [None, None];
+    let mut count = 0;
+    for value in table.sequence_values::<String>() {
+        let value = value?;
+        if count >= result.len() {
+            return Err(mlua::Error::runtime(
+                "shader textures accepts at most two paths",
+            ));
+        }
+        if value.trim().is_empty() {
+            return Err(mlua::Error::runtime(
+                "shader texture paths must not be empty",
+            ));
+        }
+        let path = Path::new(&value);
+        let path = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            ctx.profile().unwrap_or(Path::new(".")).join(path)
+        };
+        let metadata = fs::metadata(&path).map_err(|error| {
+            mlua::Error::runtime(format!(
+                "cannot read shader texture {}: {error}",
+                path.display()
+            ))
+        })?;
+        let mut hasher = DefaultHasher::new();
+        path.hash(&mut hasher);
+        metadata.len().hash(&mut hasher);
+        metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+            .hash(&mut hasher);
+        result[count] = Some(ShaderTexture {
+            path,
+            key: hasher.finish(),
+        });
+        count += 1;
+    }
+    if table.raw_len() != count {
+        return Err(mlua::Error::runtime(
+            "shader textures must be an array of file paths",
+        ));
+    }
+    Ok(result)
 }
 
 fn extra_args(node: &Table) -> mlua::Result<Vec<(String, f32)>> {
@@ -183,6 +246,12 @@ fn full_header(extra: &[(String, f32)]) -> String {
         let _ = writeln!(header, "    riced_pad{index}: f32,");
     }
     header.push_str("};\n\n@group(0) @binding(0) var<uniform> riced: Riced;\n");
+    header.push_str(
+        "@group(0) @binding(1) var riced_texture0: texture_2d<f32>;\n\
+         @group(0) @binding(2) var riced_sampler0: sampler;\n\
+         @group(0) @binding(3) var riced_texture1: texture_2d<f32>;\n\
+         @group(0) @binding(4) var riced_sampler1: sampler;\n",
+    );
     header.push_str(HEADER);
     header
 }
@@ -273,9 +342,9 @@ fn validate(source: &str) -> Result<(), String> {
 fn fragment_entry(module: &naga::Module) -> Result<(), String> {
     for variable in module.global_variables.iter().map(|(_, variable)| variable) {
         if let Some(binding) = &variable.binding
-            && (binding.group, binding.binding) != (0, 0)
+            && (binding.group != 0 || !(0..=4).contains(&binding.binding))
         {
-            return Err("shader may only bind resources at group 0 binding 0".to_owned());
+            return Err("shader resources must use group 0 bindings 0 to 4".to_owned());
         }
     }
     let entry = module
@@ -341,6 +410,7 @@ struct ShaderProgram {
     source: Arc<str>,
     key: u64,
     extra: Arc<[f32]>,
+    textures: [Option<ShaderTexture>; 2],
     animated: bool,
     fps: u16,
 }
@@ -376,6 +446,7 @@ impl Program<Message> for ShaderProgram {
             source: self.source.clone(),
             key: self.key,
             extra: self.extra.clone(),
+            textures: self.textures.clone(),
             mouse,
             hover,
             size: bounds.size(),
@@ -389,6 +460,7 @@ struct ShaderPrimitive {
     source: Arc<str>,
     key: u64,
     extra: Arc<[f32]>,
+    textures: [Option<ShaderTexture>; 2],
     mouse: iced::Point,
     hover: f32,
     size: iced::Size,
@@ -399,6 +471,7 @@ struct ShaderPrimitive {
 struct GpuState {
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    _textures: Vec<wgpu::Texture>,
 }
 
 impl Primitive for ShaderPrimitive {
@@ -416,28 +489,65 @@ impl Primitive for ShaderPrimitive {
         pipeline.render(device, &self.source, self.key);
 
         let size = (32 + self.extra.len() * 4) as u64;
+        let key = gpu_key(size, &self.textures);
         let mut gpu = self.gpu.lock().unwrap();
-        if gpu.as_ref().is_none_or(|(existing, _)| *existing != size) {
-            let layout = pipeline.layout.clone();
+        if gpu.as_ref().is_none_or(|(existing, _)| *existing != key) {
             let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("riced shader uniforms"),
                 size,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+            let mut textures = Vec::new();
+            let mut views = [pipeline.dummy_view.clone(), pipeline.dummy_view.clone()];
+            for (index, texture) in self.textures.iter().enumerate() {
+                let Some(texture) = texture else {
+                    continue;
+                };
+                match upload_texture(device, queue, &texture.path) {
+                    Some((texture, view)) => {
+                        views[index] = view;
+                        textures.push(texture);
+                    }
+                    None => log::warn!(
+                        target: "shader",
+                        "cannot decode shader texture {}",
+                        texture.path.display()
+                    ),
+                }
+            }
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("riced shader uniforms"),
-                layout: &layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniforms.as_entire_binding(),
-                }],
+                layout: &pipeline.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniforms.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&views[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&views[1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
+                    },
+                ],
             });
             *gpu = Some((
-                size,
+                key,
                 GpuState {
                     uniforms,
                     bind_group,
+                    _textures: textures,
                 },
             ));
         }
@@ -477,32 +587,147 @@ impl Primitive for ShaderPrimitive {
     }
 }
 
+fn gpu_key(size: u64, textures: &[Option<ShaderTexture>; 2]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    size.hash(&mut hasher);
+    for texture in textures {
+        texture
+            .as_ref()
+            .map(|texture| texture.key)
+            .hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn upload_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    path: &Path,
+) -> Option<(wgpu::Texture, wgpu::TextureView)> {
+    let image = image::open(path).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let texture = device.create_texture_with_data(
+        queue,
+        &wgpu::TextureDescriptor {
+            label: Some("riced shader texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        image.as_raw(),
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Some((texture, view))
+}
+
 struct ShaderPipeline {
     start: Instant,
     format: wgpu::TextureFormat,
     layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    _dummy: wgpu::Texture,
+    dummy_view: wgpu::TextureView,
     pipelines: HashMap<u64, wgpu::RenderPipeline>,
 }
 
 impl Pipeline for ShaderPipeline {
-    fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("riced shader uniforms"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            label: Some("riced shader bindings"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("riced shader sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let dummy = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("riced shader dummy"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &[255, 255, 255, 255],
+        );
+        let dummy_view = dummy.create_view(&wgpu::TextureViewDescriptor::default());
         Self {
             start: Instant::now(),
             format,
             layout,
+            sampler,
+            _dummy: dummy,
+            dummy_view,
             pipelines: HashMap::new(),
         }
     }

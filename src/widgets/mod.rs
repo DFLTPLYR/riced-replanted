@@ -626,7 +626,7 @@ fn build(
         "markdown" => &["text_size", "spacing", "on_link_click", "style"],
         "responsive" => &[],
         "canvas" => &[],
-        "shader" => &["source", "path", "extraArgs", "animated", "fps"],
+        "shader" => &["source", "path", "extraArgs", "textures", "animated", "fps"],
         "pane_grid" => &[
             "id",
             "direction",
@@ -853,6 +853,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("riced-shader-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("test.wgsl"), shader).unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]))
+            .save(dir.join("texture.png"))
+            .unwrap();
         let ctx = Ctx::new(0).with_profile(Some(dir.clone()));
         for source in [
             format!("{{kind='shader',source=[[{shader}]],width=20,height=10}}"),
@@ -863,6 +866,13 @@ mod tests {
                 "{{kind='shader',source=[[{extra_shader}]],extraArgs={{extra_x=1.5,extra_y=2.5}}}}"
             ),
             format!("{{kind='shader',source=[[{mouse_shader}]],animated=true,fps=30}}"),
+            format!(
+                "{{kind='shader',source=[[{shader}]],textures={{'texture.png'}}}}"
+            ),
+            format!(
+                "{{kind='shader',source=[[{shader}]],textures={{'{}/texture.png'}}}}",
+                dir.display()
+            ),
             "{kind='shader',path='test.wgsl',width=20,height=10}".to_owned(),
             "{kind='shader',path='missing.wgsl'}".to_owned(),
             "{kind='shader',source='not wgsl'}".to_owned(),
@@ -883,6 +893,9 @@ mod tests {
             "{kind='shader',source='x',extraArgs={x=0/0}}",
             "{kind='shader',source='x',extraArgs={mouse=1}}",
             "{kind='shader',source='x',extraArgs={hover=1}}",
+            "{kind='shader',source='x',textures={'/missing/texture.png'}}",
+            "{kind='shader',source='x',textures={'a','b','c'}}",
+            "{kind='shader',source='x',textures={'   '}}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_err(),

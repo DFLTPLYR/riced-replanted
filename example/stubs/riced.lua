@@ -212,6 +212,7 @@ config = {}
 ---@class iced.ShaderProps: iced.Props
 ---@field source? string Inline WGSL fragment shader defining `fs_main`
 ---@field path? string WGSL file resolved against the profile directory; mutually exclusive with `source`
+---@field textures? string[] Up to two raster paths bound as `riced_texture0`/`riced_texture1`
 ---@field extraArgs? table<string, number> Named f32 uniforms exposed as `riced.<name>`
 ---@field animated? boolean Request redraws so `riced.time` advances
 ---@field fps? integer Redraw cap for animated shaders, 1..240 (default 60)
