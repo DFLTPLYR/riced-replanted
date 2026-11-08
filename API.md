@@ -291,6 +291,9 @@ Request a session lock with the `lock` task and release it with `unlock`:
 return { type = "lock" }
 ```
 
+`lock` is a request. If the compositor denies it or lacks session-lock support,
+no surface appears; this API does not report the denial.
+
 When an `input_panel` or `session_lock` surface closes, `update` receives
 `{ type = "shell_closed", window = <props.window>, shell = <string> }`.
 
