@@ -3799,6 +3799,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "riced-extension-applications"
+version = "0.1.0"
+dependencies = [
+ "freedesktop_entry_parser",
+ "riced-extension-sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "riced-extension-dbus"
 version = "0.1.0"
 dependencies = [

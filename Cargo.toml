@@ -8,6 +8,7 @@ members = [
   "extensions/themeagen",
   "extensions/lucide",
   "extensions/openmeteo",
+  "extensions/applications",
 ]
 resolver = "3"
 

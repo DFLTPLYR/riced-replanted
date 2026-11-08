@@ -445,14 +445,15 @@ Extensions may push events. They arrive in `update` as:
 
 #### Bundled extension APIs
 
-| Extension   | Store fields                                                                                     | Methods                                                                                                             | Events |
-| ----------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- | ------ |
-| `system`    | `host`, `time`, `cpu`, `memory`, `disks`, `gpus`, `processes`                                    | none                                                                                                                | none   |
-| `wayland`   | `connected`, `capabilities`, `outputs`, `toplevels`, `workspaces`, `workspace_groups`, `focused` | `activate_toplevel`, `close_toplevel`, `activate_workspace`                                                         | none   |
-| `dbus`      | `connected`, `capabilities`, `tray`, `tray_menu`, `notifications`                                 | `activate_tray`, `secondary_activate_tray`, `context_menu_tray`, `open_tray_menu`, `close_tray_menu`, `tray_menu_event`, `close_notification`, `invoke_notification_action` | none   |
-| `themeagen` | `ready`, `mode`, `source`, `colors`                                                              | `generate`, `populate`, `regenerate`                                                                                | none   |
-| `lucide`    | `count`                                                                                          | `resolve`, `exists`, `list`                                                                                           | none   |
-| `openmeteo` | `ready`, `latitude`, `longitude`, `current`, `current_units`, `timezone`, `updated_at`, `error` | `configure` | none |
+| Extension   | Store fields                                                                                     | Methods                                                                                                                                                                     | Events |
+| ----------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| `system`    | `host`, `time`, `cpu`, `memory`, `disks`, `gpus`, `processes`                                    | none                                                                                                                                                                        | none   |
+| `wayland`   | `connected`, `capabilities`, `outputs`, `toplevels`, `workspaces`, `workspace_groups`, `focused` | `activate_toplevel`, `close_toplevel`, `activate_workspace`                                                                                                                 | none   |
+| `dbus`      | `connected`, `capabilities`, `tray`, `tray_menu`, `notifications`                                | `activate_tray`, `secondary_activate_tray`, `context_menu_tray`, `open_tray_menu`, `close_tray_menu`, `tray_menu_event`, `close_notification`, `invoke_notification_action`, `pick_file` | none   |
+| `themeagen` | `ready`, `mode`, `source`, `colors`                                                              | `generate`, `populate`, `regenerate`                                                                                                                                        | none   |
+| `lucide`    | `count`                                                                                          | `resolve`, `exists`, `list`                                                                                                                                                 | none   |
+| `openmeteo` | `ready`, `latitude`, `longitude`, `current`, `current_units`, `timezone`, `updated_at`, `error`  | `configure`                                                                                                                                                                 | none   |
+| `applications` | `applications`                                                                                | `launch`                                                                                                                                                                    | none   |
 
 All bundled extensions publish whole snapshots rather than pushing events.
 Each publish replaces the snapshot contents, so re-read a field in `view`
@@ -460,8 +461,9 @@ instead of caching a nested table across updates; the proxy table itself stays
 live. Store reads are synchronous and subscribe to fields the first time Lua
 reads them. JSON `null` fields are exposed as `nil`, and `null` array entries are
 removed. Methods are asynchronous and use positional arguments. `system` has no
-methods. Wayland and D-Bus methods return no value on success, so their callback
-receives `(nil, nil)`; themeagen methods return a result table. On failure every
+methods. Wayland, most D-Bus methods, and `applications.launch` return no value
+on success, so their callback receives `(nil, nil)`; `dbus.pick_file` returns
+selected paths and themeagen methods return a result table. On failure every
 method calls its callback with `(nil, error)`. Without a callback, method
 failures are not surfaced to Lua. Use a callback when an action can fail. `?`
 below means the field or value may be absent or `nil`.
@@ -995,6 +997,50 @@ custom views. `weather_code` follows Open-Meteo's WMO interpretation codes.
 Weather data: [Open-Meteo](https://open-meteo.com/),
 [API documentation](https://open-meteo.com/en/docs). This version uses its public
 non-commercial endpoint without an API key; see the provider's usage terms.
+
+#### Applications extension
+
+`riced-applications` lists installed XDG desktop entries and launches them.
+Install it with `just extension-applications`.
+
+```lua
+local applications = riced.plugin("applications")
+
+for _, entry in ipairs(applications.applications or {}) do
+    iced.button(entry.name, {
+        on_press = { type = "launch", id = entry.id },
+    })
+end
+
+applications.launch("firefox", function(_, error)
+    if error then log(error) end
+end)
+```
+
+The `applications` store field is a name-sorted array:
+
+| Field      | Meaning                                                        |
+| ---------- | -------------------------------------------------------------- |
+| `id`       | Desktop file id; subdirectories use dashes, for example `kde-konsole` |
+| `name`     | Display name                                                   |
+| `icon`     | Icon name or nil; resolve with `iced.icon_path`                |
+| `comment`  | Description or nil                                             |
+| `terminal` | Whether launching needs a terminal                             |
+
+Entries come from `$XDG_DATA_HOME/applications` and each
+`$XDG_DATA_DIRS/applications`. The first directory that defines an id wins;
+`Hidden`, `NoDisplay`, and non-`Application` entries are skipped. The list is
+rescanned every 30 seconds and published when it changes.
+
+`launch(id, callback?)` resolves a known id, starts the desktop `Exec` command
+without a shell, and drops document/URL field codes. `%c` and `%k` expand, `%%`
+is a literal percent, and `Terminal=true` entries run in `$TERMINAL -e`
+(falling back to `x-terminal-emulator`). Unknown ids and spawn failures call the
+callback with `(nil, error)`.
+
+The example profile includes `example/components/launcher.lua`, a searchable
+overlay opened with `riced ipc launcher`. Bind that command to a compositor
+shortcut. It subscribes to key events only while the overlay is open.
 
 #### Writing extensions
 

@@ -126,6 +126,8 @@ The bundled extensions are:
   extension-owned `iced.lucide` widget.
 - [`riced-openmeteo`](extensions/openmeteo/API.md) — current weather, automatic
   refresh, and `iced.openmeteo`.
+- [`riced-applications`](extensions/applications/API.md) — installed XDG desktop
+  entries and launching them.
 
 The D-Bus and Wayland extensions bound display text and array snapshots to stay
 below the protocol's 256 KiB message limit. Entries that exceed an array's byte
@@ -142,6 +144,7 @@ just extension-dbus
 just extension-themeagen
 just extension-lucide
 just extension-openmeteo
+just extension-applications
 ```
 
 Build any Rust extension into an output directory:

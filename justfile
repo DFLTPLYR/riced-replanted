@@ -79,6 +79,12 @@ extension-lucide:
     install -Dm644 extensions/lucide/lucide.lua "{{ home_directory() }}/.config/riced/replanted/extensions/lucide/lucide.lua"
     install -Dm644 extensions/lucide/stub.lua "{{ home_directory() }}/.config/riced/replanted/extensions/lucide/stub.lua"
 
+# Build the application entries extension and install it into the test profile
+extension-applications:
+    {{nix}} cargo build --release -p riced-extension-applications
+    install -Dm755 target/release/riced-applications "{{ home_directory() }}/.config/riced/replanted/extensions/applications/riced-applications"
+    install -Dm644 extensions/applications/stub.lua "{{ home_directory() }}/.config/riced/replanted/extensions/applications/stub.lua"
+
 # Build the Open-Meteo weather extension and its Lua widget
 extension-openmeteo:
     {{nix}} cargo build --release -p riced-extension-openmeteo
