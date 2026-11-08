@@ -18,7 +18,7 @@ local function content()
                     width = iced.Length.fill,
                     height = iced.Length.fill,
                     animated = true,
-                    fps = 165,
+                    fps = 60,
                     extraArgs = { opacity = 0.35, speed = 1.0 },
                 }),
                 { width = SIZE, height = SIZE, style = { background = theme.primary } }
