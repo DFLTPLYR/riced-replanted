@@ -1606,7 +1606,8 @@ centered shader overlay.
 relative to the profile directory). They are bound as `riced_texture0` /
 `riced_sampler0` and `riced_texture1` / `riced_sampler1`; sample them with
 `textureSample(riced_texture0, riced_sampler0, uv)`. Unused slots are a 1x1
-white texture. Images are decoded as sRGB RGBA8.
+white texture. Images are decoded as RGBA8 in the renderer color space
+(no linear conversion).
 
 `extraArgs`: optional table of named finite numbers. Riced generates the fields
 from the keys and exposes them as `riced.<name>`:
