@@ -2895,6 +2895,47 @@ mod tests {
         app.view(app.layers[0].window).unwrap();
     }
 
+    #[test]
+    fn launcher_filters_application_entries() {
+        load(
+            r#"
+            local launcher = require("components.launcher")
+            local entries = {
+                { id = "firefox", name = "Firefox", comment = "Browse the Web" },
+                { id = "foot", name = "Foot", comment = "Terminal emulator" },
+            }
+            assert(#launcher.filter(entries, "") == 2)
+            assert(launcher.filter(entries, "FIREFOX")[1].id == "firefox")
+            assert(launcher.filter(entries, "terminal")[1].id == "foot")
+            assert(#launcher.filter(entries, "missing") == 0)
+            return riced.daemon({}, "test", function() end, function()
+                return iced.text("x")
+            end):run()
+            "#,
+            Path::new("example/shell.lua"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn launcher_renders_while_the_applications_extension_is_offline() {
+        let mut app = load(
+            r#"
+            local launcher = require("components.launcher")
+            return riced.daemon({}, "test", function() end, function()
+                return launcher.view({
+                    launcher_query = "firefox",
+                    launcher_selected = 1,
+                })
+            end):run()
+            "#,
+            Path::new("example/shell.lua"),
+        )
+        .unwrap();
+        app.prepare_layers().unwrap();
+        app.view(app.layers[0].window).unwrap();
+    }
+
     const LAYER_SHELL: &str = r#"
         local app = {count = 0}
         function app:update(event) self.count = self.count + 1 end

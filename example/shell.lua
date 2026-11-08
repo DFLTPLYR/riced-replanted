@@ -1,7 +1,9 @@
 local background = require("components.layers.background")
-local app = { count = 0 }
+local launcher = require("components.launcher")
+local app = { count = 0, launcher_open = false, launcher_query = "", launcher_selected = 1 }
 
 function app:update(event)
+    launcher.update(self, event)
     if event == "increment" then
         self.count = self.count + 1
     elseif type(event) == "table" and event.type == "workspace" then
@@ -9,15 +11,30 @@ function app:update(event)
     end
 end
 
+-- Bind a compositor shortcut to `riced ipc launcher` to open the launcher.
+riced.ipc({
+    launcher = function(self, args)
+        if #args ~= 0 then error("usage: riced ipc launcher") end
+        return launcher.toggle(self)
+    end,
+})
+
 -- Optional generic Wayland UI (requires the wayland extension):
 -- local wayland = require("components.wayland")
 -- return wayland.view()
 function app:view(props)
-    return background.view(self.count)
+    local surfaces = { background.view(self.count) }
+    if self.launcher_open then
+        surfaces[#surfaces + 1] = launcher.view(self)
+    end
+    return surfaces
 end
 
 function app:title(window) return "riced" end
-function app:subscription(active) return nil end -- or iced.every(1000), sends { type = "tick" }
+function app:subscription(active)
+    if self.launcher_open then return iced.on_key(true) end
+    return nil -- or iced.every(1000), sends { type = "tick" }
+end
 function app:style(palette)
     return { background_color = palette.background, text_color = palette.text }
 end
