@@ -243,6 +243,47 @@ mod tests {
     }
 
     #[test]
+    fn widget_overrides_apply_under_explicit_props() {
+        let lua = mlua::Lua::new();
+        load(&lua).unwrap();
+        lua.load(
+            r##"
+            iced.overrides(iced.button, {
+                padding = 8,
+                style = {background = '#202020', border = {radius = 6}},
+            })
+            assert(iced.button('save').padding == nil)
+            local default = riced._defaults(iced.button('save'))
+            assert(default.kind == 'button' and default.padding == 8)
+            assert(default.style.background == '#202020' and default.style.border.radius == 6)
+
+            local custom = riced._defaults(iced.button('save', {padding = 2, style = {text_color = '#ffffff'}}))
+            assert(custom.padding == 2 and custom.style.text_color == '#ffffff')
+            assert(custom.style.background == '#202020' and custom.style.border.radius == 6)
+
+            local first = riced._defaults(iced.button('a'))
+            first.style.border.radius = 1
+            assert(riced._defaults(iced.button('b')).style.border.radius == 6)
+
+            local snapshot = iced.overrides(iced.button)
+            snapshot.padding = 99
+            assert(riced._defaults(iced.button('c')).padding == 8)
+
+            iced.overrides(iced.container, {props = {'width', 'height'}})
+            local container = riced._defaults(iced.container(iced.text('x'), {props = {'padding'}}))
+            assert(#container.props == 1 and container.props[1] == 'padding')
+
+            iced.overrides(iced.button, {})
+            assert(riced._defaults(iced.button('d')).padding == nil)
+            assert(not pcall(iced.overrides, iced.text('x'), {}))
+            assert(not pcall(iced.overrides, iced.button, false))
+        "##,
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[test]
     fn opacity_sets_the_alpha_channel() {
         let lua = mlua::Lua::new();
         load(&lua).unwrap();

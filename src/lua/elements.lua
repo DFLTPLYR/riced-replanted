@@ -1,5 +1,65 @@
 -- Elements: widgets, layer surfaces, and component references.
 
+local function copy(value, seen)
+	if type(value) ~= "table" then return value end
+	seen = seen or {}
+	if seen[value] then return seen[value] end
+	local result = {}
+	seen[value] = result
+	for key, field in pairs(value) do result[copy(key, seen)] = copy(field, seen) end
+	return result
+end
+
+local function array(value)
+	for key in pairs(value) do
+		if type(key) == "number" then return true end
+	end
+	return false
+end
+
+local function merge(target, overrides, active)
+	active = active or {}
+	assert(not active[overrides], "overrides must not contain cycles")
+	active[overrides] = true
+	for key, value in pairs(overrides) do
+		if key ~= "props" and type(value) == "table" and type(target[key]) == "table"
+			and not array(value) and not array(target[key]) then
+			target[key] = merge(copy(target[key]), value, active)
+		else
+			target[key] = copy(value)
+		end
+	end
+	active[overrides] = nil
+	return target
+end
+
+local defaults, constructors = {}, {}
+
+local function resolve(node)
+	local kind = rawget(node, "kind")
+	local default = kind and defaults[kind]
+	if not default or next(default) == nil then return node end
+	local result = copy(default)
+	for key, value in pairs(node) do
+		if key ~= "content" and type(value) == "table" and type(result[key]) == "table"
+			and not array(value) and not array(result[key]) then
+			result[key] = merge(result[key], value)
+		else
+			result[key] = value
+		end
+	end
+	return result
+end
+
+function iced.overrides(constructor, props)
+	local kind = constructors[constructor]
+	assert(kind ~= nil, "overrides expects an iced widget constructor")
+	if props == nil then return defaults[kind] and copy(defaults[kind]) end
+	assert(type(props) == "table", "widget overrides must be a table")
+	defaults[kind] = copy(props)
+	riced._defaults = next(defaults) and resolve or nil
+end
+
 for _, kind in ipairs({
 	"text",
 	"icon",
@@ -52,6 +112,7 @@ for _, kind in ipairs({
 		end
 		return node
 	end
+	constructors[iced[kind]] = kind
 end
 
 function iced.shader(props)
@@ -352,16 +413,6 @@ function iced.measure(content, props)
 	return { kind = "measure", content = content, id = id }
 end
 
-local function copy(value, seen)
-	if type(value) ~= "table" then return value end
-	seen = seen or {}
-	if seen[value] then return seen[value] end
-	local result = {}
-	seen[value] = result
-	for key, field in pairs(value) do result[copy(key, seen)] = copy(field, seen) end
-	return result
-end
-
 function iced.define(name, factory)
 	assert(type(name) == "string" and name:match("^[%a_][%w_]*$"), "widget name must be a valid identifier")
 	assert(type(factory) == "function", "definition factory must be a function")
@@ -385,29 +436,6 @@ function iced.define(name, factory)
 		return node
 	end
 	defined[iced[name]] = "widget"
-end
-
-local function array(value)
-	for key in pairs(value) do
-		if type(key) == "number" then return true end
-	end
-	return false
-end
-
-local function merge(target, overrides, active)
-	active = active or {}
-	assert(not active[overrides], "transition overrides must not contain cycles")
-	active[overrides] = true
-	for key, value in pairs(overrides) do
-		if key ~= "props" and type(value) == "table" and type(target[key]) == "table"
-			and not array(value) and not array(target[key]) then
-			target[key] = merge(copy(target[key]), value, active)
-		else
-			target[key] = copy(value)
-		end
-	end
-	active[overrides] = nil
-	return target
 end
 
 function iced.transition(preset, overrides)

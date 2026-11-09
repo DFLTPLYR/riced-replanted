@@ -504,7 +504,19 @@ impl Ctx {
     }
 }
 
+fn resolve_defaults(node: Table, ctx: &Ctx) -> mlua::Result<Table> {
+    let Some(lua) = &ctx.lua else {
+        return Ok(node);
+    };
+    let riced: Table = lua.globals().get("riced")?;
+    let Some(resolve) = riced.get::<Option<mlua::Function>>("_defaults")? else {
+        return Ok(node);
+    };
+    resolve.call(node)
+}
+
 pub fn element(node: Table, ctx: &Ctx) -> mlua::Result<Element<'static, Message>> {
+    let node = resolve_defaults(node, ctx)?;
     let tagged;
     let ctx = match node.get::<Option<String>>("__component_id")? {
         Some(id) => {
@@ -1714,6 +1726,24 @@ mod tests {
         element(second, &ctx).unwrap();
         assert_eq!(lua.globals().get::<String>("added").unwrap(), "");
         assert_eq!(lua.globals().get::<String>("moved").unwrap(), "");
+    }
+
+    #[test]
+    fn prebuilt_elements_receive_defaults_at_render_time() {
+        let lua = mlua::Lua::new();
+        crate::lua::load(&lua).unwrap();
+        let node: Table = lua
+            .load(
+                r#"
+                local image = iced.image('x.png')
+                iced.overrides(iced.image, {opacity = 2})
+                return image
+            "#,
+            )
+            .eval()
+            .unwrap();
+        let ctx = Ctx::new(0).with_lua(lua);
+        assert!(element(node, &ctx).is_err());
     }
 
     #[test]

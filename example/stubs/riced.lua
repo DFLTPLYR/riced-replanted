@@ -505,6 +505,12 @@ function iced.Size(width, height) end
 ---@return string
 function iced.opacity(color, percent) end
 
+---Sets default props for a built-in widget constructor and returns a copy of the current defaults.
+---@param constructor function An iced widget constructor, such as iced.button
+---@param props? iced.Props Defaults merged under explicit props; pass {} to clear
+---@return iced.Props|nil
+function iced.overrides(constructor, props) end
+
 ---@param content string|number
 ---@param props? iced.Props
 ---@return iced.Element

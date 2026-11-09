@@ -23,6 +23,7 @@ Lua API changes.
   - [Plugins and extensions](#plugins-and-extensions)
 - [iced components](#iced-components)
   - [Constructors and common props](#constructors-and-common-props)
+  - [Widget defaults](#widget-defaults)
   - [Widget reference](#widget-reference)
   - [Widget events](#widget-events)
   - [Styles](#styles)
@@ -1169,6 +1170,31 @@ Every constructor also accepts these common props:
 
 Widget-specific props are listed below. `transition` on `list_view` means item
 enter/leave/displacement animation instead of property animation.
+
+### Widget defaults
+
+`iced.overrides(constructor, props?)` sets default props for a built-in widget
+constructor. Defaults merge under the props passed to each call: explicit props
+win, nested tables such as `style` and `border` merge key by key, and array
+values such as `transition.change.props` replace the default array.
+
+Calling it with only the constructor returns a copy of the current defaults, or
+`nil` when none are set. Pass `{}` to clear them.
+
+```lua
+iced.overrides(iced.button, {
+    padding = 8,
+    style = { background = "#202020", border = { radius = 6 } },
+})
+
+iced.button("Save") -- padding 8, dark background
+iced.button("Save", { style = { text_color = "#ffffff" } }) -- keeps the background
+```
+
+Defaults are resolved when an element is rendered, so registration order relative
+to element construction does not matter. The module that calls `iced.overrides`
+must still run before the first render. Components still own composition and
+behavior; use defaults for styling.
 
 ### Widget reference
 
