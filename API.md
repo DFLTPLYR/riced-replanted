@@ -1196,6 +1196,32 @@ to element construction does not matter. The module that calls `iced.overrides`
 must still run before the first render. Components still own composition and
 behavior; use defaults for styling.
 
+`iced.stylesheet(styles)` applies defaults for several widget kinds at once.
+`styles` maps a widget kind (`button`, `text`, …) or a constructor
+(`iced.button`) to its default props, and the call returns `styles` so a
+stylesheet module can return it directly:
+
+```lua
+-- components/composables/stylesheet.lua
+return iced.stylesheet({
+    button = {
+        padding = 8,
+        style = { background = "#202020", border = { radius = 6 } },
+    },
+    text = { size = 15 },
+})
+```
+
+```lua
+-- shell.lua, before the daemon starts
+riced.stylesheet = require("components.composables.stylesheet")
+```
+
+`riced` applies a table assigned to `riced.stylesheet` before the first render.
+The stylesheet module can also `require` other style modules or call
+`iced.define` for custom widgets. A stylesheet only sets defaults; explicit
+props still win.
+
 ### Widget reference
 
 #### `iced.icon(content, props)`

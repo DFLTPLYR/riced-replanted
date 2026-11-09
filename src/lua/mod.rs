@@ -284,6 +284,28 @@ mod tests {
     }
 
     #[test]
+    fn stylesheet_applies_several_widgets() {
+        let lua = mlua::Lua::new();
+        load(&lua).unwrap();
+        lua.load(
+            r##"
+            local sheet = iced.stylesheet({
+                button = {padding = 4},
+                [iced.text] = {size = 20},
+            })
+            assert(sheet.button.padding == 4)
+            assert(riced._defaults(iced.button('e')).padding == 4)
+            assert(riced._defaults(iced.text('e')).size == 20)
+            assert(not pcall(iced.stylesheet, {missing_widget = {}}))
+            assert(not pcall(iced.stylesheet, {button = false}))
+            assert(not pcall(iced.stylesheet, false))
+        "##,
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[test]
     fn opacity_sets_the_alpha_channel() {
         let lua = mlua::Lua::new();
         load(&lua).unwrap();

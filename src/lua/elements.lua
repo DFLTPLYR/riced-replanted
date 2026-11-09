@@ -60,6 +60,16 @@ function iced.overrides(constructor, props)
 	riced._defaults = next(defaults) and resolve or nil
 end
 
+function iced.stylesheet(styles)
+	assert(type(styles) == "table", "stylesheet must be a table")
+	for kind, props in pairs(styles) do
+		local constructor = type(kind) == "string" and rawget(iced, kind) or kind
+		assert(constructors[constructor], "unknown widget in stylesheet: " .. tostring(kind))
+		iced.overrides(constructor, props)
+	end
+	return styles
+end
+
 for _, kind in ipairs({
 	"text",
 	"icon",

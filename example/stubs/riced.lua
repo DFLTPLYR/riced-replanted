@@ -511,6 +511,11 @@ function iced.opacity(color, percent) end
 ---@return iced.Props|nil
 function iced.overrides(constructor, props) end
 
+---Applies widget defaults for several kinds at once and returns the stylesheet.
+---@param styles table<string|function, iced.Props> Widget kind or constructor mapped to default props
+---@return table
+function iced.stylesheet(styles) end
+
 ---@param content string|number
 ---@param props? iced.Props
 ---@return iced.Element
@@ -753,6 +758,9 @@ function iced.on_mouse() end
 -- Daemon builder and extension proxies.
 
 riced = {}
+
+---@type table<string|function, iced.Props>|nil Applied before the first render; see iced.stylesheet.
+riced.stylesheet = nil
 
 ---@class riced.FileOptions
 ---@field path string

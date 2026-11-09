@@ -508,6 +508,11 @@ pub fn load_with_plugins(
             "shell.lua must return riced.daemon(...):run()",
         ));
     }
+    let riced: Table = lua.globals().get("riced")?;
+    if let Value::Table(stylesheet) = riced.get::<Value>("stylesheet")? {
+        let iced: Table = lua.globals().get("iced")?;
+        iced.get::<Function>("stylesheet")?.call::<()>(stylesheet)?;
+    }
     let app = App {
         state: definition.get("app")?,
         update: definition.get("update")?,
@@ -4269,6 +4274,33 @@ return m";
         let (changed, tasks) = app.poll_plugins().unwrap();
         assert!(changed);
         assert!(tasks.units() > 0);
+    }
+
+    #[test]
+    fn assigned_stylesheet_applies_defaults_before_the_first_render() {
+        let shell = r#"
+            riced.stylesheet = {
+                button = {padding = 99},
+                [iced.text] = {size = 21},
+            }
+            local app = {}
+            function app:update() end
+            function app:view() return iced.text('x') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let app = load(shell, Path::new("shell.lua")).unwrap();
+        let padding: f32 = app
+            .lua
+            .load("return riced._defaults(iced.button('x')).padding")
+            .eval()
+            .unwrap();
+        let size: f32 = app
+            .lua
+            .load("return riced._defaults(iced.text('x')).size")
+            .eval()
+            .unwrap();
+        assert_eq!(padding, 99.0);
+        assert_eq!(size, 21.0);
     }
 
     #[test]
