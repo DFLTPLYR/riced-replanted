@@ -1632,6 +1632,30 @@ Keys must be WGSL identifiers that do not start with `riced_`; `resolution`,
 layout; changing the key set recompiles the pipeline, while changing values only
 updates the uniform buffer.
 
+`transition.change` can tween extra args. List them as `extraArgs.<name>` in
+`props`, or omit `props` to animate width, height, padding, and every extra arg:
+
+```lua
+iced.shader({
+    path = "components/shaders/wallpaper.wgsl",
+    width = iced.Length.fill,
+    height = iced.Length.fill,
+    extraArgs = { progress = self.progress },
+    transition = {
+        change = {
+            props = { "extraArgs.progress" },
+            duration = 600,
+            easing = "in_out",
+            callback = function(self) self.finished = true end,
+        },
+    },
+})
+```
+
+The shader receives interpolated values each frame and the callback runs once
+after the tween completes; it may return tasks. Keep the `extraArgs` key set
+stable while a tween runs.
+
 Riced supplies the vertex stage and this reserved interface:
 
 ```wgsl
@@ -2048,7 +2072,7 @@ Use `iced.transition("name", overrides)` to reuse a named preset, or
 `iced.transition({ duration = 180, enter = {}, exit = {} })` to share timing
 across events. See [named values and transitions](#named-values-and-transitions).
 `change` interpolates `width`, `height`, scalar `padding`, `size`/`color` (text),
-`spacing` (row/column), `value` (progress_bar), and the style fields
+`spacing` (row/column), `value` (progress_bar), `extraArgs.<name>` (shader), and the style fields
 `background`, `text_color`, `border`, and `shadow` on widgets that support them.
 
 | Widgets                                                                               | Animatable style fields                        |

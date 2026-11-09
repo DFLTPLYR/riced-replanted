@@ -19,7 +19,7 @@ use riced_extension_sdk::log;
 
 use crate::runtime::Message;
 
-use super::{Ctx, Layout};
+use super::{Ctx, Layout, Transition};
 
 const MAX_SOURCE: u64 = 1024 * 1024;
 const FILE_CACHE: usize = 32;
@@ -63,11 +63,19 @@ pub(super) fn shader(
     node: &Table,
     ctx: &Ctx,
     layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let Some(fragment) = source(node, ctx)? else {
         return Ok(iced::widget::Space::new().into());
     };
-    let extra = extra_args(node)?;
+    let mut extra = extra_args(node)?;
+    if let Some(transition) = transition {
+        for (name, value) in &mut extra {
+            if let Some(animated) = transition.extra(name) {
+                *value = animated;
+            }
+        }
+    }
     let textures = textures(node, ctx)?;
     let source: Arc<str> = format!("{}\n{fragment}", full_header(&extra)).into();
     let key = hash(&source);
@@ -188,7 +196,7 @@ fn textures(node: &Table, ctx: &Ctx) -> mlua::Result<[Option<ShaderTexture>; 2]>
     Ok(result)
 }
 
-fn extra_args(node: &Table) -> mlua::Result<Vec<(String, f32)>> {
+pub(super) fn extra_args(node: &Table) -> mlua::Result<Vec<(String, f32)>> {
     let Some(table) = node.get::<Option<Table>>("extraArgs")? else {
         return Ok(Vec::new());
     };

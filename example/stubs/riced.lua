@@ -45,7 +45,7 @@ config = {}
 ---@field args any
 
 ---@class iced.ChangeTransition
----@field props? ("width"|"height"|"padding"|"size"|"spacing"|"color"|"value"|"background"|"text_color"|"border"|"shadow")[]
+---@field props? ("width"|"height"|"padding"|"size"|"spacing"|"color"|"value"|"background"|"text_color"|"border"|"shadow"|string)[] Animatable props; shaders also accept "extraArgs.<name>"
 ---@field duration? integer
 ---@field easing? "linear"|"ease"|"in"|"out"|"in_out"|"ease_in"|"ease_out"|"ease_in_out"
 ---@field spring? "smooth"|"snappy"|"bouncy"|"instant"
@@ -213,7 +213,7 @@ config = {}
 ---@field source? string Inline WGSL fragment shader defining `fs_main`
 ---@field path? string WGSL file resolved against the profile directory; mutually exclusive with `source`
 ---@field textures? string[] Up to two raster paths bound as `riced_texture0`/`riced_texture1`
----@field extraArgs? table<string, number> Named f32 uniforms exposed as `riced.<name>`
+---@field extraArgs? table<string, number> Named f32 uniforms exposed as `riced.<name>`; tween with `transition.change`
 ---@field animated? boolean Request redraws so `riced.time` advances
 ---@field fps? integer Redraw cap for animated shaders, 1..240 (default 60)
 

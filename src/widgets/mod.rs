@@ -143,6 +143,7 @@ struct Motion {
     text_color: Color,
     border: Border,
     shadow: Shadow,
+    extras: [f32; 16],
 }
 
 impl Motion {
@@ -191,6 +192,7 @@ impl Motion {
             text_color,
             border,
             shadow,
+            extras: [0.0; 16],
         })
     }
 }
@@ -221,6 +223,7 @@ struct Transition {
     props: Vec<String>,
     mode: Mode,
     callback: Option<mlua::Function>,
+    extra_names: Vec<String>,
 }
 
 impl Transition {
@@ -231,11 +234,20 @@ impl Transition {
         let Some(config) = events.get::<Option<Table>>("change")? else {
             return Ok(None);
         };
-        let allowed = animatable(&node.get::<String>("kind")?);
+        let kind = node.get::<String>("kind")?;
+        let allowed = animatable(&kind);
+        let extras = if kind == "shader" {
+            shader::extra_args(node)?
+        } else {
+            Vec::new()
+        };
         let mut props = allowed
             .iter()
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
+        if kind == "shader" {
+            props.extend(extras.iter().map(|(name, _)| format!("extraArgs.{name}")));
+        }
         crate::runtime::keys(
             &config,
             &["props", "easing", "spring", "duration", "callback"],
@@ -244,7 +256,13 @@ impl Transition {
             props = list
                 .sequence_values::<String>()
                 .collect::<mlua::Result<Vec<_>>>()?;
-            if let Some(name) = props.iter().find(|name| !allowed.contains(&name.as_str())) {
+            if let Some(name) = props
+                .iter()
+                .find(|name| match name.strip_prefix("extraArgs.") {
+                    Some(extra) => !extras.iter().any(|(known, _)| known == extra),
+                    None => !allowed.contains(&name.as_str()),
+                })
+            {
                 return Err(mlua::Error::runtime(format!(
                     "unknown transition prop: {name}"
                 )));
@@ -256,6 +274,16 @@ impl Transition {
         }
         let mode = animation::mode(&config)?;
         let mut motion = Motion::target(node)?;
+        // shortcut: extras animate by sorted position, so keep extraArgs keys stable while a tween runs.
+        for (index, (name, value)) in extras.iter().enumerate() {
+            motion.extras[index] = *value;
+            let selected = props
+                .iter()
+                .any(|prop| prop.strip_prefix("extraArgs.") == Some(name.as_str()));
+            if !selected {
+                motion.extras[index] = 0.0;
+            }
+        }
         for (name, value) in [
             ("width", &mut motion.width),
             ("height", &mut motion.height),
@@ -288,7 +316,22 @@ impl Transition {
             props,
             mode,
             callback: config.get("callback")?,
+            extra_names: extras.into_iter().map(|(name, _)| name).collect(),
         }))
+    }
+
+    fn extra(&self, name: &str) -> Option<f32> {
+        if !self
+            .props
+            .iter()
+            .any(|prop| prop.strip_prefix("extraArgs.") == Some(name))
+        {
+            return None;
+        }
+        self.extra_names
+            .iter()
+            .position(|known| known == name)
+            .map(|index| self.motion.extras[index])
     }
 
     fn value(&self, key: &str) -> Option<f32> {
@@ -700,7 +743,7 @@ fn build(
         "markdown" => advanced::markdown(node, ctx)?,
         "responsive" => advanced::responsive(node, ctx, layout)?,
         "canvas" => canvas::canvas(node, layout)?,
-        "shader" => shader::shader(node, ctx, layout)?,
+        "shader" => shader::shader(node, ctx, layout, transition)?,
         "pane_grid" => advanced::pane_grid(node, ctx, layout)?,
         _ => {
             return Err(mlua::Error::runtime(format!(
@@ -927,6 +970,8 @@ mod tests {
             "{kind='text',content='x',color='#ff0000',transition={change={props={'color'}}}}",
             "{kind='progress_bar',value=0.5,transition={change={}}}",
             "{kind='progress_bar',value=0.5,transition={change={props={'value'},duration=300}}}",
+            "{kind='shader',source='x',extraArgs={progress=0},transition={change={}}}",
+            "{kind='shader',source='x',extraArgs={progress=0},transition={change={props={'extraArgs.progress'}}}}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_ok(),
@@ -946,12 +991,36 @@ mod tests {
             "{kind='text',content='x',transition=true}",
             "{kind='text',content='x',transition=false}",
             "{kind='text',content='x',transition={props={'color'}}}",
+            "{kind='shader',source='x',extraArgs={progress=0},transition={change={props={'extraArgs.missing'}}}}",
+            "{kind='shader',source='x',transition={change={props={'extraArgs.progress'}}}}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_err(),
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn shader_extra_args_tween_through_change() {
+        let lua = mlua::Lua::new();
+        let node = |value: f32| -> Table {
+            lua.load(format!(
+                "{{kind='shader',source='x',extraArgs={{progress={value}}},transition={{change={{props={{'extraArgs.progress'}},duration=200,easing='linear'}}}}}}"
+            ))
+            .eval()
+            .unwrap()
+        };
+        let mut transition = Transition::parse(&node(0.0)).unwrap().unwrap();
+        let target = Transition::parse(&node(1.0)).unwrap().unwrap();
+        assert_eq!(transition.extra("progress"), Some(0.0));
+        let mut change = iced_anim::Animated::new(transition.motion.clone(), transition.mode)
+            .to(target.motion.clone());
+        change.tick(std::time::Instant::now() + std::time::Duration::from_millis(100));
+        assert!(change.is_animating());
+        transition.motion = change.value().clone();
+        let value = transition.extra("progress").unwrap();
+        assert!(value > 0.0 && value < 1.0, "{value}");
     }
 
     #[test]
