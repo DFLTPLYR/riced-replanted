@@ -144,6 +144,11 @@ struct Motion {
     border: Border,
     shadow: Shadow,
     extras: [f32; 16],
+    opacity: f32,
+    girth: f32,
+    thickness: f32,
+    cell_size: f32,
+    total_size: f32,
 }
 
 impl Motion {
@@ -158,6 +163,44 @@ impl Motion {
         };
         let value = match kind.as_str() {
             "progress_bar" => table.get::<Option<f32>>("value")?.unwrap_or(0.0),
+            _ => 0.0,
+        };
+        let opacity = match kind.as_str() {
+            "image" | "svg" => {
+                let opacity = number(table, "opacity", 1.0)?;
+                if opacity > 1.0 {
+                    return Err(mlua::Error::runtime("opacity must be from 0 to 1"));
+                }
+                opacity
+            }
+            _ => 1.0,
+        };
+        let girth = match kind.as_str() {
+            "progress_bar" => {
+                let girth = number(
+                    table,
+                    "girth",
+                    widget::ProgressBar::<iced::Theme>::DEFAULT_GIRTH,
+                )?;
+                if girth <= 0.0 {
+                    return Err(mlua::Error::runtime(
+                        "progress_bar girth must be finite and positive",
+                    ));
+                }
+                girth
+            }
+            _ => 0.0,
+        };
+        let thickness = match kind.as_str() {
+            "rule" => number(table, "thickness", 1.0)?,
+            _ => 0.0,
+        };
+        let cell_size = match kind.as_str() {
+            "qr_code" => number(table, "cell_size", 0.0)?,
+            _ => 0.0,
+        };
+        let total_size = match kind.as_str() {
+            "qr_code" => number(table, "total_size", 0.0)?,
             _ => 0.0,
         };
         let (background, text_color, border, shadow) = match table.get::<Option<Table>>("style")? {
@@ -193,6 +236,11 @@ impl Motion {
             border,
             shadow,
             extras: [0.0; 16],
+            opacity,
+            girth,
+            thickness,
+            cell_size,
+            total_size,
         })
     }
 }
@@ -201,8 +249,13 @@ fn animatable(kind: &str) -> Vec<&'static str> {
     let mut props = vec!["width", "height", "padding"];
     match kind {
         "text" | "icon" => props.extend(["size", "color"]),
-        "row" | "column" => props.push("spacing"),
-        "progress_bar" => props.push("value"),
+        "row" | "column" | "grid" | "table" | "scrollable" | "markdown" | "pane_grid" => {
+            props.push("spacing")
+        }
+        "progress_bar" => props.extend(["value", "girth"]),
+        "image" | "svg" => props.push("opacity"),
+        "rule" => props.push("thickness"),
+        "qr_code" => props.extend(["cell_size", "total_size"]),
         _ => {}
     }
     match kind {
@@ -291,6 +344,11 @@ impl Transition {
             ("spacing", &mut motion.spacing),
             ("size", &mut motion.size),
             ("value", &mut motion.value),
+            ("opacity", &mut motion.opacity),
+            ("girth", &mut motion.girth),
+            ("thickness", &mut motion.thickness),
+            ("cell_size", &mut motion.cell_size),
+            ("total_size", &mut motion.total_size),
         ] {
             if !props.iter().any(|prop| prop == name) {
                 *value = 0.0;
@@ -345,6 +403,11 @@ impl Transition {
             "spacing" => Some(self.motion.spacing),
             "size" => Some(self.motion.size),
             "value" => Some(self.motion.value),
+            "opacity" => Some(self.motion.opacity),
+            "girth" => Some(self.motion.girth),
+            "thickness" => Some(self.motion.thickness),
+            "cell_size" => Some(self.motion.cell_size),
+            "total_size" => Some(self.motion.total_size),
             _ => None,
         }
     }
@@ -701,13 +764,13 @@ fn build(
     let element = match kind.as_str() {
         "text" => text::build(node, transition, layout)?,
         "icon" => text::icon(node, transition, layout)?,
-        "image" => media::image(node, layout)?,
-        "svg" => media::svg(node, layout)?,
-        "rule" => media::rule(node)?,
+        "image" => media::image(node, layout, transition)?,
+        "svg" => media::svg(node, layout, transition)?,
+        "rule" => media::rule(node, transition)?,
         "progress_bar" => media::progress_bar(node, transition)?,
-        "qr_code" => media::qr_code(node)?,
+        "qr_code" => media::qr_code(node, transition)?,
         "row" | "column" => layout::row_column(node, ctx, transition, layout, &kind)?,
-        "grid" => layout::grid(node, ctx)?,
+        "grid" => layout::grid(node, ctx, transition)?,
         "space" => layout::space(layout),
         "container" => containers::container(node, ctx, layout, transition)?,
         "button" => containers::button(node, ctx, layout, transition)?,
@@ -726,7 +789,7 @@ fn build(
         "pick_list" => input::pick_list(node, ctx, layout, transition)?,
         "text_editor" => advanced::text_editor(node, ctx, layout, transition)?,
         "combo_box" => advanced::combo_box(node, ctx, layout, transition)?,
-        "table" => advanced::table(node, ctx, layout)?,
+        "table" => advanced::table(node, ctx, layout, transition)?,
         "list_view" => advanced::list_view(node, ctx, layout)?,
         "region" => {
             let content = element(node.get::<Table>("content")?, ctx)?;
@@ -740,11 +803,11 @@ fn build(
             let content = element(node.get::<Table>("content")?, ctx)?;
             measure::Measured::new(content, id, ctx.window()).into()
         }
-        "markdown" => advanced::markdown(node, ctx)?,
+        "markdown" => advanced::markdown(node, ctx, transition)?,
         "responsive" => advanced::responsive(node, ctx, layout)?,
         "canvas" => canvas::canvas(node, layout)?,
         "shader" => shader::shader(node, ctx, layout, transition)?,
-        "pane_grid" => advanced::pane_grid(node, ctx, layout)?,
+        "pane_grid" => advanced::pane_grid(node, ctx, layout, transition)?,
         _ => {
             return Err(mlua::Error::runtime(format!(
                 "unsupported iced element: {kind}"
@@ -972,6 +1035,16 @@ mod tests {
             "{kind='progress_bar',value=0.5,transition={change={props={'value'},duration=300}}}",
             "{kind='shader',source='x',extraArgs={progress=0},transition={change={}}}",
             "{kind='shader',source='x',extraArgs={progress=0},transition={change={props={'extraArgs.progress'}}}}",
+            "{kind='image',content='x.png',opacity=0.5,transition={change={props={'opacity'}}}}",
+            "{kind='svg',content='x.svg',opacity=0.5,transition={change={props={'opacity'}}}}",
+            "{kind='rule',thickness=2,transition={change={props={'thickness'}}}}",
+            "{kind='progress_bar',value=0.5,girth=10,transition={change={props={'girth'}}}}",
+            "{kind='qr_code',content='hello',cell_size=4,transition={change={props={'cell_size','total_size'}}}}",
+            "{kind='grid',content={{kind='text',content='a'}},columns=1,spacing=4,transition={change={props={'spacing'}}}}",
+            "{kind='table',columns={{header='a'}},content={{'1'}},spacing=1,transition={change={props={'spacing'}}}}",
+            "{kind='scrollable',content={kind='text',content='x'},spacing=4,transition={change={props={'spacing'}}}}",
+            "{kind='markdown',content='# hi',spacing=4,transition={change={props={'spacing'}}}}",
+            "{kind='pane_grid',id='grid',content={{kind='text',content='a'}},spacing=4,transition={change={props={'spacing'}}}}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_ok(),
@@ -993,6 +1066,10 @@ mod tests {
             "{kind='text',content='x',transition={props={'color'}}}",
             "{kind='shader',source='x',extraArgs={progress=0},transition={change={props={'extraArgs.missing'}}}}",
             "{kind='shader',source='x',transition={change={props={'extraArgs.progress'}}}}",
+            "{kind='text',content='x',transition={change={props={'opacity'}}}}",
+            "{kind='image',content='x.png',transition={change={props={'girth'}}}}",
+            "{kind='progress_bar',value=0.5,transition={change={props={'thickness'}}}}",
+            "{kind='qr_code',content='x',transition={change={props={'spacing'}}}}",
         ] {
             assert!(
                 element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_err(),
@@ -1021,6 +1098,51 @@ mod tests {
         transition.motion = change.value().clone();
         let value = transition.extra("progress").unwrap();
         assert!(value > 0.0 && value < 1.0, "{value}");
+    }
+
+    #[test]
+    fn numeric_change_props_expose_selected_values() {
+        let lua = mlua::Lua::new();
+        for (source, prop, value) in [
+            (
+                "{kind='image',content='x.png',opacity=0.5,transition={change={props={'opacity'}}}}",
+                "opacity",
+                0.5,
+            ),
+            (
+                "{kind='rule',thickness=2,transition={change={props={'thickness'}}}}",
+                "thickness",
+                2.0,
+            ),
+            (
+                "{kind='progress_bar',value=0.5,girth=10,transition={change={props={'girth'}}}}",
+                "girth",
+                10.0,
+            ),
+            (
+                "{kind='qr_code',content='x',cell_size=4,transition={change={props={'cell_size'}}}}",
+                "cell_size",
+                4.0,
+            ),
+            (
+                "{kind='qr_code',content='x',total_size=40,transition={change={props={'total_size'}}}}",
+                "total_size",
+                40.0,
+            ),
+            (
+                "{kind='grid',content={},spacing=4,transition={change={props={'spacing'}}}}",
+                "spacing",
+                4.0,
+            ),
+        ] {
+            let node: Table = lua.load(source).eval().unwrap();
+            let transition = Transition::parse(&node).unwrap().unwrap();
+            assert_eq!(transition.value(prop), Some(value), "{source}");
+            assert_eq!(
+                transition.value("opacity"),
+                if prop == "opacity" { Some(value) } else { None }
+            );
+        }
     }
 
     #[test]

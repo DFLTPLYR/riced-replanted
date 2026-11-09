@@ -484,6 +484,7 @@ pub(super) fn table(
     node: &Table,
     ctx: &Ctx,
     layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let columns = node
         .get::<Table>("columns")?
@@ -529,7 +530,9 @@ pub(super) fn table(
     if let Some(width) = layout.width {
         table = table.width(width);
     }
-    if let Some(spacing) = node.get::<Option<f32>>("spacing")? {
+    if let Some(spacing) = transition.and_then(|transition| transition.value("spacing")) {
+        table = table.separator(spacing.max(0.0));
+    } else if let Some(spacing) = node.get::<Option<f32>>("spacing")? {
         if !spacing.is_finite() || spacing < 0.0 {
             return Err(mlua::Error::runtime(
                 "table spacing must be finite and non-negative",
@@ -541,7 +544,11 @@ pub(super) fn table(
 }
 
 #[allow(deprecated)] // Component safely owns the data borrowed by Iced's markdown view.
-pub(super) fn markdown(node: &Table, ctx: &Ctx) -> mlua::Result<Element<'static, Message>> {
+pub(super) fn markdown(
+    node: &Table,
+    ctx: &Ctx,
+    transition: Option<&Transition>,
+) -> mlua::Result<Element<'static, Message>> {
     let content = node.get::<String>("content")?;
     let items = state::markdown(&content);
     let text_size = node.get::<Option<f32>>("text_size")?.unwrap_or(16.0);
@@ -551,7 +558,9 @@ pub(super) fn markdown(node: &Table, ctx: &Ctx) -> mlua::Result<Element<'static,
         ));
     }
     let mut settings = markdown_widget::Settings::with_text_size(text_size, iced::Theme::Dark);
-    if let Some(spacing) = node.get::<Option<f32>>("spacing")? {
+    if let Some(spacing) = transition.and_then(|transition| transition.value("spacing")) {
+        settings.spacing = spacing.max(0.0).into();
+    } else if let Some(spacing) = node.get::<Option<f32>>("spacing")? {
         if !spacing.is_finite() || spacing < 0.0 {
             return Err(mlua::Error::runtime(
                 "markdown spacing must be finite and non-negative",
@@ -680,6 +689,7 @@ pub(super) fn pane_grid(
     node: &Table,
     ctx: &Ctx,
     layout: Layout,
+    transition: Option<&Transition>,
 ) -> mlua::Result<Element<'static, Message>> {
     let id: String = node
         .get::<Option<String>>("id")?
@@ -720,7 +730,9 @@ pub(super) fn pane_grid(
     if let Some(height) = layout.height {
         grid = grid.height(height);
     }
-    if let Some(spacing) = node.get::<Option<f32>>("spacing")? {
+    if let Some(spacing) = transition.and_then(|transition| transition.value("spacing")) {
+        grid = grid.spacing(spacing.max(0.0));
+    } else if let Some(spacing) = node.get::<Option<f32>>("spacing")? {
         if !spacing.is_finite() || spacing < 0.0 {
             return Err(mlua::Error::runtime(
                 "pane_grid spacing must be finite and non-negative",

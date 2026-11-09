@@ -2071,8 +2071,10 @@ Buttons: `left`, `right`, `middle`, `back`, `forward`, or `other`.
 Use `iced.transition("name", overrides)` to reuse a named preset, or
 `iced.transition({ duration = 180, enter = {}, exit = {} })` to share timing
 across events. See [named values and transitions](#named-values-and-transitions).
-`change` interpolates `width`, `height`, scalar `padding`, `size`/`color` (text),
-`spacing` (row/column), `value` (progress_bar), `extraArgs.<name>` (shader), and the style fields
+`change` interpolates `width`, `height`, scalar `padding`, `opacity` (image/svg),
+`size`/`color` (text), `spacing` (row/column/grid/table/scrollable/markdown/pane_grid),
+`value`/`girth` (progress_bar), `thickness` (rule), `cell_size`/`total_size` (qr_code),
+`extraArgs.<name>` (shader), and the style fields
 `background`, `text_color`, `border`, and `shadow` on widgets that support them.
 
 | Widgets                                                                               | Animatable style fields                        |

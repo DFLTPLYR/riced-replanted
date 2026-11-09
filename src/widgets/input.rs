@@ -547,7 +547,12 @@ pub(super) fn scrollable(
         }
     };
     scrollable = scrollable.direction(direction);
-    scrollable = scrollable.spacing(number(node, "spacing", 0.0)?);
+    scrollable = scrollable.spacing(
+        match transition.and_then(|transition| transition.value("spacing")) {
+            Some(spacing) => spacing,
+            None => number(node, "spacing", 0.0)?,
+        },
+    );
     if let Some(auto_scroll) = node.get::<Option<bool>>("auto_scroll")? {
         scrollable = scrollable.auto_scroll(auto_scroll);
     }

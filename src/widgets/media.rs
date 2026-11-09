@@ -11,7 +11,7 @@ use crate::runtime::Message;
 
 use super::enums::content_fit;
 use super::style::{QrPatch, progress_bar_patch, qr_patch, rule_patch};
-use super::{Layout, number};
+use super::{Layout, Transition, number};
 
 thread_local! {
     // Widgets only need QR data while they are rendered. Keep a weak cache so
@@ -117,7 +117,11 @@ impl From<OwnedQrCode> for Element<'static, Message> {
     }
 }
 
-pub(super) fn image(node: &Table, layout: Layout) -> mlua::Result<Element<'static, Message>> {
+pub(super) fn image(
+    node: &Table,
+    layout: Layout,
+    transition: Option<&Transition>,
+) -> mlua::Result<Element<'static, Message>> {
     let source = node.get::<String>("content")?;
     if source.is_empty() {
         return Err(mlua::Error::runtime("image source must not be empty"));
@@ -132,7 +136,9 @@ pub(super) fn image(node: &Table, layout: Layout) -> mlua::Result<Element<'stati
     if let Some(fit) = node.get::<Option<String>>("content_fit")? {
         image = image.content_fit(content_fit(&fit)?);
     }
-    if let Some(opacity) = node.get::<Option<f32>>("opacity")? {
+    if let Some(opacity) = transition.and_then(|transition| transition.value("opacity")) {
+        image = image.opacity(opacity.clamp(0.0, 1.0));
+    } else if let Some(opacity) = node.get::<Option<f32>>("opacity")? {
         if !(0.0..=1.0).contains(&opacity) {
             return Err(mlua::Error::runtime("image opacity must be from 0 to 1"));
         }
@@ -141,7 +147,11 @@ pub(super) fn image(node: &Table, layout: Layout) -> mlua::Result<Element<'stati
     Ok(image.into())
 }
 
-pub(super) fn svg(node: &Table, layout: Layout) -> mlua::Result<Element<'static, Message>> {
+pub(super) fn svg(
+    node: &Table,
+    layout: Layout,
+    transition: Option<&Transition>,
+) -> mlua::Result<Element<'static, Message>> {
     let source = node.get::<String>("content")?;
     if source.is_empty() {
         return Err(mlua::Error::runtime("svg source must not be empty"));
@@ -156,7 +166,9 @@ pub(super) fn svg(node: &Table, layout: Layout) -> mlua::Result<Element<'static,
     if let Some(fit) = node.get::<Option<String>>("content_fit")? {
         svg = svg.content_fit(content_fit(&fit)?);
     }
-    if let Some(opacity) = node.get::<Option<f32>>("opacity")? {
+    if let Some(opacity) = transition.and_then(|transition| transition.value("opacity")) {
+        svg = svg.opacity(opacity.clamp(0.0, 1.0));
+    } else if let Some(opacity) = node.get::<Option<f32>>("opacity")? {
         if !(0.0..=1.0).contains(&opacity) {
             return Err(mlua::Error::runtime("opacity must be from 0 to 1"));
         }
@@ -165,8 +177,14 @@ pub(super) fn svg(node: &Table, layout: Layout) -> mlua::Result<Element<'static,
     Ok(svg.into())
 }
 
-pub(super) fn rule(node: &Table) -> mlua::Result<Element<'static, Message>> {
-    let thickness = number(node, "thickness", 1.0)?;
+pub(super) fn rule(
+    node: &Table,
+    transition: Option<&Transition>,
+) -> mlua::Result<Element<'static, Message>> {
+    let thickness = transition
+        .and_then(|transition| transition.value("thickness"))
+        .unwrap_or(number(node, "thickness", 1.0)?)
+        .max(0.0);
     let mut rule = match node.get::<Option<String>>("direction")?.as_deref() {
         None | Some("horizontal") => widget::rule::horizontal(thickness),
         Some("vertical") => widget::rule::vertical(thickness),
@@ -211,7 +229,9 @@ pub(super) fn progress_bar(
         .unwrap_or(value)
         .clamp(0.0, 1.0);
     let mut bar = widget::ProgressBar::new(0.0..=1.0, value);
-    if let Some(girth) = node.get::<Option<f32>>("girth")? {
+    if let Some(girth) = transition.and_then(|transition| transition.value("girth")) {
+        bar = bar.girth(girth.max(0.0));
+    } else if let Some(girth) = node.get::<Option<f32>>("girth")? {
         if !girth.is_finite() || girth <= 0.0 {
             return Err(mlua::Error::runtime(
                 "progress_bar girth must be finite and positive",
@@ -241,7 +261,10 @@ pub(super) fn progress_bar(
     Ok(bar.into())
 }
 
-pub(super) fn qr_code(node: &Table) -> mlua::Result<Element<'static, Message>> {
+pub(super) fn qr_code(
+    node: &Table,
+    transition: Option<&Transition>,
+) -> mlua::Result<Element<'static, Message>> {
     let contents = node.get::<String>("content")?;
     if contents.is_empty() {
         return Err(mlua::Error::runtime("qr_code content must not be empty"));
@@ -254,7 +277,10 @@ pub(super) fn qr_code(node: &Table) -> mlua::Result<Element<'static, Message>> {
         total_size: None,
         style: None,
     };
-    if let Some(cell_size) = node.get::<Option<f32>>("cell_size")? {
+    let cell_size = transition
+        .and_then(|transition| transition.value("cell_size"))
+        .filter(|value| *value > 0.0);
+    if let Some(cell_size) = cell_size.or(node.get::<Option<f32>>("cell_size")?) {
         if !cell_size.is_finite() || cell_size <= 0.0 {
             return Err(mlua::Error::runtime(
                 "qr_code cell_size must be finite and positive",
@@ -262,7 +288,10 @@ pub(super) fn qr_code(node: &Table) -> mlua::Result<Element<'static, Message>> {
         }
         code.cell_size = Some(cell_size);
     }
-    if let Some(total_size) = node.get::<Option<f32>>("total_size")? {
+    let total_size = transition
+        .and_then(|transition| transition.value("total_size"))
+        .filter(|value| *value > 0.0);
+    if let Some(total_size) = total_size.or(node.get::<Option<f32>>("total_size")?) {
         if !total_size.is_finite() || total_size <= 0.0 {
             return Err(mlua::Error::runtime(
                 "qr_code total_size must be finite and positive",

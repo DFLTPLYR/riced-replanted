@@ -45,7 +45,7 @@ config = {}
 ---@field args any
 
 ---@class iced.ChangeTransition
----@field props? ("width"|"height"|"padding"|"size"|"spacing"|"color"|"value"|"background"|"text_color"|"border"|"shadow"|string)[] Animatable props; shaders also accept "extraArgs.<name>"
+---@field props? ("width"|"height"|"padding"|"opacity"|"size"|"spacing"|"color"|"value"|"girth"|"thickness"|"cell_size"|"total_size"|"background"|"text_color"|"border"|"shadow"|string)[] Animatable props; shaders also accept "extraArgs.<name>"
 ---@field duration? integer
 ---@field easing? "linear"|"ease"|"in"|"out"|"in_out"|"ease_in"|"ease_out"|"ease_in_out"
 ---@field spring? "smooth"|"snappy"|"bouncy"|"instant"
