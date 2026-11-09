@@ -70,12 +70,13 @@ pub(super) fn shader(
     let extra = extra_args(node)?;
     let textures = textures(node, ctx)?;
     let source: Arc<str> = format!("{}\n{fragment}", full_header(&extra)).into();
-    if let Err(error) = validate(&source) {
+    let key = hash(&source);
+    if let Err(error) = validate(key, &source) {
         log::error!(target: "shader", "{error}");
         return Ok(iced::widget::Space::new().into());
     }
     let mut widget = shader::Shader::new(ShaderProgram {
-        key: hash(&source),
+        key,
         source,
         extra: pack_extra(&extra).into(),
         animated: node.get::<Option<bool>>("animated")?.unwrap_or(false),
@@ -313,8 +314,7 @@ fn hash(source: &str) -> u64 {
     hasher.finish()
 }
 
-fn validate(source: &str) -> Result<(), String> {
-    let key = hash(source);
+fn validate(key: u64, source: &str) -> Result<(), String> {
     VALIDATED.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some(result) = cache.get(&key) {
