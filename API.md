@@ -1607,7 +1607,10 @@ relative to the profile directory). They are bound as `riced_texture0` /
 `riced_sampler0` and `riced_texture1` / `riced_sampler1`; sample them with
 `textureSample(riced_texture0, riced_sampler0, uv)`. Unused slots are a 1x1
 white texture. Images are decoded as RGBA8 in the renderer color space
-(no linear conversion).
+(no linear conversion). A texture is reused while any slot still references
+it, so moving the new wallpaper from slot 1 to slot 0 at the end of a
+transition does not upload it again; a texture is destroyed as soon as no slot
+references it, and all textures are released when the shader is removed.
 
 `extraArgs`: optional table of named finite numbers. Riced generates the fields
 from the keys and exposes them as `riced.<name>`:

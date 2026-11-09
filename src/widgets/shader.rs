@@ -471,7 +471,15 @@ struct ShaderPrimitive {
 struct GpuState {
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    _textures: Vec<wgpu::Texture>,
+    textures: HashMap<u64, wgpu::TextureView>,
+}
+
+impl Drop for GpuState {
+    fn drop(&mut self) {
+        for view in self.textures.values() {
+            view.texture().destroy();
+        }
+    }
 }
 
 impl Primitive for ShaderPrimitive {
@@ -492,22 +500,26 @@ impl Primitive for ShaderPrimitive {
         let key = gpu_key(size, &self.textures);
         let mut gpu = self.gpu.lock().unwrap();
         if gpu.as_ref().is_none_or(|(existing, _)| *existing != key) {
-            let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("riced shader uniforms"),
-                size,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let mut textures = Vec::new();
+            // Keep textures that are still referenced by a slot and reuse them
+            // when a slot changes. This avoids re-uploading the new wallpaper
+            // when the transition finishes and the old slot is dropped.
+            let mut textures = match gpu.take() {
+                Some((_, mut state)) => std::mem::take(&mut state.textures),
+                None => HashMap::new(),
+            };
             let mut views = [pipeline.dummy_view.clone(), pipeline.dummy_view.clone()];
             for (index, texture) in self.textures.iter().enumerate() {
                 let Some(texture) = texture else {
                     continue;
                 };
+                if let Some(view) = textures.get(&texture.key) {
+                    views[index] = view.clone();
+                    continue;
+                }
                 match upload_texture(device, queue, &texture.path) {
-                    Some((texture, view)) => {
-                        views[index] = view;
-                        textures.push(texture);
+                    Some(view) => {
+                        views[index] = view.clone();
+                        textures.insert(texture.key, view);
                     }
                     None => log::warn!(
                         target: "shader",
@@ -516,6 +528,23 @@ impl Primitive for ShaderPrimitive {
                     ),
                 }
             }
+            textures.retain(|key, view| {
+                let required = self
+                    .textures
+                    .iter()
+                    .flatten()
+                    .any(|texture| texture.key == *key);
+                if !required {
+                    view.texture().destroy();
+                }
+                required
+            });
+            let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("riced shader uniforms"),
+                size,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("riced shader uniforms"),
                 layout: &pipeline.layout,
@@ -547,7 +576,7 @@ impl Primitive for ShaderPrimitive {
                 GpuState {
                     uniforms,
                     bind_group,
-                    _textures: textures,
+                    textures,
                 },
             ));
         }
@@ -603,7 +632,7 @@ fn upload_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     path: &Path,
-) -> Option<(wgpu::Texture, wgpu::TextureView)> {
+) -> Option<wgpu::TextureView> {
     let image = image::open(path).ok()?.into_rgba8();
     let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
@@ -629,7 +658,7 @@ fn upload_texture(
         image.as_raw(),
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    Some((texture, view))
+    Some(view)
 }
 
 struct ShaderPipeline {
