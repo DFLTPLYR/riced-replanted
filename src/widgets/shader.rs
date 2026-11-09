@@ -606,10 +606,10 @@ impl Primitive for ShaderPrimitive {
         let Some((_, gpu)) = gpu.as_ref() else {
             return false;
         };
-        let Some(render_pipeline) = pipeline.pipelines.get(&self.key) else {
+        let Some(cached) = pipeline.pipelines.get(&self.key) else {
             return false;
         };
-        render_pass.set_pipeline(render_pipeline);
+        render_pass.set_pipeline(&cached.pipeline);
         render_pass.set_bind_group(0, &gpu.bind_group, &[]);
         render_pass.draw(0..3, 0..1);
         true
@@ -661,6 +661,11 @@ fn upload_texture(
     Some(view)
 }
 
+struct CachedPipeline {
+    pipeline: wgpu::RenderPipeline,
+    last_used: u64,
+}
+
 struct ShaderPipeline {
     start: Instant,
     format: wgpu::TextureFormat,
@@ -668,7 +673,8 @@ struct ShaderPipeline {
     sampler: wgpu::Sampler,
     _dummy: wgpu::Texture,
     dummy_view: wgpu::TextureView,
-    pipelines: HashMap<u64, wgpu::RenderPipeline>,
+    pipelines: HashMap<u64, CachedPipeline>,
+    frame: u64,
 }
 
 impl Pipeline for ShaderPipeline {
@@ -758,15 +764,29 @@ impl Pipeline for ShaderPipeline {
             _dummy: dummy,
             dummy_view,
             pipelines: HashMap::new(),
+            frame: 0,
         }
+    }
+
+    fn trim(&mut self) {
+        const KEEP_FRAMES: u64 = 600;
+        self.frame = self.frame.saturating_add(1);
+        self.pipelines
+            .retain(|_, cached| self.frame.saturating_sub(cached.last_used) <= KEEP_FRAMES);
     }
 }
 
 impl ShaderPipeline {
     fn render(&mut self, device: &wgpu::Device, source: &str, key: u64) -> &wgpu::RenderPipeline {
         if !self.pipelines.contains_key(&key) {
-            if self.pipelines.len() >= PIPELINE_CACHE {
-                self.pipelines.clear();
+            if self.pipelines.len() >= PIPELINE_CACHE
+                && let Some(oldest) = self
+                    .pipelines
+                    .iter()
+                    .min_by_key(|(_, cached)| cached.last_used)
+                    .map(|(key, _)| *key)
+            {
+                self.pipelines.remove(&oldest);
             }
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("riced shader"),
@@ -802,8 +822,19 @@ impl ShaderPipeline {
                 multiview: None,
                 cache: None,
             });
-            self.pipelines.insert(key, pipeline);
+            self.pipelines.insert(
+                key,
+                CachedPipeline {
+                    pipeline,
+                    last_used: self.frame,
+                },
+            );
         }
-        self.pipelines.get(&key).expect("shader pipeline inserted")
+        let cached = self
+            .pipelines
+            .get_mut(&key)
+            .expect("shader pipeline inserted");
+        cached.last_used = self.frame;
+        &cached.pipeline
     }
 }
