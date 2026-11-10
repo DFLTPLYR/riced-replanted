@@ -5,6 +5,7 @@ mod logs;
 mod lua;
 mod modules;
 mod plugins;
+mod restart;
 mod runtime;
 mod update;
 mod widgets;
@@ -363,7 +364,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         (cli.log_retention > 0).then(|| Duration::from_secs(cli.log_retention)),
         cli.logs,
     )?;
-    runtime::load_with_plugins(&source, &path, plugins)?.run()?;
+    runtime::load_with_plugins(&source, &path, plugins)?
+        .with_restart(restart::Restart::resolve())
+        .run()?;
     Ok(())
 }
 

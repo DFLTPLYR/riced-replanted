@@ -347,6 +347,15 @@ pub struct App {
     sizes: RefCell<HashMap<window::Id, Size>>,
     extras: RefCell<HashMap<window::Id, SurfaceKind>>,
     plugins: Rc<RefCell<plugins::Plugins>>,
+    restart: Option<crate::restart::Restart>,
+}
+
+impl App {
+    /// Sets the binary `riced ipc restart` re-execs; absent disables restart.
+    pub fn with_restart(mut self, restart: Option<crate::restart::Restart>) -> Self {
+        self.restart = restart;
+        self
+    }
 }
 
 // Startup errors after loading are fatal; runtime callbacks fall back.
@@ -538,6 +547,7 @@ pub fn load_with_plugins(
         sizes: RefCell::new(HashMap::new()),
         extras: RefCell::new(HashMap::new()),
         plugins,
+        restart: None,
     };
     for name in [
         "title",
@@ -851,7 +861,14 @@ impl App {
                 break;
             };
             handled = true;
-            tasks.push(self.run_ipc(&command.command, &command.args)?);
+            match self.run_ipc(&command.command, &command.args) {
+                Ok(task) => tasks.push(task),
+                // A rejected command (an unavailable restart, a broken handler
+                // return) must not drop the commands queued behind it.
+                Err(error) => {
+                    log::error!(target: "ipc.command", "IPC {:?} failed: {error}", command.command)
+                }
+            }
         }
         if handled {
             if let Err(error) = self.reconcile_layers() {
@@ -984,6 +1001,9 @@ impl App {
     fn run_ipc(&mut self, command: &str, args: &[String]) -> mlua::Result<Task<Message>> {
         let handlers: Table = self.lua.named_registry_value("riced.ipc_handlers")?;
         let Some(handler) = handlers.get::<Option<Function>>(command)? else {
+            if command == "restart" {
+                return self.restart(args);
+            }
             log::warn!(target: "ipc.command", "no IPC handler for {command:?}");
             return Ok(Task::none());
         };
@@ -1001,6 +1021,23 @@ impl App {
                 Ok(Task::none())
             }
         }
+    }
+
+    /// Replaces the process image; returns an error only when the exec failed.
+    fn restart(&self, args: &[String]) -> mlua::Result<Task<Message>> {
+        if !args.is_empty() {
+            return Err(mlua::Error::runtime("restart takes no arguments"));
+        }
+        let Some(restart) = &self.restart else {
+            return Err(mlua::Error::runtime(
+                "restart is unavailable: the daemon could not resolve its own binary; set RICED_EXE",
+            ));
+        };
+        log::info!(target: "ipc.restart", "restarting {}", restart.exe().display());
+        Err(mlua::Error::runtime(format!(
+            "cannot restart: {}",
+            restart.exec()
+        )))
     }
 
     fn view_node(&self, id: window::Id) -> mlua::Result<Table> {
@@ -2517,6 +2554,64 @@ mod tests {
         };
 
         assert!(error.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn restart_without_a_resolved_binary_reports_and_keeps_running() {
+        let mut app = load(
+            r#"
+            local app = {}
+            function app:update() end
+            function app:view() return iced.text('ipc') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+            "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+
+        let error = app.run_ipc("restart", &[]).unwrap_err().to_string();
+        assert!(error.contains("restart is unavailable"), "{error}");
+        // A failed restart leaves the daemon usable.
+        let _ = app.update(Message::Tick).unwrap();
+        app.view(window::Id::unique()).unwrap();
+    }
+
+    #[test]
+    fn restart_rejects_arguments() {
+        let mut app = load(
+            r#"
+            local app = {}
+            function app:update() end
+            function app:view() return iced.text('ipc') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+            "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+
+        let error = app
+            .run_ipc("restart", &["now".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("restart takes no arguments"), "{error}");
+    }
+
+    #[test]
+    fn a_profile_restart_handler_wins_over_the_builtin() {
+        let mut app = load(
+            r#"
+            local app = { hits = 0 }
+            function app:update() end
+            function app:view() return iced.text('ipc') end
+            riced.ipc({ restart = function(self) self.hits = self.hits + 1 end })
+            return riced.daemon(app, 'test', app.update, app.view):run()
+            "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+
+        let _ = app.run_ipc("restart", &[]).unwrap();
+        assert_eq!(app.state.get::<u32>("hits").unwrap(), 1);
     }
 
     #[test]
