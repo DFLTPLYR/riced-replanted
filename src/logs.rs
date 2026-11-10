@@ -5,7 +5,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, IsTerminal, Read, Write},
+    io::{self, IsTerminal, Read, Seek, SeekFrom, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     sync::Mutex,
@@ -189,32 +189,13 @@ fn prune_sink(sink: &mut Sink, retention: Duration) -> io::Result<()> {
     if kept.len() == contents.len() {
         return Ok(());
     }
-    let temp = sink.path.with_extension("log.tmp");
-    let result = (|| -> io::Result<File> {
-        let mut out = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temp)?;
-        out.write_all(kept.as_bytes())?;
-        out.sync_all()?;
-        // Keep the append handle on the same inode so no write lands in the
-        // replaced file between rename and reopen.
-        let append = OpenOptions::new().append(true).open(&temp)?;
-        fs::rename(&temp, &sink.path)?;
-        Ok(append)
-    })();
-    match result {
-        Ok(file) => {
-            sink.file = file;
-            Ok(())
-        }
-        Err(error) => {
-            let _ = fs::remove_file(&temp);
-            Err(error)
-        }
-    }
+    // Rewrite the same inode. A rename here would let a concurrent
+    // `riced logs --clear` truncate the unlinked file and silently lose the clear.
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(kept.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
 }
 
 fn prune_lines(contents: &str, cutoff: u128) -> String {
