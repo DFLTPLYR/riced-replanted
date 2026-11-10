@@ -5,7 +5,7 @@ use mlua::{Table, Value};
 use crate::runtime::{Message, WidgetEvent};
 
 use super::enums::{font_value, horizontal};
-use super::style::{style_patch, validate};
+use super::style::{animated, style_patch, validate};
 use super::{Ctx, Layout, Transition, element, number};
 
 fn checkbox_patch(
@@ -172,14 +172,15 @@ pub(super) fn checkbox(
         let active = checkbox_patch(&style, "active", transition)?;
         let hovered = checkbox_patch(&style, "hovered", transition)?;
         let disabled = checkbox_patch(&style, "disabled", transition)?;
+        let animation = transition.cloned();
         checkbox = checkbox.style(move |theme, status| {
             let mut out = widget::checkbox::primary(theme, status);
-            let patch = match status {
-                widget::checkbox::Status::Active { .. } => &active,
-                widget::checkbox::Status::Hovered { .. } => &hovered,
-                widget::checkbox::Status::Disabled { .. } => &disabled,
+            let (patch, state) = match status {
+                widget::checkbox::Status::Active { .. } => (&active, "active"),
+                widget::checkbox::Status::Hovered { .. } => (&hovered, "hovered"),
+                widget::checkbox::Status::Disabled { .. } => (&disabled, "disabled"),
             };
-            paint_checkbox(&mut out, patch);
+            paint_checkbox(&mut out, &animated(patch, animation.as_ref(), state));
             out
         });
     }
@@ -234,13 +235,14 @@ pub(super) fn radio(
         validate(&style, FIELDS, &["active", "hovered"])?;
         let active = checkbox_patch(&style, "active", transition)?;
         let hovered = checkbox_patch(&style, "hovered", transition)?;
+        let animation = transition.cloned();
         radio = radio.style(move |theme, status| {
             let mut out = widget::radio::default(theme, status);
-            let patch = match status {
-                widget::radio::Status::Active { .. } => &active,
-                widget::radio::Status::Hovered { .. } => &hovered,
+            let (patch, state) = match status {
+                widget::radio::Status::Active { .. } => (&active, "active"),
+                widget::radio::Status::Hovered { .. } => (&hovered, "hovered"),
             };
-            paint_radio(&mut out, patch);
+            paint_radio(&mut out, &animated(patch, animation.as_ref(), state));
             out
         });
     }
@@ -274,14 +276,15 @@ pub(super) fn toggler(
         let active = checkbox_patch(&style, "active", transition)?;
         let hovered = checkbox_patch(&style, "hovered", transition)?;
         let disabled = checkbox_patch(&style, "disabled", transition)?;
+        let animation = transition.cloned();
         toggler = toggler.style(move |theme, status| {
             let mut out = widget::toggler::default(theme, status);
-            let patch = match status {
-                widget::toggler::Status::Active { .. } => &active,
-                widget::toggler::Status::Hovered { .. } => &hovered,
-                widget::toggler::Status::Disabled { .. } => &disabled,
+            let (patch, state) = match status {
+                widget::toggler::Status::Active { .. } => (&active, "active"),
+                widget::toggler::Status::Hovered { .. } => (&hovered, "hovered"),
+                widget::toggler::Status::Disabled { .. } => (&disabled, "disabled"),
             };
-            paint_toggler(&mut out, patch);
+            paint_toggler(&mut out, &animated(patch, animation.as_ref(), state));
             out
         });
     }
@@ -336,6 +339,7 @@ pub(super) fn slider(
         }
         None => None,
     };
+    let animation = transition.cloned();
     let generation = ctx.generation;
     let component = ctx.component.clone();
     Ok(if kind == "slider" {
@@ -358,14 +362,15 @@ pub(super) fn slider(
             slider = slider.step(step);
         }
         if let Some((active, hovered, dragged)) = styles.clone() {
+            let animation = animation.clone();
             slider = slider.style(move |theme, status| {
                 let mut out = widget::slider::default(theme, status);
-                let patch = match status {
-                    widget::slider::Status::Active => &active,
-                    widget::slider::Status::Hovered => &hovered,
-                    widget::slider::Status::Dragged => &dragged,
+                let (patch, state) = match status {
+                    widget::slider::Status::Active => (&active, "active"),
+                    widget::slider::Status::Hovered => (&hovered, "hovered"),
+                    widget::slider::Status::Dragged => (&dragged, "dragged"),
                 };
-                paint_slider(&mut out, patch);
+                paint_slider(&mut out, &animated(patch, animation.as_ref(), state));
                 out
             });
         }
@@ -398,14 +403,15 @@ pub(super) fn slider(
             slider = slider.step(step);
         }
         if let Some((active, hovered, dragged)) = styles.clone() {
+            let animation = animation.clone();
             slider = slider.style(move |theme, status| {
                 let mut out = widget::slider::default(theme, status);
-                let patch = match status {
-                    widget::slider::Status::Active => &active,
-                    widget::slider::Status::Hovered => &hovered,
-                    widget::slider::Status::Dragged => &dragged,
+                let (patch, state) = match status {
+                    widget::slider::Status::Active => (&active, "active"),
+                    widget::slider::Status::Hovered => (&hovered, "hovered"),
+                    widget::slider::Status::Dragged => (&dragged, "dragged"),
                 };
-                paint_slider(&mut out, patch);
+                paint_slider(&mut out, &animated(patch, animation.as_ref(), state));
                 out
             });
         }
@@ -598,14 +604,15 @@ pub(super) fn scrollable(
         let active = checkbox_patch(&style, "active", transition)?;
         let hovered = checkbox_patch(&style, "hovered", transition)?;
         let dragged = checkbox_patch(&style, "dragged", transition)?;
+        let animation = transition.cloned();
         scrollable = scrollable.style(move |theme, status| {
             let mut out = widget::scrollable::default(theme, status);
-            let patch = match status {
-                widget::scrollable::Status::Active { .. } => &active,
-                widget::scrollable::Status::Hovered { .. } => &hovered,
-                widget::scrollable::Status::Dragged { .. } => &dragged,
+            let (patch, state) = match status {
+                widget::scrollable::Status::Active { .. } => (&active, "active"),
+                widget::scrollable::Status::Hovered { .. } => (&hovered, "hovered"),
+                widget::scrollable::Status::Dragged { .. } => (&dragged, "dragged"),
             };
-            paint_scrollable(&mut out, patch);
+            paint_scrollable(&mut out, &animated(patch, animation.as_ref(), state));
             out
         });
     }
@@ -664,15 +671,16 @@ pub(super) fn text_input(
         let hovered = checkbox_patch(&style, "hovered", transition)?;
         let focused = checkbox_patch(&style, "focused", transition)?;
         let disabled = checkbox_patch(&style, "disabled", transition)?;
+        let animation = transition.cloned();
         input = input.style(move |theme, status| {
             let mut out = widget::text_input::default(theme, status);
-            let patch = match status {
-                widget::text_input::Status::Active => &active,
-                widget::text_input::Status::Hovered => &hovered,
-                widget::text_input::Status::Focused { .. } => &focused,
-                widget::text_input::Status::Disabled => &disabled,
+            let (patch, state) = match status {
+                widget::text_input::Status::Active => (&active, "active"),
+                widget::text_input::Status::Hovered => (&hovered, "hovered"),
+                widget::text_input::Status::Focused { .. } => (&focused, "focused"),
+                widget::text_input::Status::Disabled => (&disabled, "disabled"),
             };
-            paint_text_input(&mut out, patch);
+            paint_text_input(&mut out, &animated(patch, animation.as_ref(), state));
             out
         });
     }
@@ -759,14 +767,15 @@ pub(super) fn pick_list(
         let active = checkbox_patch(&style, "active", transition)?;
         let hovered = checkbox_patch(&style, "hovered", transition)?;
         let opened = checkbox_patch(&style, "opened", transition)?;
+        let animation = transition.cloned();
         list = list.style(move |theme, status| {
             let mut out = widget::pick_list::default(theme, status);
-            let patch = match status {
-                widget::pick_list::Status::Active => &active,
-                widget::pick_list::Status::Hovered => &hovered,
-                widget::pick_list::Status::Opened { .. } => &opened,
+            let (patch, state) = match status {
+                widget::pick_list::Status::Active => (&active, "active"),
+                widget::pick_list::Status::Hovered => (&hovered, "hovered"),
+                widget::pick_list::Status::Opened { .. } => (&opened, "opened"),
             };
-            paint_pick_list(&mut out, patch);
+            paint_pick_list(&mut out, &animated(patch, animation.as_ref(), state));
             out
         });
     }

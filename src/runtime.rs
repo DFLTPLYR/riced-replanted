@@ -3792,6 +3792,118 @@ return m",
         pixels
     }
 
+    fn state_frame(
+        app: &mut App,
+        window: window::Id,
+        tree: &mut iced::advanced::widget::Tree,
+        now: std::time::Instant,
+        cursor: iced::mouse::Cursor,
+    ) -> [u8; 4] {
+        use iced::advanced::{Layout, Renderer as _, renderer::Headless};
+        let mut renderer = iced::futures::executor::block_on(iced::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut element = app.view(window).unwrap();
+        tree.diff(&element);
+        let size = Size::new(640.0, 480.0);
+        let layout = element.as_widget_mut().layout(
+            tree,
+            &renderer,
+            &iced::advanced::layout::Limits::new(Size::ZERO, size),
+        );
+        let mut messages = Vec::new();
+        element.as_widget_mut().update(
+            tree,
+            &iced::Event::Window(window::Event::RedrawRequested(now)),
+            Layout::new(&layout),
+            cursor,
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut iced::advanced::Shell::new(&mut messages),
+            &iced::Rectangle::with_size(size),
+        );
+        renderer.reset(iced::Rectangle::with_size(size));
+        element.as_widget().draw(
+            tree,
+            &mut renderer,
+            &Theme::Dark,
+            &iced::advanced::renderer::Style {
+                text_color: iced::Color::WHITE,
+            },
+            Layout::new(&layout),
+            cursor,
+            &iced::Rectangle::with_size(size),
+        );
+        let pixels = renderer.screenshot(Size::new(640, 480), 1.0, iced::Color::TRANSPARENT);
+        for message in messages {
+            let _ = app.update(message).unwrap();
+        }
+        let offset = (20 * 640 + 75) * 4;
+        pixels[offset..offset + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn button_state_styles_animate_on_hover() {
+        let mut app = load(
+            r#"
+            return riced.daemon({}, 'test', function() end, function()
+                return iced.button('x', {
+                    width = 80,
+                    height = 40,
+                    on_press = function() end,
+                    style = {
+                        background = '#ff0000',
+                        hovered = { background = '#0000ff' },
+                    },
+                    transition = {
+                        change = {
+                            props = { 'hovered.background' },
+                            duration = 1000,
+                            easing = 'linear',
+                        },
+                    },
+                })
+            end):run()
+            "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        let window = window::Id::unique();
+        let mut tree = iced::advanced::widget::Tree::empty();
+        let inside = iced::mouse::Cursor::Available(iced::Point::new(10.0, 10.0));
+        let now = std::time::Instant::now();
+        let idle = state_frame(
+            &mut app,
+            window,
+            &mut tree,
+            now,
+            iced::mouse::Cursor::Unavailable,
+        );
+        assert!(idle[0] > 200 && idle[2] < 60, "{idle:?}");
+        let start = state_frame(&mut app, window, &mut tree, now, inside);
+        assert!(start[0] > 200 && start[2] < 60, "{start:?}");
+        let middle = state_frame(
+            &mut app,
+            window,
+            &mut tree,
+            now + std::time::Duration::from_millis(500),
+            inside,
+        );
+        assert_ne!(middle, idle, "{middle:?}");
+        assert_ne!(middle, [0, 0, 255, 255], "{middle:?}");
+        let done = state_frame(
+            &mut app,
+            window,
+            &mut tree,
+            now + std::time::Duration::from_secs(2),
+            inside,
+        );
+        assert!(done[2] > 200 && done[0] < 60, "{done:?}");
+    }
+
     #[test]
     fn qr_code_renders_through_the_owned_widget() {
         let mut app = load(

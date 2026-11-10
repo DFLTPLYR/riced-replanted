@@ -15,10 +15,14 @@ mod state;
 mod style;
 mod text;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use iced::{Border, Color, Element, Length, Padding, Shadow, widget};
 use iced_anim::Animate;
+use iced_anim::Animated;
 use iced_anim::animated::Mode;
 use mlua::{Table, Value};
 
@@ -269,6 +273,53 @@ fn animatable(kind: &str) -> Vec<&'static str> {
     props
 }
 
+fn style_states(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "button" => &["active", "hovered", "pressed", "disabled"],
+        "checkbox" | "toggler" => &["active", "hovered", "disabled"],
+        "radio" => &["active", "hovered"],
+        "slider" | "vertical_slider" | "scrollable" => &["active", "hovered", "dragged"],
+        "text_input" | "text_editor" | "combo_box" => &["active", "hovered", "focused", "disabled"],
+        "pick_list" => &["active", "hovered", "opened"],
+        _ => &[],
+    }
+}
+
+const STATE_FIELDS: &[&str] = &["background", "text_color", "border", "shadow"];
+
+#[derive(Clone)]
+struct StateAnimation {
+    base: Motion,
+    animated: Option<Animated<Motion>>,
+}
+
+impl StateAnimation {
+    fn value(&mut self, target: Motion, mode: Mode) -> Motion {
+        match &mut self.animated {
+            Some(animated) if animated.target() != &target => {
+                *animated = Animated::new(animated.value().clone(), mode).to(target);
+            }
+            None => self.animated = Some(Animated::new(target, mode)),
+            _ => {}
+        }
+        self.animated
+            .as_ref()
+            .expect("state animation is initialized")
+            .value()
+            .clone()
+    }
+
+    fn tick(&mut self, now: Instant) {
+        if let Some(animated) = &mut self.animated {
+            animated.tick(now);
+        }
+    }
+
+    fn is_animating(&self) -> bool {
+        self.animated.as_ref().is_some_and(Animated::is_animating)
+    }
+}
+
 /// An element's `transition` prop: which pixel props interpolate, and how.
 #[derive(Clone)]
 struct Transition {
@@ -277,6 +328,9 @@ struct Transition {
     mode: Mode,
     callback: Option<mlua::Function>,
     extra_names: Vec<String>,
+    state_fields: Vec<String>,
+    state_patches: BTreeMap<String, style::StylePatch>,
+    state_animation: Option<Arc<Mutex<StateAnimation>>>,
 }
 
 impl Transition {
@@ -294,6 +348,7 @@ impl Transition {
         } else {
             Vec::new()
         };
+        let states = style_states(&kind);
         let mut props = allowed
             .iter()
             .map(|name| (*name).to_owned())
@@ -301,25 +356,42 @@ impl Transition {
         if kind == "shader" {
             props.extend(extras.iter().map(|(name, _)| format!("extraArgs.{name}")));
         }
+        let mut state_fields = Vec::new();
         crate::runtime::keys(
             &config,
             &["props", "easing", "spring", "duration", "callback"],
         )?;
         if let Some(list) = config.get::<Option<Table>>("props")? {
-            props = list
-                .sequence_values::<String>()
-                .collect::<mlua::Result<Vec<_>>>()?;
-            if let Some(name) = props
-                .iter()
-                .find(|name| match name.strip_prefix("extraArgs.") {
-                    Some(extra) => !extras.iter().any(|(known, _)| known == extra),
-                    None => !allowed.contains(&name.as_str()),
-                })
-            {
-                return Err(mlua::Error::runtime(format!(
-                    "unknown transition prop: {name}"
-                )));
+            let mut base = Vec::new();
+            for name in list.sequence_values::<String>() {
+                let name = name?;
+                if let Some((state, field)) = name.split_once('.')
+                    && states.contains(&state)
+                {
+                    if !allowed.contains(&field) || !STATE_FIELDS.contains(&field) {
+                        return Err(mlua::Error::runtime(format!(
+                            "unknown state transition prop: {name}; use background, text_color, border, or shadow"
+                        )));
+                    }
+                    if !state_fields.iter().any(|known: &String| known == field) {
+                        state_fields.push(field.to_owned());
+                    }
+                    continue;
+                }
+                if let Some(extra) = name.strip_prefix("extraArgs.") {
+                    if !extras.iter().any(|(known, _)| known == extra) {
+                        return Err(mlua::Error::runtime(format!(
+                            "unknown transition prop: {name}"
+                        )));
+                    }
+                } else if !allowed.contains(&name.as_str()) {
+                    return Err(mlua::Error::runtime(format!(
+                        "unknown transition prop: {name}"
+                    )));
+                }
+                base.push(name);
             }
+            props = base;
         }
         if matches!(node.get::<Value>("padding")?, Value::Table(_)) {
             // Per-side padding is static; scalar transitions keep animating.
@@ -327,6 +399,7 @@ impl Transition {
         }
         let mode = animation::mode(&config)?;
         let mut motion = Motion::target(node)?;
+        let state_base = motion.clone();
         // shortcut: extras animate by sorted position, so keep extraArgs keys stable while a tween runs.
         for (index, (name, value)) in extras.iter().enumerate() {
             motion.extras[index] = *value;
@@ -369,12 +442,31 @@ impl Transition {
         if !props.iter().any(|prop| prop == "shadow") {
             motion.shadow = Shadow::default();
         }
+        let mut state_patches = BTreeMap::new();
+        let state_animation = if state_fields.is_empty() {
+            None
+        } else {
+            if let Some(style) = node.get::<Option<Table>>("style")? {
+                for state in states {
+                    if let Some(table) = style.get::<Option<Table>>(*state)? {
+                        state_patches.insert((*state).to_owned(), style::style_overlay(&table)?);
+                    }
+                }
+            }
+            Some(Arc::new(Mutex::new(StateAnimation {
+                base: state_base,
+                animated: None,
+            })))
+        };
         Ok(Some(Self {
             motion,
             props,
             mode,
             callback: config.get("callback")?,
             extra_names: extras.into_iter().map(|(name, _)| name).collect(),
+            state_fields,
+            state_patches,
+            state_animation,
         }))
     }
 
@@ -445,6 +537,48 @@ impl Transition {
             .iter()
             .any(|prop| prop == "shadow")
             .then_some(self.motion.shadow)
+    }
+
+    /// Overlays the animated values for a widget state onto a static style patch.
+    fn animate(&self, patch: &mut style::StylePatch, status: &str) {
+        let Some(animation) = &self.state_animation else {
+            return;
+        };
+        let motion = {
+            let mut animation = animation.lock().unwrap();
+            let mut target = animation.base.clone();
+            if let Some(state) = self.state_patches.get(status) {
+                if let Some(value) = state.background {
+                    target.background = value;
+                }
+                if let Some(value) = state.text_color {
+                    target.text_color = value;
+                }
+                if let Some(value) = state.border {
+                    target.border = value;
+                }
+                if let Some(value) = state.shadow {
+                    target.shadow = value;
+                }
+            }
+            animation.value(target, self.mode)
+        };
+        for field in &self.state_fields {
+            match field.as_str() {
+                "background" => patch.background = Some(motion.background),
+                "text_color" => patch.text_color = Some(motion.text_color),
+                "border" => patch.border = Some(motion.border),
+                "shadow" => patch.shadow = Some(motion.shadow),
+                _ => {}
+            }
+        }
+    }
+
+    fn copy_state_from(&self, previous: &Arc<Mutex<StateAnimation>>) {
+        if let Some(new) = &self.state_animation {
+            let animated = previous.lock().unwrap().animated.clone();
+            new.lock().unwrap().animated = animated;
+        }
     }
 }
 
@@ -1079,6 +1213,10 @@ mod tests {
             "{kind='shader',source='x',extraArgs={progress=0},transition={change={props={'extraArgs.missing'}}}}",
             "{kind='shader',source='x',transition={change={props={'extraArgs.progress'}}}}",
             "{kind='text',content='x',transition={change={props={'opacity'}}}}",
+            "{kind='text',content='x',transition={change={props={'hovered.background'}}}}",
+            "{kind='button',content='x',transition={change={props={'hovered.width'}}}}",
+            "{kind='button',content='x',transition={change={props={'hovered.icon_color'}}}}",
+            "{kind='checkbox',content='x',transition={change={props={'pressed.background'}}}}",
             "{kind='image',content='x.png',transition={change={props={'girth'}}}}",
             "{kind='progress_bar',value=0.5,transition={change={props={'thickness'}}}}",
             "{kind='qr_code',content='x',transition={change={props={'spacing'}}}}",
@@ -1088,6 +1226,77 @@ mod tests {
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn transitions_animate_state_style_values() {
+        let lua = mlua::Lua::new();
+        let node: Table = lua
+            .load(
+                r##"
+                {
+                    kind = 'button',
+                    content = 'x',
+                    style = {
+                        background = '#101010',
+                        text_color = '#ffffff',
+                        hovered = { background = '#ff0000' },
+                        pressed = { background = '#00ff00' },
+                    },
+                    transition = {
+                        change = {
+                            props = { 'background', 'hovered.background', 'pressed.background' },
+                            duration = 100,
+                            easing = 'linear',
+                        },
+                    },
+                }
+                "##,
+            )
+            .eval()
+            .unwrap();
+        let transition = Transition::parse(&node).unwrap().unwrap();
+        assert_eq!(transition.state_fields, ["background"]);
+
+        let mut patch = style::StylePatch::default();
+        transition.animate(&mut patch, "active");
+        assert_eq!(patch.background, Some(color("#101010").unwrap()));
+
+        transition.animate(&mut patch, "hovered");
+        assert_eq!(patch.background, Some(color("#101010").unwrap()));
+        let now = Instant::now();
+        transition
+            .state_animation
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .tick(now + std::time::Duration::from_millis(50));
+        transition.animate(&mut patch, "hovered");
+        let middle = patch.background.unwrap();
+        assert_ne!(middle, color("#101010").unwrap());
+        assert_ne!(middle, color("#ff0000").unwrap());
+
+        transition
+            .state_animation
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .tick(now + std::time::Duration::from_millis(200));
+        transition.animate(&mut patch, "hovered");
+        assert_eq!(patch.background, Some(color("#ff0000").unwrap()));
+
+        transition.animate(&mut patch, "pressed");
+        transition
+            .state_animation
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .tick(now + std::time::Duration::from_millis(400));
+        transition.animate(&mut patch, "pressed");
+        assert_eq!(patch.background, Some(color("#00ff00").unwrap()));
     }
 
     #[test]

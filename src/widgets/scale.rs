@@ -4,9 +4,10 @@ use iced::advanced::{Clipboard, Layout, Renderer, Shell, Widget, mouse, overlay,
 use iced::{Element, Event, Length, Rectangle, Size, Theme, Transformation, Vector, window};
 use iced_anim::Animated;
 use mlua::{Table, Value};
+use std::sync::{Arc, Mutex};
 
 use super::animation::{Control, Effects, Transform};
-use super::{Ctx, Motion, Transition};
+use super::{Ctx, Motion, StateAnimation, Transition};
 use crate::runtime::Message;
 
 struct State {
@@ -17,6 +18,8 @@ struct State {
     shift_control: Control,
     change: Option<Animated<Motion>>,
     change_control: Control,
+    state_animation: Option<Arc<Mutex<StateAnimation>>>,
+    redraw: bool,
     owns_control: bool,
 }
 
@@ -138,6 +141,11 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
                 .as_ref()
                 .map(|(_, t)| Animated::new(t.motion.clone(), t.mode)),
             change_control,
+            state_animation: self
+                .property
+                .as_ref()
+                .and_then(|(_, t)| t.state_animation.clone()),
+            redraw: false,
             owns_control: self.control.is_none(),
         })
     }
@@ -153,6 +161,16 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
             state.owns_control = false;
         }
         state.control.sync(&self.effects);
+        if let Some((_, transition)) = &self.property
+            && let Some(previous) = &state.state_animation
+        {
+            transition.copy_state_from(previous);
+        }
+        state.state_animation = self
+            .property
+            .as_ref()
+            .and_then(|(_, transition)| transition.state_animation.clone());
+        state.redraw = state.state_animation.is_some();
         match (&mut state.change, &self.property) {
             (Some(change), Some((_, transition))) if change.target() != &transition.motion => {
                 *change = Animated::new(change.value().clone(), transition.mode)
@@ -339,6 +357,12 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
                 shell,
             );
         }
+        let state_animating = state.state_animation.as_ref().is_some_and(|animation| {
+            let mut animation = animation.lock().unwrap();
+            animation.tick(*now);
+            animation.is_animating()
+        });
+        let state_redraw = std::mem::take(&mut state.redraw);
         let mut changing = false;
         if let (Some(change), Some((node, transition))) = (&mut state.change, &self.property) {
             changing = change.is_animating();
@@ -361,7 +385,7 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
                 self.callback(&state.change_control, transition.callback.as_ref(), shell);
             }
         }
-        if animating || state.shift.is_animating() || changing {
+        if animating || state.shift.is_animating() || changing || state_animating || state_redraw {
             shell.request_redraw();
         }
     }

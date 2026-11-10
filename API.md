@@ -2187,6 +2187,24 @@ across events. See [named values and transitions](#named-values-and-transitions)
 | `scrollable`                                                                          | `background`, `border`, `shadow`               |
 | `slider`, `vertical_slider`                                                           | `border`                                       |
 
+Style state overrides can animate too. Prefix a style field with one of the
+widget's state keys (`active`, `hovered`, `pressed`, `focused`, `disabled`,
+`dragged`, or `opened`) in `props`. Once a field is listed for any state, every
+change of that field between states animates with the `change` timing:
+
+```lua
+transition = {
+    change = {
+        props = { "background", "hovered.background", "pressed.background" },
+        duration = 120,
+    },
+}
+```
+
+State transitions support the same `background`, `text_color`, `border`, and
+`shadow` fields as their widget. Without a state-prefixed entry, state overrides
+stay instant.
+
 Unsupported transition properties are rejected. Progress-bar targets must stay
 within `0..1`; spring overshoot is clamped for display. Width and height targets
 must remain valid lengths even when animated.

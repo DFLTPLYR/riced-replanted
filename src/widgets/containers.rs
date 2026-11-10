@@ -6,7 +6,7 @@ use mlua::{Table, Value};
 use crate::runtime::Message;
 
 use super::enums::{horizontal, vertical};
-use super::style::style_patch;
+use super::style::{animated, style_patch};
 use super::{Ctx, Layout, Transition, children, element, max_pixels};
 
 pub(super) fn container(
@@ -120,13 +120,15 @@ pub(super) fn button(
             style.get::<Option<Table>>("disabled")?.as_ref(),
             transition,
         )?;
+        let animation = transition.cloned();
         button = button.style(move |theme, status| {
-            let patch = match status {
-                widget::button::Status::Active => &active,
-                widget::button::Status::Hovered => &hovered,
-                widget::button::Status::Pressed => &pressed,
-                widget::button::Status::Disabled => &disabled,
+            let (patch, state) = match status {
+                widget::button::Status::Active => (&active, "active"),
+                widget::button::Status::Hovered => (&hovered, "hovered"),
+                widget::button::Status::Pressed => (&pressed, "pressed"),
+                widget::button::Status::Disabled => (&disabled, "disabled"),
             };
+            let patch = animated(patch, animation.as_ref(), state);
             let mut style = widget::button::primary(theme, status);
             if let Some(background) = patch.background {
                 style.background = Some(Background::Color(background));

@@ -25,6 +25,40 @@ pub(super) struct StylePatch {
     pub(super) handle_border: Option<Border>,
 }
 
+fn read(table: &Table, patch: &mut StylePatch) -> mlua::Result<()> {
+    if let Some(value) = table.get::<Option<String>>("background")? {
+        patch.background = Some(color(&value)?);
+    }
+    if let Some(value) = table.get::<Option<String>>("text_color")? {
+        patch.text_color = Some(color(&value)?);
+    }
+    if let Some(value) = table.get::<Option<Table>>("border")? {
+        patch.border = Some(border_value(&value)?);
+    }
+    if let Some(value) = table.get::<Option<Table>>("shadow")? {
+        patch.shadow = Some(shadow_value(&value)?);
+    }
+    for (key, field) in [
+        ("icon_color", &mut patch.icon_color),
+        ("dot_color", &mut patch.dot_color),
+        ("placeholder", &mut patch.placeholder),
+        ("selection", &mut patch.selection),
+        ("handle", &mut patch.handle),
+        ("foreground", &mut patch.foreground),
+        ("rail", &mut patch.rail),
+        ("filled", &mut patch.filled),
+        ("scroller", &mut patch.scroller),
+    ] {
+        if let Some(value) = table.get::<Option<String>>(key)? {
+            *field = Some(color(&value)?);
+        }
+    }
+    if let Some(value) = table.get::<Option<Table>>("handle_border")? {
+        patch.handle_border = Some(border_value(&value)?);
+    }
+    Ok(())
+}
+
 pub(super) fn style_patch(
     base: &Table,
     over: Option<&Table>,
@@ -32,36 +66,7 @@ pub(super) fn style_patch(
 ) -> mlua::Result<StylePatch> {
     let mut patch = StylePatch::default();
     for table in [Some(base), over].into_iter().flatten() {
-        if let Some(value) = table.get::<Option<String>>("background")? {
-            patch.background = Some(color(&value)?);
-        }
-        if let Some(value) = table.get::<Option<String>>("text_color")? {
-            patch.text_color = Some(color(&value)?);
-        }
-        if let Some(value) = table.get::<Option<Table>>("border")? {
-            patch.border = Some(border_value(&value)?);
-        }
-        if let Some(value) = table.get::<Option<Table>>("shadow")? {
-            patch.shadow = Some(shadow_value(&value)?);
-        }
-        for (key, field) in [
-            ("icon_color", &mut patch.icon_color),
-            ("dot_color", &mut patch.dot_color),
-            ("placeholder", &mut patch.placeholder),
-            ("selection", &mut patch.selection),
-            ("handle", &mut patch.handle),
-            ("foreground", &mut patch.foreground),
-            ("rail", &mut patch.rail),
-            ("filled", &mut patch.filled),
-            ("scroller", &mut patch.scroller),
-        ] {
-            if let Some(value) = table.get::<Option<String>>(key)? {
-                *field = Some(color(&value)?);
-            }
-        }
-        if let Some(value) = table.get::<Option<Table>>("handle_border")? {
-            patch.handle_border = Some(border_value(&value)?);
-        }
+        read(table, &mut patch)?;
     }
     if let Some(transition) = transition {
         // A state override wins so hover/press colors stay static.
@@ -91,6 +96,26 @@ pub(super) fn style_patch(
         }
     }
     Ok(patch)
+}
+
+/// Reads only the fields present in one state table, without inheriting base values.
+pub(super) fn style_overlay(table: &Table) -> mlua::Result<StylePatch> {
+    let mut patch = StylePatch::default();
+    read(table, &mut patch)?;
+    Ok(patch)
+}
+
+/// Applies animated state values over a static state patch, when enabled.
+pub(super) fn animated(
+    patch: &StylePatch,
+    transition: Option<&Transition>,
+    status: &str,
+) -> StylePatch {
+    let mut patch = patch.clone();
+    if let Some(transition) = transition {
+        transition.animate(&mut patch, status);
+    }
+    patch
 }
 
 fn overridden(over: Option<&Table>, key: &str) -> mlua::Result<bool> {

@@ -9,7 +9,7 @@ use super::enums::{horizontal, vertical, wrapping};
 use super::input::paint_text_input;
 use super::scale::ScaleItem;
 use super::state;
-use super::style::{style_patch, validate};
+use super::style::{animated, style_patch, validate};
 use super::{Ctx, Layout, Transition, color, element, length, number};
 
 fn text_or_element(value: Value, ctx: &Ctx) -> mlua::Result<Element<'static, Message>> {
@@ -107,15 +107,16 @@ pub(super) fn text_editor(
             style.get::<Option<Table>>("disabled")?.as_ref(),
             transition,
         )?;
+        let animation = transition.cloned();
         editor = editor.style(move |theme, status| {
             let mut out = widget::text_editor::default(theme, status);
-            let patch = match status {
-                widget::text_editor::Status::Active => &active,
-                widget::text_editor::Status::Hovered => &hovered,
-                widget::text_editor::Status::Focused { .. } => &focused,
-                widget::text_editor::Status::Disabled => &disabled,
+            let (patch, state) = match status {
+                widget::text_editor::Status::Active => (&active, "active"),
+                widget::text_editor::Status::Hovered => (&hovered, "hovered"),
+                widget::text_editor::Status::Focused { .. } => (&focused, "focused"),
+                widget::text_editor::Status::Disabled => (&disabled, "disabled"),
             };
-            paint_text_editor(&mut out, patch);
+            paint_text_editor(&mut out, &animated(patch, animation.as_ref(), state));
             out
         });
     }
@@ -225,15 +226,16 @@ pub(super) fn combo_box(
             style.get::<Option<Table>>("disabled")?.as_ref(),
             transition,
         )?;
+        let animation = transition.cloned();
         combo = combo.input_style(move |theme, status| {
             let mut out = widget::text_input::default(theme, status);
-            let patch = match status {
-                widget::text_input::Status::Active => &active,
-                widget::text_input::Status::Hovered => &hovered,
-                widget::text_input::Status::Focused { .. } => &focused,
-                widget::text_input::Status::Disabled => &disabled,
+            let (patch, state) = match status {
+                widget::text_input::Status::Active => (&active, "active"),
+                widget::text_input::Status::Hovered => (&hovered, "hovered"),
+                widget::text_input::Status::Focused { .. } => (&focused, "focused"),
+                widget::text_input::Status::Disabled => (&disabled, "disabled"),
             };
-            paint_text_input(&mut out, patch);
+            paint_text_input(&mut out, &animated(patch, animation.as_ref(), state));
             out
         });
     }
