@@ -63,7 +63,7 @@ impl Log for Logger {
     }
 }
 
-/// Starts the daemon's log sink and resets the previous run's file.
+/// Starts the daemon's log sink, moving the previous run's file aside.
 pub fn start(profile: &str, retention: Option<Duration>, mirror: bool) -> io::Result<()> {
     let root = crate::ipc::runtime_dir()?;
     fs::create_dir_all(&root)?;
@@ -72,14 +72,15 @@ pub fn start(profile: &str, retention: Option<Duration>, mirror: bool) -> io::Re
     fs::create_dir_all(&directory)?;
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
     let path = directory.join(format!("{profile}.log"));
+    let previous = directory.join(format!("{profile}.previous.log"));
+    // Keep the last run's records for post-mortem instead of truncating them.
+    // The next start replaces this file, so at most one run is retained.
+    let _ = fs::rename(&path, &previous);
     let file = OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
         .open(&path)?;
-    file.lock()?;
-    file.set_len(0)?;
-    file.unlock()?;
     *SINK.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Sink {
         path,
         file,
