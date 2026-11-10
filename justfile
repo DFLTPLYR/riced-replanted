@@ -40,6 +40,10 @@ test: build
 install: build
     install -Dm755 target/release/riced "{{ home_directory() }}/.local/bin/riced"
 
+# Build, install, then re-exec the running daemon in place (same PID)
+restart: install
+    riced ipc restart
+
 # Remove the installed binary
 uninstall:
     rm -f "{{ home_directory() }}/.local/bin/riced"
