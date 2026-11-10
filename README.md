@@ -91,10 +91,11 @@ installed binary (for example under `nix run`).
 `example/stubs/riced.lua` is a lua-language-server `---@meta` file for the
 injected globals (`riced`, `iced`, `theme`, `config`). `example/.luarc.json`
 loads it, so completions and undefined-global diagnostics work while editing a
-profile copied from `example/`. Copy both, or point `workspace.library` at
-`example/stubs`. Each profile needs its own `.luarc.json` because `require`
-resolves from the profile directory. The core stub is hand-written; update it
-when the core Lua API changes.
+profile copied from `example/`. `riced stubs` installs both into the selected
+profile (`-c name`, `-p directory`, or `$XDG_CONFIG_HOME/riced`), leaving an
+existing `.luarc.json` untouched. Each profile needs its own `.luarc.json`
+because `require` resolves from the profile directory. The core stub is
+hand-written; update it when the core Lua API changes.
 
 Extensions own their editor definitions in a `stub.lua` beside the binary.
 `riced extension build` installs it into `<profile>/extensions/<name>/`, and

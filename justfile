@@ -49,9 +49,9 @@ restart: install
 uninstall:
     rm -f "{{ home_directory() }}/.local/bin/riced"
 
-# Copy the LuaLS definitions into a profile (default: replanted)
+# Install the LuaLS definitions into a profile (default: replanted)
 stubs profile="replanted":
-    install -Dm644 example/stubs/riced.lua "{{ home_directory() }}/.config/riced/{{profile}}/stubs/riced.lua"
+    riced stubs
 
 # Build the example system extension and install it into the test profile
 extension-system:

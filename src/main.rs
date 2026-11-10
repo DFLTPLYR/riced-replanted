@@ -72,6 +72,11 @@ enum Command {
         #[arg(long)]
         clear: bool,
     },
+    /// Install the core lua-language-server definitions into a profile
+    Stubs {
+        #[command(flatten)]
+        config: ConfigArgs,
+    },
     /// Build and package a Rust extension
     Extension {
         /// Required subcommand
@@ -315,6 +320,22 @@ fn cargo_metadata(manifest: &Path) -> Result<serde_json::Value, Box<dyn std::err
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
+const CORE_STUB: &str = include_str!("../example/stubs/riced.lua");
+const CORE_LUARC: &str = include_str!("../example/.luarc.json");
+
+fn install_stubs(config: &ConfigArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = config.directory()?;
+    let stubs = directory.join("stubs");
+    std::fs::create_dir_all(&stubs)?;
+    std::fs::write(stubs.join("riced.lua"), CORE_STUB)?;
+    // Keep an existing editor config: it may contain user settings.
+    let luarc = directory.join(".luarc.json");
+    if !luarc.exists() {
+        std::fs::write(luarc, CORE_LUARC)?;
+    }
+    Ok(())
+}
+
 fn selected_profile(config: &ConfigArgs) -> Result<Option<String>, Box<dyn std::error::Error>> {
     if config.path.is_some() || config.config.is_some() {
         Ok(Some(ipc::profile_id(&config.directory()?)?))
@@ -340,6 +361,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 };
                 logs::show(&profile, clear)?;
             }
+            Command::Stubs { config } => install_stubs(&config)?,
             Command::Extension { command } => match command {
                 ExtensionCommand::Build {
                     config,

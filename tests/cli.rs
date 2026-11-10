@@ -382,6 +382,51 @@ fn default_named_and_explicit_directories_load_their_own_shells() {
 }
 
 #[test]
+fn stubs_install_core_definitions_and_keep_existing_editor_config() {
+    let root =
+        std::path::PathBuf::from(format!("/tmp/opencode/riced-stubs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let profile = root.join("riced/test");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(profile.join(".luarc.json"), r#"{"custom":true}"#).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env("XDG_CONFIG_HOME", &root)
+        .args(["stubs", "-c", "test"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        std::fs::read_to_string(profile.join("stubs/riced.lua"))
+            .unwrap()
+            .starts_with("---@meta")
+    );
+    assert_eq!(
+        std::fs::read_to_string(profile.join(".luarc.json")).unwrap(),
+        r#"{"custom":true}"#
+    );
+
+    // Without -c or -p, install into $XDG_CONFIG_HOME/riced.
+    let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env("XDG_CONFIG_HOME", &root)
+        .arg("stubs")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(root.join("riced/stubs/riced.lua").is_file());
+    assert!(root.join("riced/.luarc.json").is_file());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn extension_build_requires_an_output_or_running_profile() {
     for args in [
         vec!["extension", "build"],
@@ -440,6 +485,7 @@ fn clap_rejects_invalid_selectors_and_reports_version() {
         vec!["ipc", "-c", "test", "-p", "/other", "settings"],
         vec!["ipc"],
         vec!["logs", "-c", "test", "-p", "/other"],
+        vec!["stubs", "-c", "test", "-p", "/other"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_riced"))
             .env_remove("HOME")
