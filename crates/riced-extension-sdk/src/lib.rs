@@ -72,6 +72,7 @@ impl Plugin {
 
     /// Registers a callable method. `readonly` is descriptive metadata, not an
     /// access restriction; trusted Lua profiles can call every registered method.
+    /// Handlers run on their own threads and may execute concurrently.
     pub fn method<F>(mut self, name: &str, readonly: bool, handler: F) -> Self
     where
         F: Fn(&Value) -> Result<Value, String> + Send + Sync + 'static,
@@ -201,6 +202,7 @@ where
     let replies = tx.clone();
     let requested = Arc::new(Mutex::new(HashSet::new()));
     let reader_requested = Arc::clone(&requested);
+    let methods = Arc::new(methods);
     thread::Builder::new()
         .name("riced-extension-reader".into())
         .stack_size(256 * 1024)
@@ -228,7 +230,7 @@ fn connect(path: &Path) -> io::Result<UnixStream> {
 
 fn read_calls(
     mut reader: BufReader<UnixStream>,
-    methods: HashMap<String, Handler>,
+    methods: Arc<HashMap<String, Handler>>,
     tx: mpsc::Sender<Vec<u8>>,
     requested: Arc<Mutex<HashSet<String>>>,
 ) {
@@ -251,31 +253,20 @@ fn read_calls(
         };
         match message {
             ToPlugin::Call { id, method, args } => {
-                let result = match methods.get(&method) {
-                    Some(handler) => handler(&Value::Array(args)),
-                    None => Err(format!("unknown method: {method}")),
-                };
-                let reply = match result {
-                    Ok(result) => ToHost::Result {
-                        id,
-                        ok: true,
-                        result,
-                        error: None,
-                    },
-                    Err(error) => ToHost::Result {
+                // Handlers get their own thread so a slow method (a file dialog,
+                // a template hook) cannot delay tray, notification, or menu calls.
+                if let Err(error) =
+                    dispatch_call(Arc::clone(&methods), id, method, args, tx.clone())
+                {
+                    log::error!(target: "extension.call", "cannot start method thread: {error}");
+                    if let Ok(line) = encode(&ToHost::Result {
                         id,
                         ok: false,
                         result: Value::Null,
-                        error: Some(error),
-                    },
-                };
-                match encode(&reply) {
-                    Ok(line) => {
-                        if tx.send(line).is_err() {
-                            break;
-                        }
+                        error: Some("cannot start method thread".into()),
+                    }) {
+                        let _ = tx.send(line);
                     }
-                    Err(error) => log::error!(target: "extension.encode", "{error}"),
                 }
             }
             ToPlugin::Subscribe { fields } => {
@@ -289,6 +280,45 @@ fn read_calls(
     }
     // riced went away, or the host rejected the registration.
     std::process::exit(0);
+}
+
+fn dispatch_call(
+    methods: Arc<HashMap<String, Handler>>,
+    id: u64,
+    method: String,
+    args: Vec<Value>,
+    replies: mpsc::Sender<Vec<u8>>,
+) -> io::Result<()> {
+    thread::Builder::new()
+        .name("riced-extension-call".into())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let result = match methods.get(&method) {
+                Some(handler) => handler(&Value::Array(args)),
+                None => Err(format!("unknown method: {method}")),
+            };
+            let reply = match result {
+                Ok(result) => ToHost::Result {
+                    id,
+                    ok: true,
+                    result,
+                    error: None,
+                },
+                Err(error) => ToHost::Result {
+                    id,
+                    ok: false,
+                    result: Value::Null,
+                    error: Some(error),
+                },
+            };
+            match encode(&reply) {
+                Ok(line) => {
+                    let _ = replies.send(line);
+                }
+                Err(error) => log::error!(target: "extension.encode", "{error}"),
+            }
+        })
+        .map(|_| ())
 }
 
 fn encode(message: &ToHost) -> io::Result<Vec<u8>> {
@@ -382,5 +412,44 @@ mod tests {
         );
         assert!(!items.is_empty());
         assert!(serde_json::to_vec(&items).unwrap().len() <= 32 * 1024);
+    }
+
+    #[test]
+    fn slow_methods_do_not_delay_other_calls() {
+        let (tx, rx) = mpsc::channel();
+        let methods: HashMap<String, Handler> = HashMap::from([
+            (
+                "slow".to_owned(),
+                Box::new(|_: &Value| {
+                    thread::sleep(Duration::from_millis(300));
+                    Ok(Value::Null)
+                }) as Handler,
+            ),
+            (
+                "fast".to_owned(),
+                Box::new(|_: &Value| Ok(Value::Null)) as Handler,
+            ),
+        ]);
+        let methods = Arc::new(methods);
+        dispatch_call(
+            Arc::clone(&methods),
+            1,
+            "slow".to_owned(),
+            Vec::new(),
+            tx.clone(),
+        )
+        .unwrap();
+        dispatch_call(Arc::clone(&methods), 2, "fast".to_owned(), Vec::new(), tx).unwrap();
+
+        let reply_id = |line: Vec<u8>| match serde_json::from_slice::<ToHost>(
+            &line[..line.len() - 1],
+        )
+        .unwrap()
+        {
+            ToHost::Result { id, .. } => id,
+            other => panic!("unexpected message: {other:?}"),
+        };
+        assert_eq!(reply_id(rx.recv().unwrap()), 2);
+        assert_eq!(reply_id(rx.recv().unwrap()), 1);
     }
 }
