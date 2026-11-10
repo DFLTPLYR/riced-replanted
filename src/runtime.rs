@@ -349,7 +349,7 @@ pub struct App {
     plugins: Rc<RefCell<plugins::Plugins>>,
 }
 
-// Iced's rendering callbacks cannot return errors; a broken Lua callback is fatal.
+// Startup errors after loading are fatal; runtime callbacks fall back.
 pub(crate) fn checked<T>(result: mlua::Result<T>) -> T {
     result.unwrap_or_else(|error| {
         log::error!(target: "runtime.error", "{error}");
@@ -357,7 +357,7 @@ pub(crate) fn checked<T>(result: mlua::Result<T>) -> T {
     })
 }
 
-// Degrade one render/theme/title/subscription into its fallback instead of exiting.
+// Degrade one update/render/theme/title/subscription into its fallback instead of exiting.
 pub(crate) fn checked_fallback<T>(result: mlua::Result<T>, fallback: T, integer: &str) -> T {
     result.unwrap_or_else(|error| {
         log::error!(target: "runtime.error", "falling back after {integer} error: {error}");

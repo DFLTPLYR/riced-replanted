@@ -73,9 +73,10 @@ inside `app:view`. Edits are detected from file contents; changing an `id` is
 not necessary.
 
 Namespace and startup settings changes require a restart and are rejected during
-reload. Callback errors first encountered after reload (for example, in `update`)
-remain fatal. Config evaluation and validation can run Lua side effects even
-when a reload is rejected.
+reload. Runtime callback errors (for example, in `update`) are logged and
+replaced with a fallback: an empty task, view, title, or default style. Watch the
+terminal or run `riced --logs` to see them. Config evaluation and validation can
+run Lua side effects even when a reload is rejected.
 
 ## Editor support
 
