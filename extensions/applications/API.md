@@ -47,13 +47,16 @@ an icon render a fallback.
 
 | Method       | Arguments | Behavior                                                     |
 | ------------ | --------- | ------------------------------------------------------------ |
-| `launch(id)` | string    | Starts the application detached from `riced`                 |
+| `launch(id)` | string    | Starts the application in its own session, detached from `riced` |
 
 `launch` uses the desktop `Exec` line without a shell and drops field codes that
 would need a document argument (`%f`, `%F`, `%u`, `%U`). `%c` and `%k` are
 expanded; `%%` becomes a literal percent. `Terminal=true` entries are wrapped in
 `$TERMINAL -e` (falling back to `x-terminal-emulator`). Unknown ids and spawn
 failures call the callback with `(nil, error)`.
+
+Launched applications run in a new session. Killing or restarting `riced`, its
+extensions, or the launching terminal does not stop them.
 
 ## Example
 

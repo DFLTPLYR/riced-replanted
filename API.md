@@ -232,11 +232,11 @@ events. See [Widget events](#widget-events).
 
 `props` passed to `view` has:
 
-| Field    | Type            | Meaning                                                          |
-| -------- | --------------- | ---------------------------------------------------------------- |
-| `window` | opaque userdata | Surface identifier for this render; use with window tasks        |
-| `width`  | number or nil   | Current logical surface width; available after the first resize  |
-| `height` | number or nil   | Current logical surface height; available after the first resize |
+| Field    | Type            | Meaning                                                                |
+| -------- | --------------- | ---------------------------------------------------------------------- |
+| `window` | opaque userdata | Surface identifier for this render; use with window tasks              |
+| `width`  | number or nil   | Current logical surface width; available after the first resize        |
+| `height` | number or nil   | Current logical surface height; available after the first resize       |
 | `shell`  | string or nil   | `"layer"`, `"popup"`, `"window"`, `"input_panel"`, or `"session_lock"` |
 
 `redraw_scope` runs for every incoming message before `update`. Return `nil` or
@@ -265,9 +265,9 @@ get their own surfaces independently. `"all_screens"` is also accepted.
 the runtime creates, synchronously before that surface's first frame. `info`
 has:
 
-| Field    | Type            | Meaning                                                        |
-| -------- | --------------- | -------------------------------------------------------------- |
-| `window` | opaque userdata | Surface identifier; the same value as `props.window`           |
+| Field    | Type            | Meaning                                                                |
+| -------- | --------------- | ---------------------------------------------------------------------- |
+| `window` | opaque userdata | Surface identifier; the same value as `props.window`                   |
 | `shell`  | string          | `"layer"`, `"popup"`, `"window"`, `"input_panel"`, or `"session_lock"` |
 
 Return an event to deliver it to `update` before the first view, or `nil`.
@@ -504,15 +504,15 @@ Extensions may push events. They arrive in `update` as:
 
 #### Bundled extension APIs
 
-| Extension   | Store fields                                                                                     | Methods                                                                                                                                                                     | Events |
-| ----------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
-| `system`    | `host`, `time`, `cpu`, `memory`, `disks`, `gpus`, `processes`                                    | none                                                                                                                                                                        | none   |
-| `wayland`   | `connected`, `capabilities`, `outputs`, `toplevels`, `workspaces`, `workspace_groups`, `focused` | `activate_toplevel`, `close_toplevel`, `activate_workspace`                                                                                                                 | none   |
-| `dbus`      | `connected`, `capabilities`, `tray`, `tray_menu`, `notifications`                                | `activate_tray`, `secondary_activate_tray`, `context_menu_tray`, `open_tray_menu`, `close_tray_menu`, `tray_menu_event`, `close_notification`, `invoke_notification_action`, `pick_file` | none   |
-| `themeagen` | `ready`, `mode`, `source`, `colors`                                                              | `generate`, `populate`, `regenerate`                                                                                                                                        | none   |
-| `lucide`    | `count`                                                                                          | `resolve`, `exists`, `list`                                                                                                                                                 | none   |
-| `openmeteo` | `ready`, `latitude`, `longitude`, `current`, `current_units`, `timezone`, `updated_at`, `error`  | `configure`                                                                                                                                                                 | none   |
-| `applications` | `applications`                                                                                | `launch`                                                                                                                                                                    | none   |
+| Extension      | Store fields                                                                                     | Methods                                                                                                                                                                                  | Events |
+| -------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| `system`       | `host`, `time`, `cpu`, `memory`, `disks`, `gpus`, `processes`                                    | none                                                                                                                                                                                     | none   |
+| `wayland`      | `connected`, `capabilities`, `outputs`, `toplevels`, `workspaces`, `workspace_groups`, `focused` | `activate_toplevel`, `close_toplevel`, `activate_workspace`                                                                                                                              | none   |
+| `dbus`         | `connected`, `capabilities`, `tray`, `tray_menu`, `notifications`                                | `activate_tray`, `secondary_activate_tray`, `context_menu_tray`, `open_tray_menu`, `close_tray_menu`, `tray_menu_event`, `close_notification`, `invoke_notification_action`, `pick_file` | none   |
+| `themeagen`    | `ready`, `mode`, `source`, `colors`                                                              | `generate`, `populate`, `regenerate`                                                                                                                                                     | none   |
+| `lucide`       | `count`                                                                                          | `resolve`, `exists`, `list`                                                                                                                                                              | none   |
+| `openmeteo`    | `ready`, `latitude`, `longitude`, `current`, `current_units`, `timezone`, `updated_at`, `error`  | `configure`                                                                                                                                                                              | none   |
+| `applications` | `applications`                                                                                   | `launch`                                                                                                                                                                                 | none   |
 
 All bundled extensions publish whole snapshots rather than pushing events.
 Each publish replaces the snapshot contents, so re-read a field in `view`
@@ -934,7 +934,7 @@ Methods:
 | `tray_menu_event(id, menu_id, event, callback?)` | string, integer, string | Sends `clicked`, `opened`, `closed`, or `hovered` for a menu item                                    |
 | `close_notification(id)`                         | integer                 | Removes the notification if present and emits `NotificationClosed`; unknown ids are ignored          |
 | `invoke_notification_action(id, key)`            | integer, string         | Validates the action key, removes the notification, and emits `ActionInvoked` + `NotificationClosed` |
-| `pick_file(options?, callback?)`                 | table                   | Opens the XDG desktop portal file chooser; the callback receives selected absolute paths              |
+| `pick_file(options?, callback?)`                 | table                   | Opens the XDG desktop portal file chooser; the callback receives selected absolute paths             |
 
 `pick_file` options: `title` (string), `multiple` (boolean), `directory`
 (boolean), and `path` (absolute starting directory; a leading `~/` is expanded).
@@ -1078,13 +1078,13 @@ end)
 
 The `applications` store field is a name-sorted array:
 
-| Field      | Meaning                                                        |
-| ---------- | -------------------------------------------------------------- |
+| Field      | Meaning                                                               |
+| ---------- | --------------------------------------------------------------------- |
 | `id`       | Desktop file id; subdirectories use dashes, for example `kde-konsole` |
-| `name`     | Display name                                                   |
-| `icon`     | Icon name or nil; resolve with `iced.icon_path`                |
-| `comment`  | Description or nil                                             |
-| `terminal` | Whether launching needs a terminal                             |
+| `name`     | Display name                                                          |
+| `icon`     | Icon name or nil; resolve with `iced.icon_path`                       |
+| `comment`  | Description or nil                                                    |
+| `terminal` | Whether launching needs a terminal                                    |
 
 Entries come from `$XDG_DATA_HOME/applications` and each
 `$XDG_DATA_DIRS/applications`. The first directory that defines an id wins;
@@ -1094,8 +1094,9 @@ rescanned every 30 seconds and published when it changes.
 `launch(id, callback?)` resolves a known id, starts the desktop `Exec` command
 without a shell, and drops document/URL field codes. `%c` and `%k` expand, `%%`
 is a literal percent, and `Terminal=true` entries run in `$TERMINAL -e`
-(falling back to `x-terminal-emulator`). Unknown ids and spawn failures call the
-callback with `(nil, error)`.
+(falling back to `x-terminal-emulator`). The application starts in a new
+session, so killing or restarting `riced` does not stop it. Unknown ids and spawn
+failures call the callback with `(nil, error)`.
 
 The example profile includes `example/components/launcher.lua`, a searchable
 overlay opened with `riced ipc launcher`. Bind that command to a compositor

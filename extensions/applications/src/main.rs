@@ -3,6 +3,7 @@
 use std::{
     collections::HashSet,
     env, fs, io,
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -69,11 +70,13 @@ fn launch_app(applications: &Arc<Mutex<Vec<Application>>>, args: &Value) -> Resu
         .ok_or_else(|| format!("unknown application: {id}"))?;
     let mut argv = command(&app)?;
     let mut command = Command::new(argv.remove(0));
-    let mut child = command
+    command
         .args(argv)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    detach(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|error| format!("cannot launch {}: {error}", app.name))?;
     // Reap the child; this process lives as long as the shell, so an unwaited
@@ -82,6 +85,20 @@ fn launch_app(applications: &Arc<Mutex<Vec<Application>>>, args: &Value) -> Resu
         let _ = child.wait();
     });
     Ok(Value::Null)
+}
+
+/// Launches into a new session so riced's death and terminal/process-group
+/// signals cannot reach the application.
+fn detach(command: &mut Command) {
+    // SAFETY: setsid is async-signal-safe and runs between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 fn command(app: &Application) -> Result<Vec<String>, String> {
@@ -307,6 +324,18 @@ fn snapshot(applications: &[Application]) -> Value {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn launched_apps_start_in_their_own_session() {
+        let mut command = Command::new("sleep");
+        command.arg("5");
+        detach(&mut command);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id() as i32;
+        assert_eq!(unsafe { libc::getsid(pid) }, pid);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 
     fn application(exec: &str) -> Application {
         Application {
