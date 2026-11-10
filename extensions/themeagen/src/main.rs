@@ -138,6 +138,7 @@ impl Stored {
 }
 
 fn main() -> io::Result<()> {
+    limit_arenas();
     let state = match state_path().and_then(|path| load_from(&path)) {
         Ok(Some(persisted)) => persisted.published(),
         Ok(None) => json!({"ready": false, "mode": "dark"}),
@@ -198,13 +199,40 @@ fn current_mode(model: &Arc<Mutex<Model>>) -> String {
 }
 
 fn update(model: &Arc<Mutex<Model>>, result: Result<Stored, String>) -> Result<Value, String> {
-    let stored = result?;
-    let summary = stored.summary();
-    let published = stored.published();
-    let mut model = model_lock(model);
-    model.state = published;
-    model.dirty = true;
-    Ok(summary)
+    let result = result.map(|stored| {
+        let summary = stored.summary();
+        let published = stored.published();
+        let mut model = model_lock(model);
+        model.state = published;
+        model.dirty = true;
+        summary
+    });
+    trim_heap();
+    result
+}
+
+/// glibc keeps freed arenas mapped; hand the pages back after a generate.
+fn trim_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> i32;
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        malloc_trim(0);
+    }
+}
+
+/// One arena keeps the per-call threads' pages trimmable.
+fn limit_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe extern "C" {
+        fn mallopt(param: i32, value: i32) -> i32;
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        mallopt(-8, 1); // M_ARENA_MAX
+    }
 }
 
 fn handle_generate(model: &Arc<Mutex<Model>>, args: &Value) -> Result<Value, String> {
