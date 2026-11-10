@@ -1355,10 +1355,12 @@ impl App {
             let has_base = self.windows.borrow().iter().any(|id| {
                 !previous.iter().any(|layer| layer.window == *id)
                     && !previous_toplevels.iter().any(|window| window.window == *id)
+                    && !previous_popups.iter().any(|popup| popup.window == *id)
             });
             if !has_base {
                 self.layers = previous;
                 self.toplevels = previous_toplevels.clone();
+                self.popups = previous_popups;
                 return Err(mlua::Error::runtime(
                     "cannot replace layer views with a widget-only view without a base window",
                 ));
@@ -1402,6 +1404,7 @@ impl App {
                 live.extend(self.windows.borrow().iter().copied().filter(|id| {
                     !previous.iter().any(|layer| layer.window == *id)
                         && !previous_toplevels.iter().any(|window| window.window == *id)
+                        && !previous_popups.iter().any(|popup| popup.window == *id)
                 }));
             }
             let removed = self
@@ -3353,6 +3356,66 @@ mod tests {
         app.reconcile_layers().unwrap();
         assert_eq!(app.popups.len(), 1);
         app.view(app.popups[0].window).unwrap();
+    }
+
+    #[test]
+    fn rejected_widget_only_view_restores_popups() {
+        let source = r#"
+            only = false
+            return riced.daemon({}, 'test', function() end, function()
+                if only then return iced.text('only') end
+                return {
+                    iced.layer(iced.text('bar'), {
+                        id = 'bar', size = { width = 200, height = 30 },
+                    }),
+                    iced.popup(iced.text('menu'), {
+                        id = 'menu', parent = 'bar', width = 120, height = 80,
+                    }),
+                }
+            end):run()
+        "#;
+        let mut app = load(source, Path::new("shell.lua")).unwrap();
+        app.reconcile_layers().unwrap();
+        let popup = app.popups[0].window;
+        app.view(popup).unwrap();
+
+        app.lua.globals().set("only", true).unwrap();
+        let error = app.reconcile_layers().unwrap_err().to_string();
+        assert!(error.contains("without a base window"), "{error}");
+        assert_eq!(app.layers.len(), 1);
+        assert_eq!(app.popups.len(), 1);
+        assert_eq!(app.popups[0].window, popup);
+    }
+
+    #[test]
+    fn widget_only_view_forgets_open_popups_but_keeps_the_base_window() {
+        let source = r#"
+            open = true
+            return riced.daemon({}, 'test', function() end, function()
+                if not open then return iced.text('only') end
+                return {
+                    iced.layer(iced.text('bar'), {
+                        id = 'bar', size = { width = 200, height = 30 },
+                    }),
+                    iced.popup(iced.text('menu'), {
+                        id = 'menu', parent = 'bar', width = 120, height = 80,
+                    }),
+                }
+            end):run()
+        "#;
+        let mut app = load(source, Path::new("shell.lua")).unwrap();
+        app.reconcile_layers().unwrap();
+        let popup = app.popups[0].window;
+        app.view(popup).unwrap();
+        // The daemon's base window is not declared in the view.
+        let base = window::Id::unique();
+        app.windows.borrow_mut().push(base);
+
+        app.lua.globals().set("open", false).unwrap();
+        app.reconcile_layers().unwrap();
+        assert!(app.popups.is_empty());
+        assert!(!app.windows.borrow().contains(&popup));
+        assert!(app.windows.borrow().contains(&base));
     }
 
     #[test]
