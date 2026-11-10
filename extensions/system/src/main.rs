@@ -22,6 +22,7 @@ fn main() -> std::io::Result<()> {
         ])
         .serve(|context| {
             let mut system = System::new();
+            let mut last = Value::Null;
             loop {
                 if context.requested().is_empty() {
                     thread::sleep(Duration::from_millis(100));
@@ -112,7 +113,11 @@ fn main() -> std::io::Result<()> {
                 if context.wants("processes") {
                     store.insert("processes".into(), json!(system.processes().len()));
                 }
-                context.publish(Value::Object(store));
+                let store = Value::Object(store);
+                if store != last {
+                    context.publish(store.clone());
+                    last = store;
+                }
                 thread::sleep(Duration::from_secs(1));
             }
         })
