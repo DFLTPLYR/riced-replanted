@@ -69,13 +69,18 @@ fn launch_app(applications: &Arc<Mutex<Vec<Application>>>, args: &Value) -> Resu
         .ok_or_else(|| format!("unknown application: {id}"))?;
     let mut argv = command(&app)?;
     let mut command = Command::new(argv.remove(0));
-    command
+    let mut child = command
         .args(argv)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("cannot launch {}: {error}", app.name))?;
+    // Reap the child; this process lives as long as the shell, so an unwaited
+    // child would stay a zombie after the app exits.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(Value::Null)
 }
 
