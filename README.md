@@ -78,6 +78,14 @@ replaced with a fallback: an empty task, view, title, or default style. Watch th
 terminal or run `riced --logs` to see them. Config evaluation and validation can
 run Lua side effects even when a reload is rejected.
 
+To apply a new `riced` binary, run `just restart` (or `riced ipc restart` after
+installing it). The daemon re-execs its own binary with the same arguments, so
+the PID and terminal stay and extensions, surfaces, Lua state, and widget state
+are recreated once. Without `-c` or `-p` the CLI targets the only running
+profile. If the binary cannot be found, restart is refused and the current
+daemon keeps running; set `RICED_EXE` when the launch path does not point at the
+installed binary (for example under `nix run`).
+
 ## Editor support
 
 `example/stubs/riced.lua` is a lua-language-server `---@meta` file for the

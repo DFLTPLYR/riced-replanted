@@ -330,6 +330,18 @@ are printed on the daemon's stderr and do not stop it. Registering a name again
 replaces the previous handler, so editing the module that registers handlers
 keeps working. An empty command name is an error.
 
+`restart` is built in when the profile does not register a handler for it. It
+takes no arguments and re-execs the daemon's own binary with the original
+command line, so the process ID stays while extensions, surfaces, Lua state, and
+widget state are recreated. If the binary cannot be resolved (or `RICED_EXE`
+points at a missing or non-executable file), the restart is refused and the
+daemon keeps running.
+
+```sh
+riced ipc restart
+riced ipc -c work restart
+```
+
 The CLI only queues the request, so success means it was queued, not that a
 daemon handled it. Each profile has its own queue; starting a new daemon discards
 requests left by the previous instance. Without `-c` or `-p`, the CLI targets
