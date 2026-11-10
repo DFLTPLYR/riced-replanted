@@ -1234,6 +1234,45 @@ The stylesheet module can also `require` other style modules or call
 `iced.define` for custom widgets. A stylesheet only sets defaults; explicit
 props still win.
 
+#### Variants
+
+A widget entry with a `default` key is a variant map: `default` holds the base
+props, and every other key is a named variant merged over it. Entries without
+`default` keep the flat form above and clear that widget's variants.
+
+```lua
+return iced.stylesheet({
+    button = {
+        default = {
+            padding = 8,
+            style = { background = "#202020", text_color = "#ffffff" },
+            transition = iced.transition("basic_anim"),
+        },
+        primary = { style = { background = "#5865f2" } },
+        danger = { style = { background = "#c3423f" } },
+    },
+})
+```
+
+Select a variant with `iced.variant(name, overrides?)`, which returns a props
+table for any constructor:
+
+```lua
+iced.button("Save")                            -- default
+iced.button("Save", iced.variant("primary"))   -- variant over default
+iced.button("Save", iced.variant("primary", {  -- overrides win over both
+    width = "fill",
+    style = { text_color = "#ffd166" },
+}))
+```
+
+Resolution order is `default` → named variant → props passed to the widget.
+Nested tables such as `style` and `border` merge key by key; arrays replace.
+The `variant` key is consumed by the stylesheet and never reaches widget
+validation. An unknown variant is an error, so check names when editing the
+stylesheet. `default = {}` keeps a variant-only entry. `iced.overrides` still
+sets only the base props; variants keep merging over them.
+
 ### Widget reference
 
 #### `iced.icon(content, props)`
