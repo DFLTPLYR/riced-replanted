@@ -265,9 +265,11 @@ pub(super) fn list(
 ) -> ListState {
     LISTS.with(|lists| {
         let mut lists = lists.borrow_mut();
-        let entry = lists
-            .entry((generation, window, id.to_owned()))
-            .or_default();
+        let key = (generation, window, id.to_owned());
+        if lists.len() >= LIMIT && !lists.contains_key(&key) {
+            lists.clear();
+        }
+        let entry = lists.entry(key).or_default();
         entry.owner = owner;
         let previous = std::mem::take(&mut entry.items);
         let mut old_used = vec![false; previous.len()];
@@ -557,6 +559,22 @@ mod tests {
         );
         assert!(
             PANES.with_borrow(|panes| panes.keys().filter(|key| key.0 == generation).count())
+                <= LIMIT
+        );
+        for index in 0..LIMIT + 8 {
+            let items = vec![Value::Integer(index as i64)];
+            list(
+                generation,
+                None,
+                &format!("list-{index}"),
+                items.clone(),
+                &items,
+                false,
+                None,
+            );
+        }
+        assert!(
+            LISTS.with_borrow(|lists| lists.keys().filter(|key| key.0 == generation).count())
                 <= LIMIT
         );
         free_retired();
