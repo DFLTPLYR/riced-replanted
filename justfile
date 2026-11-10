@@ -31,10 +31,11 @@ build:
         cargo build --release
     BUILD
     install -Dm755 "target/release/riced" "{{ home_directory() }}/.local/bin/riced"
+    riced ipc restart
 
 test: build
     if pgrep -x -u "$(id -u)" riced >/dev/null; then pkill -x -u "$(id -u)" riced; fi
-    ./target/release/riced -c replanted --logs
+    ./target/release/riced --logs
 
 # Build release and install to ~/.local/bin (already on PATH)
 install: build
