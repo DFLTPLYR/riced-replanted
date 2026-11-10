@@ -100,9 +100,22 @@ pub fn running_profile() -> io::Result<String> {
     running_profile_at(&runtime_dir()?)
 }
 
+const NO_RUNNING_PROFILE: &str =
+    "expected one running profile; use -c <name> or -p <directory> to select a configuration";
+
 fn running_profile_at(root: &Path) -> io::Result<String> {
     let mut profiles = Vec::new();
-    for entry in fs::read_dir(root)? {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                NO_RUNNING_PROFILE,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
         let path = entry?.path();
         if path.extension().is_some_and(|ext| ext == "sock")
             && UnixStream::connect(&path).is_ok()
@@ -114,7 +127,7 @@ fn running_profile_at(root: &Path) -> io::Result<String> {
     if profiles.len() != 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "expected one running profile; use riced ipc -c <name> or -p <directory> <command> [args...]",
+            NO_RUNNING_PROFILE,
         ));
     }
     Ok(profiles.remove(0))
