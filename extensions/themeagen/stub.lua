@@ -11,7 +11,45 @@
 ---@field image? string
 ---@field variant? riced.ThemeagenVariant
 
----@alias riced.ThemeagenPalette table<string, any>
+---@class riced.ThemeagenAnsi
+---@field black string
+---@field red string
+---@field green string
+---@field yellow string
+---@field blue string
+---@field magenta string
+---@field cyan string
+---@field white string
+
+---@class riced.ThemeagenTerminal
+---@field normal riced.ThemeagenAnsi
+---@field bright riced.ThemeagenAnsi
+---@field foreground string
+---@field background string
+---@field selectionfg string
+---@field selectionbg string
+---@field cursortext string
+---@field cursor string
+
+---@class riced.ThemeagenPalette
+---@field primary string
+---@field onprimary string
+---@field secondary string
+---@field onsecondary string
+---@field tertiary string
+---@field ontertiary string
+---@field error string
+---@field onerror string
+---@field surface string
+---@field onsurface string
+---@field surfacevariant string
+---@field onsurfacevariant string
+---@field outline string
+---@field shadow string
+---@field hover string
+---@field onhover string
+---@field terminal riced.ThemeagenTerminal
+---@field [string] any Extended Material roles and manual palette values
 
 ---@class riced.ThemeagenColors
 ---@field dark riced.ThemeagenPalette
