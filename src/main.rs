@@ -234,11 +234,29 @@ fn build_extension(
 
     std::fs::create_dir_all(&output)?;
     let destination = output.join(&target.name);
-    std::fs::copy(executable, &destination)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o755))?;
+    // A running extension holds its executable open, so an in-place copy fails
+    // with ETXTBSY. Install through a temporary file and rename over it instead.
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = output.join(format!(
+        ".{}.tmp-{}-{suffix}",
+        target.name,
+        std::process::id()
+    ));
+    let installed = (|| -> std::io::Result<()> {
+        std::fs::copy(executable, &temporary)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))?;
+        }
+        std::fs::rename(&temporary, &destination)
+    })();
+    if let Err(error) = installed {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
     }
     for entry in std::fs::read_dir(&path)? {
         let entry = entry?;
