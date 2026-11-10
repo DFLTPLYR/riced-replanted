@@ -428,6 +428,28 @@ impl Plugins {
         meta.set("__index", index)?;
         store.set_metatable(Some(meta))?;
 
+        // A reconnecting extension may declare fewer methods than before.
+        // Drop proxy functions that the new connection does not provide so Lua
+        // does not call a handler bound to the closed writer.
+        let stale = proxy
+            .clone()
+            .pairs::<Value, Value>()
+            .collect::<mlua::Result<Vec<_>>>()?
+            .into_iter()
+            .filter_map(|(key, value)| match (key, value) {
+                (Value::String(key), Value::Function(_)) => {
+                    Some(key.to_str().map(|key| key.to_owned()))
+                }
+                _ => None,
+            })
+            .collect::<mlua::Result<Vec<String>>>()?
+            .into_iter()
+            .filter(|key| !handle.methods.contains_key(key))
+            .collect::<Vec<_>>();
+        for key in stale {
+            proxy.raw_set(key.as_str(), Value::Nil)?;
+        }
+
         for method in handle.methods.keys() {
             let writer = handle.writer.clone();
             let pending = handle.pending.clone();
@@ -1830,6 +1852,37 @@ mod tests {
         }
         assert!(valid_name("system"));
         assert!(valid_name("my-plugin_2"));
+    }
+
+    #[test]
+    fn reconnecting_with_fewer_methods_removes_stale_proxies() {
+        let (tx, mut plugins, lua) = setup();
+        let _calls = register(&tx, &["query", "close"]);
+        plugins.poll(&lua).unwrap();
+        assert_eq!(
+            lua.load("return type(riced.plugin('demo').close)")
+                .eval::<String>()
+                .unwrap(),
+            "function"
+        );
+
+        tx.send(Incoming::Closed { conn: 1 }).unwrap();
+        plugins.poll(&lua).unwrap();
+        let _calls = register(&tx, &["query"]);
+        plugins.poll(&lua).unwrap();
+
+        assert!(
+            lua.load("return riced.plugin('demo').close")
+                .eval::<Option<Function>>()
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            lua.load("return type(riced.plugin('demo').query)")
+                .eval::<String>()
+                .unwrap(),
+            "function"
+        );
     }
 
     #[test]
