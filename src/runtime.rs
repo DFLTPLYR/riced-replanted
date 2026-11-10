@@ -1131,11 +1131,10 @@ impl App {
             None => self.lua.create_table()?,
         };
         let table = self.modules.borrow_mut().require(&self.lua, &module)?;
-        let view: Function = table.get("view").map_err(|_| {
+        table.get::<Function>("view").map_err(|_| {
             mlua::Error::runtime(format!("module {module} must define a view function"))
         })?;
         let revision = self.modules.borrow().revision(&module);
-        let _ = view;
         let key = format!("component:{id}");
         if self
             .mounts
