@@ -727,8 +727,9 @@ fn serve(
         model.notifications.clear();
         model.dirty = true;
     }
+    register_objects(&connection, model)?;
     let (tray, own_watcher) = setup_watcher(&connection, model)?;
-    let notifications = setup_notifications(&connection, model)?;
+    let notifications = setup_notifications(&connection)?;
     {
         let mut model = model.lock().unwrap();
         model.tray_available = tray;
@@ -740,6 +741,7 @@ fn serve(
     thread::scope(|scope| {
         let (stop, stopped) = mpsc::channel::<()>();
         let connection = &connection;
+        let mut last_roles = Instant::now();
         // Remote tray clients can time out without delaying notification delivery.
         scope.spawn(move || {
             loop {
@@ -756,6 +758,10 @@ fn serve(
             }
         });
         while !connection.is_closed() {
+            if last_roles.elapsed() >= Duration::from_secs(1) {
+                last_roles = Instant::now();
+                retry_roles(connection, model);
+            }
             expire_notifications(model);
             flush_signals(connection, model);
             publish(context, model, last);
@@ -764,6 +770,54 @@ fn serve(
         drop(stop);
     });
     Err("session bus disconnected".into())
+}
+
+/// Registers the object-server interfaces once; the bus names may be owned later.
+fn register_objects(
+    connection: &Connection,
+    model: &Arc<Mutex<Model>>,
+) -> Result<(), Box<dyn Error>> {
+    connection.object_server().at(
+        WATCHER_PATH,
+        Watcher {
+            model: Arc::clone(model),
+        },
+    )?;
+    connection.object_server().at(
+        NOTIFICATIONS_PATH,
+        NotificationsServer {
+            model: Arc::clone(model),
+        },
+    )?;
+    Ok(())
+}
+
+/// Takes over a free watcher or notification name after the previous owner exits.
+fn retry_roles(connection: &Connection, model: &Arc<Mutex<Model>>) {
+    let own_watcher = model.lock().unwrap().own_watcher;
+    if !own_watcher && !name_has_owner(connection, WATCHER).unwrap_or(true) {
+        match setup_watcher(connection, model) {
+            Ok((tray, own)) => {
+                let mut model = model.lock().unwrap();
+                model.tray_available = tray;
+                model.own_watcher = own;
+                model.dirty = true;
+            }
+            Err(error) => log::warn!(target: "dbus.watcher", "{error}"),
+        }
+    }
+    let notifications = model.lock().unwrap().notifications_available;
+    if !notifications && !name_has_owner(connection, NOTIFICATIONS).unwrap_or(true) {
+        match setup_notifications(connection) {
+            Ok(true) => {
+                let mut model = model.lock().unwrap();
+                model.notifications_available = true;
+                model.dirty = true;
+            }
+            Ok(false) => {}
+            Err(error) => log::warn!(target: "dbus.notifications", "{error}"),
+        }
+    }
 }
 
 fn setup_watcher(
@@ -776,12 +830,6 @@ fn setup_watcher(
         return Ok((true, false));
     }
 
-    connection.object_server().at(
-        WATCHER_PATH,
-        Watcher {
-            model: Arc::clone(model),
-        },
-    )?;
     let flags = RequestNameFlags::DoNotQueue | RequestNameFlags::AllowReplacement;
     let reply = connection.request_name_with_flags(WATCHER, flags)?;
     if matches!(
@@ -796,19 +844,10 @@ fn setup_watcher(
     }
 }
 
-fn setup_notifications(
-    connection: &Connection,
-    model: &Arc<Mutex<Model>>,
-) -> Result<bool, Box<dyn Error>> {
+fn setup_notifications(connection: &Connection) -> Result<bool, Box<dyn Error>> {
     if name_has_owner(connection, NOTIFICATIONS)? {
         return Ok(false);
     }
-    connection.object_server().at(
-        NOTIFICATIONS_PATH,
-        NotificationsServer {
-            model: Arc::clone(model),
-        },
-    )?;
     let reply =
         connection.request_name_with_flags(NOTIFICATIONS, RequestNameFlags::DoNotQueue.into())?;
     Ok(matches!(
