@@ -239,6 +239,7 @@ config = {}
 ---@field on_press? any
 ---@field content_fit? "contain"|"cover"|"fill"|"none"|"scale_down"
 ---@field transition? iced.Transition
+---@field variant? string Selected named stylesheet variant; prefer iced.variant(name, overrides)
 ---@field line_height? number|{ pixels: number }
 ---@field wrap? boolean|"none"|"word"|"glyph"|"word_or_glyph"
 ---@field align_x? "left"|"center"|"right"|"justified"
@@ -512,9 +513,18 @@ function iced.opacity(color, percent) end
 function iced.overrides(constructor, props) end
 
 ---Applies widget defaults for several kinds at once and returns the stylesheet.
----@param styles table<string|function, iced.Props> Widget kind or constructor mapped to default props
+---A widget entry with a `default` key is a variant map; without one it is the
+---flat props form and clears that widget's variants.
+---@param styles table<string|function, iced.Props|table<string, iced.Props>>
 ---@return table
 function iced.stylesheet(styles) end
+
+---Selects a named variant from the current stylesheet; `overrides` win over both
+---the variant and its `default`.
+---@param name string Variant name defined in iced.stylesheet
+---@param overrides? iced.Props
+---@return iced.Props
+function iced.variant(name, overrides) end
 
 ---@param content string|number
 ---@param props? iced.Props

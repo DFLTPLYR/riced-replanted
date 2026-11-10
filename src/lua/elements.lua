@@ -33,21 +33,41 @@ local function merge(target, overrides, active)
 	return target
 end
 
-local defaults, constructors = {}, {}
+local defaults, variants, constructors = {}, {}, {}
 
-local function resolve(node)
+local resolve
+
+local function sync_defaults()
+	riced._defaults = (next(defaults) or next(variants)) and resolve or nil
+end
+
+resolve = function(node)
 	local kind = rawget(node, "kind")
+	local name = rawget(node, "variant")
 	local default = kind and defaults[kind]
-	if not default or next(default) == nil then return node end
-	local result = copy(default)
+	local named = name ~= nil and kind and variants[kind] and variants[kind][name]
+	if name ~= nil and named == nil then
+		error(
+			("unknown variant %q for iced.%s; define it under default in iced.stylesheet"):format(
+				tostring(name),
+				tostring(kind)
+			)
+		)
+	end
+	if not named and (not default or next(default) == nil) then return node end
+	local result = default and copy(default) or {}
+	if named then result = merge(result, named) end
 	for key, value in pairs(node) do
-		if key ~= "content" and type(value) == "table" and type(result[key]) == "table"
+		if key == "content" or key == "variant" then
+			-- constructors own content; variant is a selector, not a prop
+		elseif type(value) == "table" and type(result[key]) == "table"
 			and not array(value) and not array(result[key]) then
 			result[key] = merge(result[key], value)
 		else
 			result[key] = value
 		end
 	end
+	result.content = node.content
 	return result
 end
 
@@ -57,16 +77,53 @@ function iced.overrides(constructor, props)
 	if props == nil then return defaults[kind] and copy(defaults[kind]) end
 	assert(type(props) == "table", "widget overrides must be a table")
 	defaults[kind] = copy(props)
-	riced._defaults = next(defaults) and resolve or nil
+	sync_defaults()
+end
+
+function iced.variant(name, overrides)
+	assert(type(name) == "string" and name ~= "", "variant name must be a nonempty string")
+	assert(overrides == nil or type(overrides) == "table", "variant overrides must be a table")
+	local props = copy(overrides or {})
+	assert(props.variant == nil, "variant overrides must not set variant")
+	props.variant = name
+	sync_defaults()
+	return props
+end
+
+local function is_variant_map(entry)
+	return type(entry) == "table" and entry.default ~= nil
 end
 
 function iced.stylesheet(styles)
 	assert(type(styles) == "table", "stylesheet must be a table")
-	for kind, props in pairs(styles) do
+	for kind, entry in pairs(styles) do
 		local constructor = type(kind) == "string" and rawget(iced, kind) or kind
-		assert(constructors[constructor], "unknown widget in stylesheet: " .. tostring(kind))
-		iced.overrides(constructor, props)
+		local widget = constructors[constructor]
+		assert(widget ~= nil, "unknown widget in stylesheet: " .. tostring(kind))
+		assert(type(entry) == "table", "stylesheet props must be a table: " .. tostring(kind))
+		local base, named = entry, nil
+		if is_variant_map(entry) then
+			base = entry.default
+			named = {}
+			for name, props in pairs(entry) do
+				if name ~= "default" then
+					assert(
+						type(name) == "string" and name ~= "",
+						"variant names must be nonempty strings: " .. tostring(kind)
+					)
+					assert(
+						type(props) == "table",
+						("variant %q must be a table: %s"):format(name, tostring(kind))
+					)
+					named[name] = copy(props)
+				end
+			end
+		end
+		assert(type(base) == "table", "stylesheet default must be a table: " .. tostring(kind))
+		defaults[widget] = copy(base)
+		variants[widget] = named
 	end
+	sync_defaults()
 	return styles
 end
 

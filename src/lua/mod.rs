@@ -306,6 +306,124 @@ mod tests {
     }
 
     #[test]
+    fn stylesheet_variants_merge_over_default_and_explicit_props() {
+        let lua = mlua::Lua::new();
+        load(&lua).unwrap();
+        lua.load(
+            r##"
+            iced.stylesheet({
+                button = {
+                    default = {
+                        padding = 8,
+                        style = {background = '#202020', text_color = '#ffffff'},
+                    },
+                    primary = {style = {background = '#5865f2'}},
+                },
+            })
+
+            local plain = riced._defaults(iced.button('a'))
+            assert(plain.padding == 8 and plain.style.background == '#202020')
+            assert(plain.variant == nil)
+
+            local primary = riced._defaults(iced.button('b', iced.variant('primary')))
+            assert(primary.padding == 8)
+            assert(primary.style.background == '#5865f2')
+            assert(primary.style.text_color == '#ffffff')
+            assert(primary.variant == nil)
+
+            local extra = riced._defaults(iced.button('c', iced.variant('primary', {
+                padding = 2,
+                style = {text_color = '#ffd166'},
+            })))
+            assert(extra.padding == 2)
+            assert(extra.style.background == '#5865f2' and extra.style.text_color == '#ffd166')
+
+            local direct = riced._defaults(iced.button('d', {variant = 'primary'}))
+            assert(direct.style.background == '#5865f2')
+        "##,
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[test]
+    fn unknown_variants_and_malformed_maps_are_rejected() {
+        let lua = mlua::Lua::new();
+        load(&lua).unwrap();
+        lua.load(
+            r##"
+            iced.stylesheet({
+                button = {default = {padding = 4}, primary = {padding = 6}},
+                text = {size = 12},
+            })
+        "##,
+        )
+        .exec()
+        .unwrap();
+
+        let error = lua
+            .load("return riced._defaults(iced.button('a', iced.variant('missing')))")
+            .eval::<mlua::Table>()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown variant \"missing\""), "{error}");
+
+        for source in [
+            "iced.variant('')",
+            "iced.variant(false)",
+            "iced.variant('primary', false)",
+            "iced.variant('primary', {variant = 'other'})",
+        ] {
+            assert!(lua.load(source).exec().is_err(), "{source}");
+        }
+        for source in [
+            "iced.stylesheet({button = {default = false}})",
+            "iced.stylesheet({button = {default = {}, [''] = {}}})",
+            "iced.stylesheet({button = {default = {}, primary = false}})",
+            "iced.stylesheet({button = false})",
+        ] {
+            assert!(lua.load(source).exec().is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn flat_stylesheet_entries_clear_variants_and_variants_survive_override() {
+        let lua = mlua::Lua::new();
+        load(&lua).unwrap();
+        lua.load(
+            r##"
+            iced.overrides(iced.button, {padding = 1})
+            iced.stylesheet({button = {default = {}, bold = {padding = 9}}})
+            assert(riced._defaults(iced.button('a')).padding == nil)
+            assert(riced._defaults(iced.button('b', iced.variant('bold'))).padding == 9)
+
+            -- A flat entry replaces the whole widget entry, variants included.
+            iced.stylesheet({button = {padding = 3}})
+            assert(riced._defaults(iced.button('c')).padding == 3)
+            local ok = pcall(function()
+                return riced._defaults(iced.button('d', iced.variant('bold')))
+            end)
+            assert(not ok)
+
+            -- iced.overrides only changes the base; variants keep merging over it.
+            iced.stylesheet({button = {default = {padding = 4}, slim = {padding = 1}}})
+            iced.overrides(iced.button, {padding = 10})
+            assert(riced._defaults(iced.button('e')).padding == 10)
+            assert(riced._defaults(iced.button('f', iced.variant('slim'))).padding == 1)
+
+            -- Constructor keys work like kind strings.
+            iced.stylesheet({[iced.text] = {default = {}, dim = {color = '#808080'}}})
+            assert(riced._defaults(iced.text('x', iced.variant('dim'))).color == '#808080')
+
+            -- The resolver must not leak into the Lua globals.
+            assert(rawget(_G, 'resolve') == nil)
+        "##,
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[test]
     fn opacity_sets_the_alpha_channel() {
         let lua = mlua::Lua::new();
         load(&lua).unwrap();

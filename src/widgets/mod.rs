@@ -1747,6 +1747,38 @@ mod tests {
     }
 
     #[test]
+    fn variant_selection_builds_without_leaking_the_selector() {
+        let lua = mlua::Lua::new();
+        crate::lua::load(&lua).unwrap();
+        let ctx = Ctx::new(0).with_lua(lua.clone());
+        lua.load(
+            r##"
+            iced.stylesheet({
+                button = {
+                    default = {padding = 4, style = {background = '#202020'}},
+                    primary = {style = {background = '#5865f2'}},
+                },
+            })
+        "##,
+        )
+        .exec()
+        .unwrap();
+
+        // `variant` must be consumed before Rust key validation sees the props.
+        let node: Table = lua
+            .load("return iced.button('save', iced.variant('primary'))")
+            .eval()
+            .unwrap();
+        assert!(element(node, &ctx).is_ok());
+
+        let node: Table = lua
+            .load("return iced.button('save', iced.variant('primary', {padding = 6}))")
+            .eval()
+            .unwrap();
+        assert!(element(node, &ctx).is_ok());
+    }
+
+    #[test]
     fn builds_images_and_validates_their_props() {
         let lua = mlua::Lua::new();
         for source in [
