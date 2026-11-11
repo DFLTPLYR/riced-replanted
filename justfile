@@ -53,6 +53,9 @@ uninstall:
 stubs profile="replanted":
     riced stubs
 
+# Build and install every extension into the test profile
+build-extensions: extension-system extension-wayland extension-dbus extension-themeagen extension-lucide extension-applications extension-openmeteo
+
 # Build the example system extension and install it into the test profile
 extension-system:
     {{nix}} cargo build --release -p riced-extension-system
