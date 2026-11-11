@@ -9,5 +9,5 @@ path = "src/main.rs"
 
 [dependencies]
 lucide-icons = { version = "1", features = ["serde"] }
-riced-extension-sdk = { path = "../../crates/riced-extension-sdk", features = ["process"] }
+riced-extension-sdk = { path = "../../crates/riced-extension-sdk" }
 serde_json = "1"

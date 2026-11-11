@@ -8,6 +8,6 @@ name = "riced-dbus"
 path = "src/main.rs"
 
 [dependencies]
-riced-extension-sdk = { path = "../../crates/riced-extension-sdk", features = ["process"] }
+riced-extension-sdk = { path = "../../crates/riced-extension-sdk" }
 serde_json = "1"
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
