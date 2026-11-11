@@ -53,49 +53,55 @@ uninstall:
 stubs profile="replanted":
     riced stubs
 
-# Build and install every extension into the test profile
-build-extensions: extension-system extension-wayland extension-dbus extension-themeagen extension-lucide extension-applications extension-openmeteo
+# Build and install every extension into the default profile
+build-extensions:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    output="${XDG_CONFIG_HOME:-$HOME/.config}/riced/extensions"
+    for extension in applications dbus lucide openmeteo system themeagen wayland; do
+        {{nix}} riced extension build "extensions/$extension" -o "$output/$extension"
+    done
 
-# Build the example system extension and install it into the test profile
+# Build the example system extension and install it into the default profile
 extension-system:
     {{nix}} cargo build --release -p riced-extension-system
-    install -Dm755 target/release/riced-system "{{ home_directory() }}/.config/riced/replanted/extensions/system/riced-system"
-    install -Dm644 extensions/system/stub.lua "{{ home_directory() }}/.config/riced/replanted/extensions/system/stub.lua"
+    install -Dm755 target/release/riced-system "{{ home_directory() }}/.config/riced/extensions/system/riced-system"
+    install -Dm644 extensions/system/stub.lua "{{ home_directory() }}/.config/riced/extensions/system/stub.lua"
 
-# Build the generic Wayland extension and install it into the test profile
+# Build the generic Wayland extension and install it into the default profile
 extension-wayland:
     {{nix}} cargo build --release -p riced-extension-wayland
-    install -Dm755 target/release/riced-wayland "{{ home_directory() }}/.config/riced/replanted/extensions/wayland/riced-wayland"
-    install -Dm644 extensions/wayland/stub.lua "{{ home_directory() }}/.config/riced/replanted/extensions/wayland/stub.lua"
+    install -Dm755 target/release/riced-wayland "{{ home_directory() }}/.config/riced/extensions/wayland/riced-wayland"
+    install -Dm644 extensions/wayland/stub.lua "{{ home_directory() }}/.config/riced/extensions/wayland/stub.lua"
 
-# Build the D-Bus tray/notification extension and install it into the test profile
+# Build the D-Bus tray/notification extension and install it into the default profile
 extension-dbus:
     {{nix}} cargo build --release -p riced-extension-dbus
-    install -Dm755 target/release/riced-dbus "{{ home_directory() }}/.config/riced/replanted/extensions/dbus/riced-dbus"
-    install -Dm644 extensions/dbus/stub.lua "{{ home_directory() }}/.config/riced/replanted/extensions/dbus/stub.lua"
+    install -Dm755 target/release/riced-dbus "{{ home_directory() }}/.config/riced/extensions/dbus/riced-dbus"
+    install -Dm644 extensions/dbus/stub.lua "{{ home_directory() }}/.config/riced/extensions/dbus/stub.lua"
 
-# Build the Material You theme generator and install it into the test profile
+# Build the Material You theme generator and install it into the default profile
 extension-themeagen:
     {{nix}} cargo build --release -p riced-extension-themeagen
-    install -Dm755 target/release/riced-themeagen "{{ home_directory() }}/.config/riced/replanted/extensions/themeagen/riced-themeagen"
-    install -Dm644 extensions/themeagen/stub.lua "{{ home_directory() }}/.config/riced/replanted/extensions/themeagen/stub.lua"
+    install -Dm755 target/release/riced-themeagen "{{ home_directory() }}/.config/riced/extensions/themeagen/riced-themeagen"
+    install -Dm644 extensions/themeagen/stub.lua "{{ home_directory() }}/.config/riced/extensions/themeagen/stub.lua"
 
-# Build the Lucide icon extension and install it into the test profile
+# Build the Lucide icon extension and install it into the default profile
 extension-lucide:
     {{nix}} cargo build --release -p riced-extension-lucide
-    install -Dm755 target/release/riced-lucide "{{ home_directory() }}/.config/riced/replanted/extensions/lucide/riced-lucide"
-    install -Dm644 extensions/lucide/lucide.lua "{{ home_directory() }}/.config/riced/replanted/extensions/lucide/lucide.lua"
-    install -Dm644 extensions/lucide/stub.lua "{{ home_directory() }}/.config/riced/replanted/extensions/lucide/stub.lua"
+    install -Dm755 target/release/riced-lucide "{{ home_directory() }}/.config/riced/extensions/lucide/riced-lucide"
+    install -Dm644 extensions/lucide/lucide.lua "{{ home_directory() }}/.config/riced/extensions/lucide/lucide.lua"
+    install -Dm644 extensions/lucide/stub.lua "{{ home_directory() }}/.config/riced/extensions/lucide/stub.lua"
 
-# Build the application entries extension and install it into the test profile
+# Build the application entries extension and install it into the default profile
 extension-applications:
     {{nix}} cargo build --release -p riced-extension-applications
-    install -Dm755 target/release/riced-applications "{{ home_directory() }}/.config/riced/replanted/extensions/applications/riced-applications"
-    install -Dm644 extensions/applications/stub.lua "{{ home_directory() }}/.config/riced/replanted/extensions/applications/stub.lua"
+    install -Dm755 target/release/riced-applications "{{ home_directory() }}/.config/riced/extensions/applications/riced-applications"
+    install -Dm644 extensions/applications/stub.lua "{{ home_directory() }}/.config/riced/extensions/applications/stub.lua"
 
 # Build the Open-Meteo weather extension and its Lua widget
 extension-openmeteo:
     {{nix}} cargo build --release -p riced-extension-openmeteo
-    install -Dm755 target/release/riced-openmeteo "{{ home_directory() }}/.config/riced/replanted/extensions/openmeteo/riced-openmeteo"
-    install -Dm644 extensions/openmeteo/openmeteo.lua "{{ home_directory() }}/.config/riced/replanted/extensions/openmeteo/openmeteo.lua"
-    install -Dm644 extensions/openmeteo/stub.lua "{{ home_directory() }}/.config/riced/replanted/extensions/openmeteo/stub.lua"
+    install -Dm755 target/release/riced-openmeteo "{{ home_directory() }}/.config/riced/extensions/openmeteo/riced-openmeteo"
+    install -Dm644 extensions/openmeteo/openmeteo.lua "{{ home_directory() }}/.config/riced/extensions/openmeteo/openmeteo.lua"
+    install -Dm644 extensions/openmeteo/stub.lua "{{ home_directory() }}/.config/riced/extensions/openmeteo/stub.lua"
