@@ -7,7 +7,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, IsTerminal, Read, Seek, SeekFrom, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Mutex,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -122,19 +122,20 @@ pub fn show(profile: &str, clear: bool) -> io::Result<()> {
     let path = crate::ipc::runtime_dir()?
         .join("logs")
         .join(format!("{profile}.log"));
-    let mut file = match OpenOptions::new().read(true).write(clear).open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
     if clear {
+        let file = match OpenOptions::new().write(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
         file.lock()?;
         return file.set_len(0);
     }
-    file.lock_shared()?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-    drop(file);
+    let contents = match read_log(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
     let mut stdout = io::stdout().lock();
     for line in contents.lines() {
         // Stored lines start with an epoch-millisecond stamp; the CLI shows the
@@ -148,6 +149,15 @@ pub fn show(profile: &str, clear: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// Reads the log under a shared lock and releases it before the caller prints.
+fn read_log(path: &Path) -> io::Result<String> {
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    file.lock_shared()?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
+}
+
 /// Drops expired lines from the background prune thread.
 fn prune() {
     let mut sink = SINK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -157,11 +167,17 @@ fn prune() {
     let Some(retention) = sink.retention else {
         return;
     };
-    if sink.last_prune.elapsed() < Duration::from_secs(1) {
+    if sink.last_prune.elapsed() < prune_interval(retention) {
         return;
     }
     sink.last_prune = Instant::now();
     let _ = prune_sink(sink, retention);
+}
+
+/// Rewriting the whole file costs more than the lines it removes, so prune
+/// every quarter of the retention window, clamped to 1-30 seconds.
+fn prune_interval(retention: Duration) -> Duration {
+    (retention / 4).clamp(Duration::from_secs(1), Duration::from_secs(30))
 }
 
 fn write_line(sink: &mut Sink, line: &str) {
@@ -290,5 +306,32 @@ mod tests {
     fn pruning_keeps_recent_lines_and_drops_malformed_ones() {
         let contents = "9990 old\n9995 recent\nnot a log line\n";
         assert_eq!(prune_lines(contents, 9992), "9995 recent\n");
+    }
+
+    #[test]
+    fn reading_the_log_releases_the_lock_before_printing() {
+        let mut sink = test_sink("read-lock");
+        writeln!(sink.file, "0 [lua]: kept").unwrap();
+        assert_eq!(read_log(&sink.path).unwrap(), "0 [lua]: kept\n");
+        // A leaking shared lock would keep this exclusive lock from being taken.
+        let exclusive = OpenOptions::new().write(true).open(&sink.path).unwrap();
+        exclusive.try_lock().unwrap();
+        fs::remove_file(&sink.path).unwrap();
+    }
+
+    #[test]
+    fn prune_interval_tracks_retention() {
+        assert_eq!(
+            prune_interval(Duration::from_secs(4)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            prune_interval(Duration::from_secs(120)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            prune_interval(Duration::from_secs(3600)),
+            Duration::from_secs(30)
+        );
     }
 }
