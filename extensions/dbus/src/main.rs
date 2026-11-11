@@ -49,6 +49,7 @@ const MAX_TEXT: usize = 1024;
 const MAX_NAME: usize = 256;
 const MAX_ACTIONS: usize = 16;
 const MAX_NOTIFICATIONS: usize = 64;
+const MAX_TRAY_ITEMS: usize = 64;
 const MAX_MENU_DEPTH: usize = 8;
 const MAX_MENU_ITEMS: usize = 128;
 const MAX_MENU_TEXT: usize = 128;
@@ -1163,6 +1164,17 @@ fn parse_registration(service: &str, sender: Option<&str>) -> (String, String) {
     (service.to_owned(), "/StatusNotifierItem".to_owned())
 }
 
+/// Stores a tray registration unless the cap is reached. Re-registering an
+/// existing key always succeeds.
+fn add_tray_item(model: &mut Model, key: String, item: TrayItem) -> bool {
+    if !model.tray.contains_key(&key) && model.tray.len() >= MAX_TRAY_ITEMS {
+        return false;
+    }
+    model.tray.insert(key, item);
+    model.dirty = true;
+    true
+}
+
 struct Watcher {
     model: Arc<Mutex<Model>>,
 }
@@ -1183,15 +1195,21 @@ impl Watcher {
         let key = format!("{bus}{path}");
         {
             let mut model = self.model.lock().unwrap();
-            model.tray.insert(
+            if !add_tray_item(
+                &mut model,
                 key.clone(),
                 TrayItem {
                     bus,
                     path,
                     ..TrayItem::default()
                 },
-            );
-            model.dirty = true;
+            ) {
+                // Refuse before the registered signal so clients never believe
+                // in an item the host did not store.
+                return Err(zbus::fdo::Error::LimitsExceeded(
+                    "too many tray items".into(),
+                ));
+            }
         }
         Self::status_notifier_item_registered(&emitter, &key).await?;
         Ok(())
@@ -1377,6 +1395,30 @@ mod tests {
         assert_eq!(store["connected"], false);
         assert_eq!(store["tray"], json!([]));
         assert_eq!(store["tray_menu"], Value::Null);
+    }
+
+    #[test]
+    fn tray_registrations_are_capped() {
+        let mut model = Model::default();
+        for index in 0..MAX_TRAY_ITEMS {
+            assert!(add_tray_item(
+                &mut model,
+                format!(":1.{index}/StatusNotifierItem"),
+                TrayItem::default()
+            ));
+        }
+        assert!(!add_tray_item(
+            &mut model,
+            ":1.extra/StatusNotifierItem".into(),
+            TrayItem::default()
+        ));
+        assert_eq!(model.tray.len(), MAX_TRAY_ITEMS);
+        // Re-registering a known item keeps working at the cap.
+        assert!(add_tray_item(
+            &mut model,
+            ":1.0/StatusNotifierItem".into(),
+            TrayItem::default()
+        ));
     }
 
     #[test]
