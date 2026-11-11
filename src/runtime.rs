@@ -448,9 +448,18 @@ fn find_widget(
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
+    let profile_root = shell.parent().unwrap_or(Path::new(""));
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            // The default profile sits beside named profiles. Anything with a
+            // shell or an extensions directory is another profile, even if it
+            // was only created by installing extensions into it.
+            if directory == profile_root
+                && (path.join("shell.lua").is_file() || path.join("extensions").is_dir())
+            {
+                continue;
+            }
             find_widget(&path, shell, name, found, visited);
         } else if path != shell
             && path.extension().is_some_and(|extension| extension == "lua")
@@ -3068,6 +3077,26 @@ mod tests {
                 "{name}: {found:?}"
             );
         }
+    }
+
+    #[test]
+    fn widget_discovery_skips_named_profiles_beside_the_default_shell() {
+        let profile = Profile::new(&[
+            ("shell.lua", ""),
+            ("extensions/lucide/lucide.lua", "return {}"),
+            ("replanted/extensions/lucide/lucide.lua", "return {}"),
+            ("other/shell.lua", ""),
+            ("other/extensions/lucide/lucide.lua", "return {}"),
+        ]);
+        let mut found = Vec::new();
+        find_widget(
+            &profile.0,
+            &profile.shell(),
+            "lucide",
+            &mut found,
+            &mut HashSet::new(),
+        );
+        assert_eq!(found, vec![profile.0.join("extensions/lucide/lucide.lua")]);
     }
 
     #[test]
