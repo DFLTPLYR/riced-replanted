@@ -264,23 +264,31 @@ fn build_extension(
         let _ = std::fs::remove_file(&temporary);
         return Err(error.into());
     }
-    for entry in std::fs::read_dir(&path)? {
+    install_lua(&path, &output)?;
+    Ok(())
+}
+
+/// Copies the package's Lua companions into `output`, skipping an in-place install.
+fn install_lua(package: &Path, output: &Path) -> std::io::Result<()> {
+    if std::fs::canonicalize(package)? == std::fs::canonicalize(output)? {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(package)? {
         let entry = entry?;
         let source = entry.path();
-        if source.is_file()
-            && source
+        if !source.is_file()
+            || source
                 .extension()
-                .is_some_and(|extension| extension == "lua")
+                .is_none_or(|extension| extension != "lua")
         {
-            std::fs::copy(&source, output.join(source.file_name().unwrap()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(
-                    output.join(source.file_name().unwrap()),
-                    std::fs::Permissions::from_mode(0o644),
-                )?;
-            }
+            continue;
+        }
+        let destination = output.join(source.file_name().unwrap());
+        std::fs::copy(&source, &destination)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o644))?;
         }
     }
     Ok(())
@@ -420,5 +428,17 @@ mod tests {
     fn cli_definition_is_consistent() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn in_place_extension_build_keeps_lua_sources() {
+        let dir = std::env::temp_dir().join(format!("riced-install-lua-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("shell.lua");
+        std::fs::write(&script, "return 1\n").unwrap();
+        install_lua(&dir, &dir).unwrap();
+        assert_eq!(std::fs::read_to_string(&script).unwrap(), "return 1\n");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
