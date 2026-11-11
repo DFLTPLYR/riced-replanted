@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
         net::{UnixListener, UnixStream},
@@ -23,6 +23,9 @@ use riced_extension_sdk::protocol::{MAX_LINE, MethodSpec, ToHost, ToPlugin, VERS
 use serde_json::Value as Json;
 
 const PENDING_MAX: usize = 64;
+/// Store field names come from extensions and are short; a longer one cannot be
+/// subscribed to without risking an oversized wire line.
+const MAX_FIELD: usize = 256;
 const QUEUE: usize = 16;
 const POLL_MAX: usize = 256;
 const SCAN_EVERY: Duration = Duration::from_secs(1);
@@ -408,7 +411,7 @@ impl Plugins {
                 return Ok(Value::Nil);
             };
             let key = key.to_str()?.to_owned();
-            if key.is_empty() || key.starts_with("__") {
+            if key.is_empty() || key.len() > MAX_FIELD || key.starts_with("__") {
                 return Ok(Value::Nil);
             }
             let mut requested = requested.lock().unwrap();
@@ -624,6 +627,9 @@ fn send(writer: &SyncSender<Vec<u8>>, message: &ToPlugin) -> bool {
         return false;
     };
     line.push(b'\n');
+    if line.len() > MAX_LINE {
+        return false;
+    }
     writer.try_send(line).is_ok()
 }
 
@@ -938,10 +944,9 @@ impl Supervisor {
                         .name(format!("riced-log-{name}"))
                         .stack_size(128 * 1024)
                         .spawn(move || {
-                            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                                let (target, message) = extension_line(&line);
+                            forward_stderr(BufReader::new(stderr), |target, message| {
                                 crate::logs::external(target, message);
-                            }
+                            });
                         });
                 }
                 log::info!(target: "extension.started", "started extension {}", path.display());
@@ -965,6 +970,24 @@ impl Supervisor {
             }
         }
         self.children.clear();
+    }
+}
+
+fn forward_stderr(mut reader: impl BufRead, mut forward: impl FnMut(&str, &str)) {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        // A line over the protocol limit is forwarded as several bounded records.
+        match (&mut reader)
+            .take(MAX_LINE as u64)
+            .read_until(b'\n', &mut line)
+        {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let line = String::from_utf8_lossy(&line);
+        let (target, message) = extension_line(line.trim_end_matches(['\r', '\n']));
+        forward(target, message);
     }
 }
 
@@ -1892,5 +1915,63 @@ mod tests {
             ("dbus.connected", "connected")
         );
         assert_eq!(extension_line("raw warning"), ("extension", "raw warning"));
+    }
+
+    #[test]
+    fn stderr_forwarding_continues_after_invalid_utf8() {
+        let mut lines = Vec::new();
+        forward_stderr(&b"first\n\xff bad\nlast\n"[..], |target, message| {
+            lines.push((target.to_owned(), message.to_owned()));
+        });
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], ("extension".into(), "first".into()));
+        assert!(lines[1].1.contains("bad"));
+        assert_eq!(lines[2], ("extension".into(), "last".into()));
+    }
+
+    #[test]
+    fn stderr_lines_are_bounded() {
+        let mut input = vec![b'x'; MAX_LINE + 10];
+        input.push(b'\n');
+        input.extend_from_slice(b"short\n");
+        let mut lines = Vec::new();
+        forward_stderr(&input[..], |_, message| lines.push(message.to_owned()));
+        assert_eq!(lines.len(), 3);
+        assert!(lines.iter().all(|line| line.len() <= MAX_LINE));
+        assert_eq!(lines.last().unwrap(), "short");
+    }
+
+    #[test]
+    fn oversized_messages_are_not_sent() {
+        let (writer, calls) = mpsc::sync_channel(1);
+        assert!(!send(
+            &writer,
+            &ToPlugin::Subscribe {
+                fields: vec!["x".repeat(MAX_LINE)],
+            }
+        ));
+        assert!(calls.try_recv().is_err());
+    }
+
+    #[test]
+    fn oversized_store_fields_are_ignored() {
+        let (tx, mut plugins, lua) = setup();
+        let calls = register(&tx, &[]);
+        plugins.poll(&lua).unwrap();
+        let key = "x".repeat(MAX_FIELD + 1);
+        lua.load(format!("return riced.plugins('demo').store[\"{key}\"]"))
+            .exec()
+            .unwrap();
+        assert!(calls.try_recv().is_err());
+        assert!(
+            plugins
+                .handles
+                .get("demo")
+                .unwrap()
+                .requested
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
     }
 }
