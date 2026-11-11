@@ -13,6 +13,9 @@ use crate::runtime::Message;
 
 type Key = (Option<window::Id>, String);
 
+/// Upper bound on measured widgets kept per daemon, mirroring the widget state maps.
+const LIMIT: usize = 256;
+
 thread_local! {
     static BOUNDS: RefCell<HashMap<Key, Rectangle>> = RefCell::new(HashMap::new());
     static LATEST: RefCell<HashMap<String, (Option<window::Id>, Rectangle)>> =
@@ -70,9 +73,19 @@ fn bounds(id: &str) -> Option<Rectangle> {
 }
 
 fn record(id: &str, window: Option<window::Id>, bounds: Rectangle) {
-    let changed = BOUNDS
-        .with_borrow_mut(|stored| stored.insert((window, id.to_owned()), bounds) != Some(bounds));
-    LATEST.with_borrow_mut(|stored| stored.insert(id.to_owned(), (window, bounds)));
+    let key = (window, id.to_owned());
+    let changed = BOUNDS.with_borrow_mut(|stored| {
+        if stored.len() >= LIMIT && !stored.contains_key(&key) {
+            stored.clear();
+        }
+        stored.insert(key, bounds) != Some(bounds)
+    });
+    LATEST.with_borrow_mut(|stored| {
+        if stored.len() >= LIMIT && !stored.contains_key(id) {
+            stored.clear();
+        }
+        stored.insert(id.to_owned(), (window, bounds));
+    });
     if changed {
         CHANGED.set(true);
     }
@@ -267,5 +280,15 @@ mod tests {
         assert_eq!(with_window(Some(owner), || bounds(&id)), Some(rect));
         forget_window(owner);
         assert_eq!(with_window(Some(other), || bounds(&id)), None);
+    }
+
+    #[test]
+    fn bounds_maps_stay_bounded() {
+        let rect = Rectangle::new(Point::new(0.0, 0.0), Size::new(1.0, 1.0));
+        for index in 0..LIMIT + 8 {
+            record_for_test(&format!("bounded-{index}"), rect);
+        }
+        BOUNDS.with_borrow(|bounds| assert!(bounds.len() <= LIMIT));
+        LATEST.with_borrow(|bounds| assert!(bounds.len() <= LIMIT));
     }
 }
