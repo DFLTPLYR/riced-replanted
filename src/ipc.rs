@@ -1,6 +1,7 @@
 use std::{
-    env, fs, io,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    env, fs,
+    io::{self, Write},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process,
@@ -156,8 +157,15 @@ fn queue_at(dir: &Path, command: &str, args: &[String]) -> io::Result<()> {
     );
     let temp = dir.join(format!("{name}.tmp"));
     let line = serde_json::json!({ "command": command, "args": args });
-    let result = fs::write(&temp, serde_json::to_vec(&line)?)
-        .and_then(|()| fs::rename(&temp, dir.join(name)));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)?;
+        file.write_all(&serde_json::to_vec(&line)?)?;
+        fs::rename(&temp, dir.join(name))
+    })();
     if result.is_err() {
         let _ = fs::remove_file(temp);
     }
@@ -218,6 +226,15 @@ mod tests {
         )
         .unwrap();
         queue_at(&dir, "second", &[]).unwrap();
+
+        for entry in fs::read_dir(&dir).unwrap().flatten() {
+            if entry.path().extension().is_some_and(|ext| ext == "ready") {
+                assert_eq!(
+                    entry.metadata().unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
 
         assert_eq!(
             take_from(&dir),
