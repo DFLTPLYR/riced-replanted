@@ -1974,6 +1974,7 @@ impl App {
             widgets::forget_generation(candidate.generation);
             return Err(error);
         }
+        widgets::free_evicted(candidate.generation);
         candidate
             .pending
             .splice(0..0, std::mem::take(&mut self.pending));

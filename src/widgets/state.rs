@@ -3,7 +3,8 @@
 //! Iced recreates elements every render, so stateful widgets need a stable
 //! allocation. Entries are keyed by Lua generation and widget id; a shell
 //! reload gets a fresh generation. Retired generations are kept for one reload
-//! so iced can drop the old element tree, then freed.
+//! so iced can drop the old element tree, then freed. Entries evicted at the
+//! id limit stay until the generation that may still reference them is replaced.
 
 use std::{
     cell::{Cell, RefCell},
@@ -37,6 +38,7 @@ thread_local! {
     static PANES: RefCell<HashMap<(u64, String, u8, usize), PaneState>> =
         RefCell::new(HashMap::new());
     static RETIRED: RefCell<Vec<Retired>> = const { RefCell::new(Vec::new()) };
+    static EVICTED: RefCell<Vec<(u64, Retired)>> = const { RefCell::new(Vec::new()) };
     static MARKDOWN: RefCell<HashMap<String, Rc<Vec<iced::widget::markdown::Item>>>> =
         RefCell::new(HashMap::new());
     static LISTS: RefCell<HashMap<ListKey, ListEntry>> = RefCell::new(HashMap::new());
@@ -92,6 +94,28 @@ pub(crate) fn forget_generation(generation: u64) {
 /// generation so iced has replaced the element tree that referenced it.
 pub(crate) fn free_retired() {
     RETIRED.with_borrow_mut(Vec::clear);
+}
+
+/// Drops state evicted in older generations. Call after a reload has been
+/// accepted; evictions from the new generation may still be referenced by the
+/// tree that was just built.
+pub(crate) fn free_evicted(generation: u64) {
+    EVICTED.with_borrow_mut(|evicted| evicted.retain(|(owner, _)| *owner >= generation));
+}
+
+/// Evicts one entry instead of the whole map, which would reset every live
+/// widget in the view.
+fn retire_one<K: std::hash::Hash + Eq + Clone, V>(
+    generation: u64,
+    map: &mut HashMap<K, V>,
+    retire: impl FnOnce(V) -> Retired,
+) {
+    let Some(key) = map.keys().next().cloned() else {
+        return;
+    };
+    if let Some(value) = map.remove(&key) {
+        EVICTED.with_borrow_mut(|evicted| evicted.push((generation, retire(value))));
+    }
 }
 
 fn static_ref<T>(value: &T) -> &'static T {
@@ -163,12 +187,8 @@ pub(super) fn editor(
         }
         let cell = Rc::new(RefCell::new(text_editor::Content::with_text(value)));
         if editors.len() >= LIMIT {
-            RETIRED.with_borrow_mut(|retired| {
-                retired.extend(
-                    editors
-                        .drain()
-                        .map(|(_, state)| Retired::Editor(state.cell)),
-                );
+            retire_one(generation, &mut editors, |state| {
+                Retired::Editor(state.cell)
             });
         }
         editors.insert(
@@ -224,9 +244,7 @@ pub(super) fn combo(
         }
         let state = Rc::new(combo_box::State::new(options.to_vec()));
         if combos.len() >= LIMIT && !combos.contains_key(&key) {
-            RETIRED.with_borrow_mut(|retired| {
-                retired.extend(combos.drain().map(|(_, state)| Retired::Combo(state)));
-            });
+            retire_one(generation, &mut combos, Retired::Combo);
         }
         if let Some(old) = combos.insert(key, Rc::clone(&state)) {
             RETIRED.with_borrow_mut(|retired| retired.push(Retired::Combo(old)));
@@ -386,9 +404,7 @@ pub(super) fn panes(
         }
         let state = Rc::new(RefCell::new(state));
         if panes.len() >= LIMIT && !panes.contains_key(&key) {
-            RETIRED.with_borrow_mut(|retired| {
-                retired.extend(panes.drain().map(|(_, state)| Retired::Pane(state)));
-            });
+            retire_one(generation, &mut panes, Retired::Pane);
         }
         if let Some(old) = panes.insert(key, Rc::clone(&state)) {
             RETIRED.with_borrow_mut(|retired| retired.push(Retired::Pane(old)));
@@ -537,6 +553,26 @@ mod tests {
     }
 
     #[test]
+    fn eviction_at_the_state_limit_keeps_the_rest_of_the_map() {
+        let generation = 995;
+        EDITORS.with_borrow_mut(HashMap::clear);
+        free_retired();
+        free_evicted(u64::MAX);
+        for index in 0..LIMIT {
+            editor(generation, &format!("editor-{index}"), "");
+        }
+        editor(generation, "overflow", "");
+        assert_eq!(
+            EDITORS.with_borrow(|editors| editors.keys().filter(|key| key.0 == generation).count()),
+            LIMIT
+        );
+        assert_eq!(EVICTED.with_borrow(|evicted| evicted.len()), 1);
+        forget_generation(generation);
+        free_retired();
+        free_evicted(u64::MAX);
+    }
+
+    #[test]
     fn stateful_widget_maps_are_bounded() {
         let generation = 987_654_321;
         for index in 0..LIMIT + 8 {
@@ -578,5 +614,6 @@ mod tests {
                 <= LIMIT
         );
         free_retired();
+        free_evicted(u64::MAX);
     }
 }
