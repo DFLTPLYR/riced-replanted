@@ -61,7 +61,7 @@ impl Kind {
             Self::Toml => toml::from_str::<toml::Value>(contents)
                 .map_err(|error| mlua::Error::runtime(format!("invalid TOML: {error}")))
                 .and_then(|value| {
-                    serde_json::to_value(value)
+                    toml_json(value)
                         .map_err(|error| mlua::Error::runtime(format!("invalid TOML: {error}")))
                 }),
         }
@@ -74,6 +74,26 @@ impl Kind {
             Self::Toml => toml::to_string_pretty(value)
                 .map_err(|error| mlua::Error::runtime(format!("cannot encode TOML: {error}"))),
         }
+    }
+}
+
+/// Converts TOML to the JSON-shaped value Lua sees. Datetimes become strings:
+/// serde would otherwise turn them into a `$__toml_private_datetime` table
+/// that cannot be written back as TOML.
+fn toml_json(value: toml::Value) -> serde_json::Result<Json> {
+    match value {
+        toml::Value::Datetime(datetime) => Ok(Json::String(datetime.to_string())),
+        toml::Value::Array(values) => values
+            .into_iter()
+            .map(toml_json)
+            .collect::<serde_json::Result<Vec<_>>>()
+            .map(Json::Array),
+        toml::Value::Table(table) => table
+            .into_iter()
+            .map(|(key, value)| toml_json(value).map(|value| (key, value)))
+            .collect::<serde_json::Result<serde_json::Map<String, Json>>>()
+            .map(Json::Object),
+        value => serde_json::to_value(value),
     }
 }
 
@@ -314,6 +334,35 @@ mod tests {
             std::fs::read_to_string(dir.join("nested/missing.json")).unwrap(),
             "{}"
         );
+    }
+
+    #[test]
+    fn toml_dates_load_as_strings_and_save_without_magic_keys() {
+        let (lua, dir) = setup("toml-datetime");
+        std::fs::write(
+            dir.join("data.toml"),
+            "created = 2024-01-02T03:04:05Z\nupdated = 2024-01-02\n",
+        )
+        .unwrap();
+        lua.load(
+            r#"
+            local loaded
+            local f = riced.file({
+                path = "data.toml",
+                onLoaded = function(_, data) loaded = data end,
+            })
+            assert(loaded.created == "2024-01-02T03:04:05Z")
+            assert(loaded.updated == "2024-01-02")
+            f.data.extra = true
+            assert(f:save())
+            "#,
+        )
+        .exec()
+        .unwrap();
+        let saved = std::fs::read_to_string(dir.join("data.toml")).unwrap();
+        assert!(!saved.contains("$__toml_private_datetime"));
+        assert!(saved.contains("created = \"2024-01-02T03:04:05Z\""));
+        assert!(saved.contains("updated = \"2024-01-02\""));
     }
 
     #[cfg(unix)]
