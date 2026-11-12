@@ -1821,11 +1821,14 @@ impl App {
                 mouse_payload(&self.lua, event)?
             }
             Message::Hover(generation) if *generation == self.generation => {
-                return Ok(self
-                    .popups
-                    .iter()
-                    .find(|popup| !popup.closed)
-                    .map_or(Scope::None, |popup| Scope::Window(popup.window)));
+                let mut open = self.popups.iter().filter(|popup| !popup.closed);
+                let first = open.next();
+                // Popup surfaces do not repaint on their own; refresh all of them.
+                return Ok(if open.next().is_some() {
+                    Scope::All
+                } else {
+                    first.map_or(Scope::None, |popup| Scope::Window(popup.window))
+                });
             }
             Message::Hover(..) => return Ok(Scope::None),
             Message::Frame(generation) if *generation == self.generation => {
@@ -3242,6 +3245,42 @@ mod tests {
         end
         return riced.daemon(app, 'test', app.update, app.view):run()
     "#;
+
+    #[test]
+    fn hover_refreshes_every_open_popup() {
+        let source = r#"
+            local app = {}
+            function app:update() end
+            function app:view()
+                return {
+                    iced.layer(iced.text('bar'), {
+                        id = 'bar',
+                        size = { width = 200, height = 30 },
+                        anchor = { 'top', 'left', 'right' },
+                    }),
+                    iced.popup(iced.text('one'), {
+                        id = 'one', parent = 'bar', width = 10, height = 10,
+                    }),
+                    iced.popup(iced.text('two'), {
+                        id = 'two', parent = 'bar', width = 10, height = 10,
+                    }),
+                }
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let mut app = load(source, Path::new("shell.lua")).unwrap();
+        app.reconcile_layers().unwrap();
+        assert_eq!(app.popups.len(), 2);
+        assert_eq!(
+            app.redraw(&Message::Hover(app.generation)).unwrap(),
+            Scope::All
+        );
+        app.popups[1].closed = true;
+        assert_eq!(
+            app.redraw(&Message::Hover(app.generation)).unwrap(),
+            Scope::Window(app.popups[0].window)
+        );
+    }
 
     #[test]
     fn popup_surfaces_open_reposition_and_close() {
