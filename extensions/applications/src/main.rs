@@ -111,10 +111,7 @@ fn command(app: &Application) -> Result<Vec<String>, String> {
             .ok()
             .filter(|terminal| !terminal.trim().is_empty())
             .unwrap_or_else(|| "x-terminal-emulator".to_owned());
-        let mut parts = terminal
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+        let mut parts = split_words(&terminal, true);
         if parts.is_empty() {
             return Err(format!(
                 "{} needs a terminal but TERMINAL is empty",
@@ -130,11 +127,20 @@ fn command(app: &Application) -> Result<Vec<String>, String> {
 
 /// Splits a desktop `Exec` value without a shell and expands field codes.
 fn exec_arguments(exec: &str, app: &Application) -> Vec<String> {
-    let mut argv = Vec::new();
+    split_words(exec, false)
+        .into_iter()
+        .filter_map(|word| expand_field_codes(&word, app))
+        .collect()
+}
+
+/// Splits on whitespace, honouring double quotes and backslash escapes.
+/// `$TERMINAL` also accepts single quotes so options can contain spaces.
+fn split_words(value: &str, single_quotes: bool) -> Vec<String> {
+    let mut words = Vec::new();
     let mut token = String::new();
     let mut quoted = false;
     let mut started = false;
-    let mut chars = exec.chars().peekable();
+    let mut chars = value.chars();
     while let Some(character) = chars.next() {
         match character {
             '\\' => {
@@ -147,38 +153,16 @@ fn exec_arguments(exec: &str, app: &Application) -> Vec<String> {
                 quoted = !quoted;
                 started = true;
             }
+            '\'' if single_quotes => {
+                quoted = !quoted;
+                started = true;
+            }
             character if character.is_whitespace() && !quoted => {
                 if started {
-                    argv.push(std::mem::take(&mut token));
+                    words.push(std::mem::take(&mut token));
                     started = false;
                 }
             }
-            '%' => match chars.next() {
-                Some('%') => {
-                    token.push('%');
-                    started = true;
-                }
-                // No icon override or file arguments: omit %i, %f, %F, %u, %U and
-                // the deprecated codes %d, %D, %n, %N, %v, %m, %V.
-                Some('i' | 'f' | 'F' | 'u' | 'U' | 'd' | 'D' | 'n' | 'N' | 'v' | 'm' | 'V') => {}
-                Some('c') => {
-                    token.push_str(&app.name);
-                    started = true;
-                }
-                Some('k') => {
-                    token.push_str(&app.path.to_string_lossy());
-                    started = true;
-                }
-                Some(other) => {
-                    token.push('%');
-                    token.push(other);
-                    started = true;
-                }
-                None => {
-                    token.push('%');
-                    started = true;
-                }
-            },
             character => {
                 token.push(character);
                 started = true;
@@ -186,9 +170,52 @@ fn exec_arguments(exec: &str, app: &Application) -> Vec<String> {
         }
     }
     if started {
-        argv.push(token);
+        words.push(token);
     }
-    argv
+    words
+}
+
+/// Expands one token's field codes. `None` means it only contained codes this
+/// launcher omits (file and icon arguments).
+fn expand_field_codes(word: &str, app: &Application) -> Option<String> {
+    let mut token = String::new();
+    let mut produced = word.is_empty();
+    let mut chars = word.chars();
+    while let Some(character) = chars.next() {
+        match character {
+            '%' => match chars.next() {
+                Some('%') => {
+                    token.push('%');
+                    produced = true;
+                }
+                // No icon override or file arguments: omit %i, %f, %F, %u, %U and
+                // the deprecated codes %d, %D, %n, %N, %v, %m, %V.
+                Some('i' | 'f' | 'F' | 'u' | 'U' | 'd' | 'D' | 'n' | 'N' | 'v' | 'm' | 'V') => {}
+                Some('c') => {
+                    token.push_str(&app.name);
+                    produced = true;
+                }
+                Some('k') => {
+                    token.push_str(&app.path.to_string_lossy());
+                    produced = true;
+                }
+                Some(other) => {
+                    token.push('%');
+                    token.push(other);
+                    produced = true;
+                }
+                None => {
+                    token.push('%');
+                    produced = true;
+                }
+            },
+            character => {
+                token.push(character);
+                produced = true;
+            }
+        }
+    }
+    produced.then_some(token)
 }
 
 fn scan() -> Vec<Application> {
@@ -369,6 +396,22 @@ mod tests {
             ["app", "--flag"]
         );
         assert!(exec_arguments("%f", &application("")).is_empty());
+    }
+
+    #[test]
+    fn splits_terminal_options_with_quotes() {
+        assert_eq!(
+            split_words("kitty --session 'my session'", true),
+            ["kitty", "--session", "my session"]
+        );
+        assert_eq!(
+            split_words(r#"kitty --session "my session""#, true),
+            ["kitty", "--session", "my session"]
+        );
+        assert_eq!(
+            split_words(r#"kitty -e "my session""#, false),
+            ["kitty", "-e", "my session"]
+        );
     }
 
     #[test]
