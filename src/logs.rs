@@ -160,18 +160,23 @@ fn read_log(path: &Path) -> io::Result<String> {
 
 /// Drops expired lines from the background prune thread.
 fn prune() {
-    let mut sink = SINK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let Some(sink) = sink.as_mut() else {
-        return;
+    let (path, retention) = {
+        let mut sink = SINK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(sink) = sink.as_mut() else {
+            return;
+        };
+        let Some(retention) = sink.retention else {
+            return;
+        };
+        if sink.last_prune.elapsed() < prune_interval(retention) {
+            return;
+        }
+        sink.last_prune = Instant::now();
+        (sink.path.clone(), retention)
     };
-    let Some(retention) = sink.retention else {
-        return;
-    };
-    if sink.last_prune.elapsed() < prune_interval(retention) {
-        return;
-    }
-    sink.last_prune = Instant::now();
-    let _ = prune_sink(sink, retention);
+    // The file lock in `prune_sink` serializes with `write_line` and the CLI,
+    // so SINK is only needed for the clock above.
+    let _ = prune_sink(&path, retention);
 }
 
 /// Rewriting the whole file costs more than the lines it removes, so prune
@@ -192,9 +197,9 @@ fn write_line(sink: &mut Sink, line: &str) {
     let _ = sink.file.unlock();
 }
 
-fn prune_sink(sink: &mut Sink, retention: Duration) -> io::Result<()> {
+fn prune_sink(path: &Path, retention: Duration) -> io::Result<()> {
     // The CLI runs in another process, so hold a file lock across read and rewrite.
-    let mut file = OpenOptions::new().read(true).write(true).open(&sink.path)?;
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     file.lock()?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
@@ -261,7 +266,7 @@ mod tests {
         let mut sink = test_sink("multiline");
         writeln!(sink.file, "0 expired").unwrap();
         write_line(&mut sink, "[lua]: first\nsecond line\n\nlast line\n");
-        prune_sink(&mut sink, Duration::from_secs(30)).unwrap();
+        prune_sink(&sink.path, Duration::from_secs(30)).unwrap();
         let contents = fs::read_to_string(&sink.path).unwrap();
         let lines: Vec<_> = contents.lines().collect();
         let stamp = lines[0].split_once(' ').unwrap().0;
@@ -288,7 +293,7 @@ mod tests {
             let sink = &mut sink;
             let prune = scope.spawn(move || {
                 started_tx.send(()).unwrap();
-                prune_sink(sink, Duration::from_secs(30)).unwrap();
+                prune_sink(&sink.path, Duration::from_secs(30)).unwrap();
                 done_tx.send(()).unwrap();
             });
             started_rx.recv().unwrap();
