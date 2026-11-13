@@ -138,7 +138,7 @@ fn exec_arguments(exec: &str, app: &Application) -> Vec<String> {
 fn split_words(value: &str, single_quotes: bool) -> Vec<String> {
     let mut words = Vec::new();
     let mut token = String::new();
-    let mut quoted = false;
+    let mut quote: Option<char> = None;
     let mut started = false;
     let mut chars = value.chars();
     while let Some(character) = chars.next() {
@@ -149,15 +149,15 @@ fn split_words(value: &str, single_quotes: bool) -> Vec<String> {
                     started = true;
                 }
             }
-            '"' => {
-                quoted = !quoted;
+            delimiter @ ('"' | '\'') if single_quotes || delimiter == '"' => {
+                match quote {
+                    Some(open) if open == delimiter => quote = None,
+                    Some(_) => token.push(delimiter),
+                    None => quote = Some(delimiter),
+                }
                 started = true;
             }
-            '\'' if single_quotes => {
-                quoted = !quoted;
-                started = true;
-            }
-            character if character.is_whitespace() && !quoted => {
+            character if character.is_whitespace() && quote.is_none() => {
                 if started {
                     words.push(std::mem::take(&mut token));
                     started = false;
@@ -411,6 +411,14 @@ mod tests {
         assert_eq!(
             split_words(r#"kitty -e "my session""#, false),
             ["kitty", "-e", "my session"]
+        );
+        assert_eq!(
+            split_words(r#"kitty --title "Bob's shell""#, true),
+            ["kitty", "--title", "Bob's shell"]
+        );
+        assert_eq!(
+            split_words(r#"kitty --title 'say "hi"'"#, true),
+            ["kitty", "--title", "say \"hi\""]
         );
     }
 
