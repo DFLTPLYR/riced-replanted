@@ -423,6 +423,14 @@ mod tests {
     }
 
     #[test]
+    fn exec_keeps_single_quotes_literal() {
+        assert_eq!(
+            exec_arguments("sh -c 'echo hi'", &application("")),
+            ["sh", "-c", "'echo", "hi'"]
+        );
+    }
+
+    #[test]
     fn scans_roots_in_precedence_order_and_skips_hidden_entries() {
         let root = env::temp_dir().join(format!(
             "riced-applications-{}-{}",
