@@ -3,6 +3,7 @@ use std::{
     env,
     hash::{Hash, Hasher},
     path::{Component, Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use freedesktop_entry_parser::Entry;
@@ -161,7 +162,12 @@ struct Resolver {
     pixmaps: Vec<PathBuf>,
     themes: HashMap<String, Option<Theme>>,
     cache: HashMap<Query, Option<PathBuf>>,
+    checked: Option<Instant>,
 }
+
+/// How long a resolved icon path stays cached before the cache is re-checked
+/// against the filesystem.
+const REFRESH: Duration = Duration::from_secs(1);
 
 impl Resolver {
     fn theme(
@@ -188,6 +194,16 @@ impl Resolver {
     }
 
     fn resolve(&mut self, query: Query) -> Option<PathBuf> {
+        // Installed themes and icons are re-checked once a second so new files
+        // appear without a shell reload, including newly installed themes.
+        let stale = self
+            .checked
+            .is_none_or(|checked| checked.elapsed() >= REFRESH);
+        if stale {
+            self.cache.clear();
+            self.themes.clear();
+            self.checked = Some(Instant::now());
+        }
         if let Some(path) = self.cache.get(&query) {
             return path.clone();
         }
@@ -208,7 +224,7 @@ impl Resolver {
                         .find_map(|root| icon_file(root, &query.name))
                 })
         };
-        // shortcut: installed icon changes need a shell reload; add file watching if live installs are needed.
+        // shortcut: icon lookups re-check the filesystem once a second, add a watcher if instant visibility is needed.
         if self.cache.len() >= 1024 {
             self.cache.clear();
             self.themes.clear();
@@ -609,5 +625,30 @@ mod tests {
             1,
             "one source produces one cached thumbnail"
         );
+    }
+
+    #[test]
+    fn icon_lookups_recheck_the_filesystem_after_the_refresh_window() {
+        let icons = Icons::new();
+        let mut resolver = Resolver {
+            roots: vec![icons.0.join("system")],
+            ..Resolver::default()
+        };
+        let query = || Query {
+            name: "late".to_owned(),
+            theme: "hicolor".to_owned(),
+            size: 16,
+            scale: 1,
+            path: None,
+        };
+        assert!(resolver.resolve(query()).is_none());
+        icons.theme("system", "hicolor", "");
+        icons.write("system/hicolor/16/apps/late.svg", "");
+        assert!(
+            resolver.resolve(query()).is_none(),
+            "a hit inside the refresh window stays cached"
+        );
+        resolver.checked = Some(Instant::now() - REFRESH);
+        assert!(resolver.resolve(query()).is_some());
     }
 }
