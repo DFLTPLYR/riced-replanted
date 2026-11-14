@@ -9,6 +9,10 @@ use lucide_icons::Icon;
 use riced_extension_sdk::Plugin;
 use serde_json::{Value, json};
 
+/// Every lucide icon name, one per line, sorted. Regenerate with
+/// `just lucide-icons` after a `lucide-icons` dependency bump.
+const ICONS: &str = include_str!("../icons.txt");
+
 fn main() -> std::io::Result<()> {
     Plugin::new("lucide")
         .state(["count"])
@@ -33,14 +37,13 @@ fn main() -> std::io::Result<()> {
         })
         .method("list", true, |args| {
             let prefix = args.get(0).and_then(Value::as_str).unwrap_or("");
-            // No exhaustive iteration in lucide-icons; return the two
-            // canonical examples plus full validation via `resolve`.
-            // shortcut: no all-icons list, upgrade if callers need search.
-            let names = ["activity", "arrow-right", "settings", "bell", "x"]
-                .into_iter()
-                .filter(|name| name.starts_with(prefix))
-                .collect::<Vec<_>>();
-            Ok(json!(names))
+            Ok(json!(
+                ICONS
+                    .lines()
+                    .filter(|name| name.starts_with(prefix))
+                    .take(512)
+                    .collect::<Vec<_>>()
+            ))
         })
         .serve(|context| {
             // Static catalog: publish once; the host never subscribes in
@@ -53,6 +56,19 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_listed_icon_resolves() {
+        let names = ICONS.lines().collect::<Vec<_>>();
+        assert!(names.len() > 2000, "{}", names.len());
+        assert!(
+            names.windows(2).all(|pair| pair[0] < pair[1]),
+            "the name list must be sorted without duplicates"
+        );
+        for name in &names {
+            assert!(Icon::try_from(*name).is_ok(), "{name}");
+        }
+    }
 
     #[test]
     fn resolves_known_icons() {

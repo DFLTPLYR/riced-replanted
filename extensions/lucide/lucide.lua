@@ -81,7 +81,7 @@ function lucide.exists(name, cb)
     end
 end
 
--- List candidate icon names by prefix (extension returns a small sample).
+-- List candidate icon names by prefix (extension returns the full catalog, capped at 512).
 function lucide.list(prefix, cb)
     if not call_method("list", prefix or "", cb) then
         cb({}, "lucide extension not ready")

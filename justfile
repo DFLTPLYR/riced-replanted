@@ -93,6 +93,16 @@ extension-lucide:
     install -Dm644 extensions/lucide/lucide.lua "{{ home_directory() }}/.config/riced/extensions/lucide/lucide.lua"
     install -Dm644 extensions/lucide/stub.lua "{{ home_directory() }}/.config/riced/extensions/lucide/stub.lua"
 
+# Regenerate extensions/lucide/icons.txt from the pinned lucide-icons crate
+lucide-icons:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    src=$(ls -d "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/lucide-icons-*/src/icon.rs | sort -V | tail -1)
+    sed -n '/impl std::fmt::Display for Icon/,/^}/p' "$src" |
+        grep -oE 'Self::[A-Za-z0-9]+ => "[a-z0-9-]+"' |
+        sed 's/.*=> "//; s/"$//' | LC_ALL=C sort -u > extensions/lucide/icons.txt
+    wc -l extensions/lucide/icons.txt
+
 # Build the application entries extension and install it into the default profile
 extension-applications:
     {{nix}} cargo build --release -p riced-extension-applications

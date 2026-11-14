@@ -50,7 +50,7 @@ extension semantics.
 | ---------------------- | --------- | ------------------------------------------------------------------------------------------------------- |
 | `resolve(name, cb)`    | string    | `{ name, char, unicode }`, where `char` is the glyph and `unicode` is a string such as `U+E038`          |
 | `exists(name, cb)`     | string    | boolean; unknown names and the empty string are false                                                   |
-| `list(prefix, cb)`     | string?   | array of sample names matching `prefix`; this is a fixed sample, not an exhaustive icon list            |
+| `list(prefix, cb)`     | string?   | array of names matching `prefix`, sorted, capped at 512; the full catalog is 2310 icons                  |
 
 `resolve` fails for empty, non-string, or unknown names. Raw methods are
 available only while the extension is connected; guard calls with
@@ -74,7 +74,8 @@ Asynchronous check. Calls `callback(boolean, error?)`.
 
 ### `lucide.list(prefix, callback)`
 
-Asynchronous sample list. Calls `callback(names, error?)`.
+Asynchronous name lookup. Calls `callback(names, error?)` with up to 512 names
+matching the prefix, from the crate's full catalog.
 
 ### `lucide.warm(names)`
 
