@@ -1,13 +1,13 @@
 # riced-openmeteo API
 
-`riced-openmeteo` retrieves current weather for one location per process and
-publishes it through the `openmeteo` plugin store. The companion `openmeteo.lua`
-provides the `iced.openmeteo(props)` widget.
+`riced-openmeteo` retrieves current weather for up to 8 configured locations per
+process and publishes it through the `openmeteo` plugin store. The companion
+`openmeteo.lua` provides the `iced.openmeteo(props)` widget.
 
 - Binary: `riced-openmeteo`
 - Lua proxy: `riced.plugin("openmeteo")` (also `iced.plugins("openmeteo")`)
 - Store fields: `ready`, `latitude`, `longitude`, `current`, `current_units`,
-  `timezone`, `updated_at`, `error`
+  `timezone`, `updated_at`, `error`, `readings`
 - Methods: `configure`
 - Events: none
 - Companion: `openmeteo.lua` provides `iced.openmeteo(props)` and a
@@ -58,25 +58,32 @@ configuration with `(nil, nil)`; weather arrives separately in the store. Call i
 only once the extension is alive. Configuration is in memory; resend it after
 reconnection.
 
+Each call adds a tracked location, deduplicated by coordinates, most recently
+configured first, bounded at 8 (the oldest is dropped). Every tracked location
+refreshes independently: a failing city keeps its last reading and does not
+affect the others.
+
 The Lua `weather.configure` helper does this lifecycle handling for you.
 
 ## Store
 
 | Field           | Meaning                                                                                                                                                                                                 |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ready`         | A successful reading exists for the configured location                                                                                                                                                  |
-| `latitude`, `longitude` | Requested coordinates, absent until configured                                                                                                                                                   |
+| `ready`         | A successful reading exists for the most recently configured location                                                                                                                                    |
+| `latitude`, `longitude` | Coordinates of the most recently configured location, absent until configured                                                                                                                    |
 | `current`       | Open-Meteo values: `time`, `interval`, `temperature_2m`, `relative_humidity_2m`, `apparent_temperature`, `is_day`, `precipitation`, `weather_code`, `wind_speed_10m`, `wind_direction_10m`             |
 | `current_units` | Units returned by Open-Meteo: Celsius, km/h, mm, percent, etc.                                                                                                                                           |
 | `timezone`      | Resolved IANA timezone; `current.time` is local to it                                                                                                                                                    |
 | `updated_at`    | Unix seconds of the last successful fetch                                                                                                                                                               |
-| `error`         | Last fetch error, absent after a successful refresh                                                                                                                                                     |
+| `error`         | Last fetch error of the most recently configured location, absent after a successful refresh                                                                                                             |
+| `readings`      | Object keyed by `"<lat>,<lon>"` in Rust float formatting; match entries by `latitude`/`longitude` numerically instead of building keys; each entry repeats the fields above |
 
 ## Behavior
 
-Fetching starts after configuration and repeats every 15 minutes without a Lua
-timer. Failures retry after 60 seconds and keep the last reading. Changing the
-location clears old weather before the new reading arrives.
+Fetching starts after configuration and repeats every 15 minutes per location
+without a Lua timer. Failures retry after 60 seconds and keep the last reading.
+Configuring a new location publishes a placeholder for it before the first fetch
+completes, so its city never shows another city's weather.
 
 Requests time out after 15 seconds, reject HTTP errors and redirects, and cap
 response bodies at 64 KiB. Other current values may be null when unavailable;
@@ -95,6 +102,17 @@ elseif weather.error then
     iced.text("Weather unavailable")
 else
     iced.text("Loading weather…")
+end
+```
+
+For several cities, read `readings` and match entries by coordinates — keys are
+formatted by Rust, so `tostring(52.0)` does not rebuild them:
+
+```lua
+for _, entry in pairs(weather.readings or {}) do
+    if entry.ready and entry.current then
+        iced.text(string.format("%.1f°C", entry.current.temperature_2m or 0))
+    end
 end
 ```
 

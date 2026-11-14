@@ -1,4 +1,5 @@
--- shortcut: one location per process; add keyed state when multiple cities are needed.
+-- The extension tracks up to 8 configured locations per process; its legacy
+-- top-level fields mirror the most recently configured one.
 local ext = riced.plugins("openmeteo")
 local weather = { plugin = ext }
 local desired, configured
@@ -14,19 +15,43 @@ function weather.configure(latitude, longitude)
     end
 end
 
+-- Find the reading for the desired location. The extension keys readings by
+-- "<lat>,<lon>" with Rust float formatting, which differs from Lua tostring,
+-- so match by coordinates instead of building keys. Falls back to the legacy
+-- single-location fields when the extension predates `readings`.
+local function reading()
+    if not desired then
+        return nil
+    end
+    if type(ext.readings) == "table" then
+        for _, entry in pairs(ext.readings) do
+            if type(entry) == "table"
+                and entry.latitude == desired[1]
+                and entry.longitude == desired[2] then
+                return entry
+            end
+        end
+        return nil
+    end
+    if ext.latitude == desired[1] and ext.longitude == desired[2] then
+        return ext
+    end
+    return nil
+end
+
 iced.define("openmeteo", function()
     local widget = {}
     function widget:view(props)
         if desired and configured ~= ext.configure then
             weather.configure(desired[1], desired[2])
         end
+        local entry = reading()
         local text = "Weather unavailable"
-        local matches = not desired or (ext.latitude == desired[1] and ext.longitude == desired[2])
-        local current = ext.current
-        if matches and ext.ready and type(current) == "table" and type(current.temperature_2m) == "number" then
+        local current = entry and entry.current
+        if entry and entry.ready and type(current) == "table" and type(current.temperature_2m) == "number" then
             text = string.format("%.1f°C", current.temperature_2m)
-            if not ext.alive or type(ext.error) == "string" then text = text .. " (stale)" end
-        elseif ext.alive and type(ext.error) ~= "string" then
+            if not ext.alive or type(entry.error) == "string" then text = text .. " (stale)" end
+        elseif ext.alive and (entry == nil or type(entry.error) ~= "string") then
             text = desired and "Loading weather…" or "Weather not configured"
         end
         return iced.text(text, props)

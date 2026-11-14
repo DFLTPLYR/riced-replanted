@@ -15,6 +15,9 @@
 ---@field wind_speed_10m? number
 ---@field wind_direction_10m? number
 
+---@class riced.OpenmeteoReading: riced.OpenmeteoStore
+-- Per-location reading; same shape as the legacy top-level store fields.
+
 ---@class riced.OpenmeteoStore
 ---@field ready? boolean
 ---@field latitude? number
@@ -24,6 +27,7 @@
 ---@field timezone? string
 ---@field updated_at? integer Unix seconds
 ---@field error? string
+---@field readings? table<string, riced.OpenmeteoReading> Keyed by `"<lat>,<lon>"` with Rust float formatting; match entries by coordinates instead of building keys.
 
 ---@class riced.OpenmeteoExtension: riced.Extension, riced.OpenmeteoStore
 ---@field store riced.OpenmeteoStore

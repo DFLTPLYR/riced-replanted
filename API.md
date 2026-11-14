@@ -511,7 +511,7 @@ Extensions may push events. They arrive in `update` as:
 | `dbus`         | `connected`, `capabilities`, `tray`, `tray_menu`, `notifications`                                | `activate_tray`, `secondary_activate_tray`, `context_menu_tray`, `open_tray_menu`, `close_tray_menu`, `tray_menu_event`, `close_notification`, `invoke_notification_action`, `pick_file` | none   |
 | `themeagen`    | `ready`, `mode`, `source`, `colors`                                                              | `generate`, `populate`, `regenerate`                                                                                                                                                     | none   |
 | `lucide`       | `count`                                                                                          | `resolve`, `exists`, `list`                                                                                                                                                              | none   |
-| `openmeteo`    | `ready`, `latitude`, `longitude`, `current`, `current_units`, `timezone`, `updated_at`, `error`  | `configure`                                                                                                                                                                              | none   |
+| `openmeteo`    | `ready`, `latitude`, `longitude`, `current`, `current_units`, `timezone`, `updated_at`, `error`, `readings` | `configure`                                                                                                                                                                   | none   |
 | `applications` | `applications`                                                                                   | `launch`                                                                                                                                                                                 | none   |
 
 All bundled extensions publish whole snapshots rather than pushing events.
@@ -1011,7 +1011,8 @@ snapshots; read them again when the plugin store changes.
 
 #### Open-Meteo extension
 
-`riced-openmeteo` retrieves current conditions for one location per process.
+`riced-openmeteo` retrieves current conditions for up to 8 configured locations
+per process.
 Install it and its Lua widget with `just extension-openmeteo`, then configure
 coordinates once in your profile (safe before the executable connects):
 
@@ -1029,26 +1030,35 @@ first renders after connection/reconnection. All widget instances share that
 location; repeated instances need distinct `id` props. The widget uses normal
 text props, displays `12.5°C`, and shows loading/unavailable text before a reading.
 Retained readings are marked `(stale)` after a failed refresh or disconnect.
+Call `weather.configure` for several cities to track up to 8 locations; the
+widget shows the most recently configured one.
 
 For a custom UI, use `riced.plugins("openmeteo")`. Its asynchronous
 `configure(latitude, longitude, callback?)` method accepts finite numeric WGS84
 coordinates (`-90..90`, `-180..180`). Success acknowledges configuration, with
 `(nil, nil)`; the weather arrives separately in the store. Call only once the
 extension is alive. Configuration is in memory; resend it after reconnection.
+Each call tracks a location (deduplicated, most recently configured first,
+bounded at 8); the `readings` store field holds one entry per location keyed by
+`"<lat>,<lon>"` in Rust float formatting, so custom views should match entries
+by `latitude`/`longitude` numerically instead of building keys.
 
 | Store field             | Meaning                                                                                                                                                                                    |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ready`                 | A successful reading exists for the configured location                                                                                                                                    |
-| `latitude`, `longitude` | Requested coordinates, absent until configured                                                                                                                                             |
+| `ready`                 | A successful reading exists for the most recently configured location                                                                                                                       |
+| `latitude`, `longitude` | Coordinates of the most recently configured location, absent until configured                                                                                                               |
 | `current`               | Open-Meteo values: `time`, `interval`, `temperature_2m`, `relative_humidity_2m`, `apparent_temperature`, `is_day`, `precipitation`, `weather_code`, `wind_speed_10m`, `wind_direction_10m` |
 | `current_units`         | Units returned by Open-Meteo: Celsius, km/h, mm, percent, etc.                                                                                                                             |
 | `timezone`              | Resolved IANA timezone; `current.time` is local to it                                                                                                                                      |
 | `updated_at`            | Unix seconds of the last successful fetch                                                                                                                                                  |
-| `error`                 | Last fetch error, absent after a successful refresh                                                                                                                                        |
+| `error`                 | Last fetch error of the most recently configured location, absent after a successful refresh                                                                                               |
+| `readings`              | One entry per tracked location, keyed by `"<lat>,<lon>"` in Rust float formatting; each entry repeats the fields above, so match entries by `latitude`/`longitude` numerically              |
 
-Fetching starts after configuration and repeats every 15 minutes without a Lua
-timer. Failures retry after 60 seconds and keep the last reading. Changing the
-location clears old weather. Requests time out after 15 seconds, reject HTTP
+Fetching starts after configuration and repeats every 15 minutes per location
+without a Lua timer. Failures retry after 60 seconds and keep the last reading.
+Configuring a new location publishes a placeholder for it before the first fetch
+completes, so its city never shows another city's weather. Requests time out
+after 15 seconds, reject HTTP
 errors/redirects and invalid responses, and cap response bodies at 64 KiB.
 Other current values may be null when unavailable; handle missing values in
 custom views. `weather_code` follows Open-Meteo's WMO interpretation codes.
