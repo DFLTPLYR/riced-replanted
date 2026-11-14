@@ -1767,8 +1767,9 @@ iced.shader({
 ```
 
 The shader receives interpolated values each frame and the callback runs once
-after the tween completes; it may return tasks. Keep the `extraArgs` key set
-stable while a tween runs.
+after the tween completes; it may return tasks. Changing the `extraArgs` key
+set mid-tween is safe: in-flight values follow their names into the new layout,
+and new keys start at their target value.
 
 Riced supplies the vertex stage and this reserved interface:
 

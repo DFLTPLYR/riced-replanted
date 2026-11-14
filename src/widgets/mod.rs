@@ -402,7 +402,7 @@ impl Transition {
         let mode = animation::mode(&config)?;
         let mut motion = Motion::target(node)?;
         let state_base = motion.clone();
-        // shortcut: extras animate by sorted position, so keep extraArgs keys stable while a tween runs.
+        // extras are positional in name order; `rebase_extras` remaps them when the key set changes.
         for (index, (name, value)) in extras.iter().enumerate() {
             motion.extras[index] = *value;
             let selected = props
@@ -470,6 +470,21 @@ impl Transition {
             state_patches,
             state_animation,
         }))
+    }
+
+    /// Rewrites an in-flight `from` motion so positional extras follow their
+    /// names when the sorted `extraArgs` key layout changed mid-tween.
+    fn rebase_extras(&self, previous_names: &[String], from: &mut Motion) {
+        let previous = from.extras;
+        for (index, name) in self.extra_names.iter().enumerate() {
+            from.extras[index] = previous_names
+                .iter()
+                .position(|known| known == name)
+                .map_or(self.motion.extras[index], |at| previous[at]);
+        }
+        for index in self.extra_names.len()..from.extras.len() {
+            from.extras[index] = 0.0;
+        }
     }
 
     fn extra(&self, name: &str) -> Option<f32> {
@@ -1299,6 +1314,38 @@ mod tests {
             .tick(now + std::time::Duration::from_millis(400));
         transition.animate(&mut patch, "pressed");
         assert_eq!(patch.background, Some(color("#00ff00").unwrap()));
+    }
+
+    #[test]
+    fn shader_extra_args_follow_names_when_keys_reorder_mid_tween() {
+        let lua = mlua::Lua::new();
+        let node = |args: &str, props: &str| -> Table {
+            lua.load(format!(
+                "{{kind='shader',source='x',extraArgs={args},transition={{change={{props={props}}}}}}}"
+            ))
+            .eval()
+            .unwrap()
+        };
+        let started = Transition::parse(&node("{b=0.0,a=0.0}", "{'extraArgs.a','extraArgs.b'}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(started.extra_names, ["a", "b"]);
+        // Halfway through the tween both extras sit at 0.5.
+        let mut from = started.motion.clone();
+        from.extras[0] = 0.5;
+        from.extras[1] = 0.5;
+        // A new key lands first in sort order and shifts a and b on the array.
+        let target = Transition::parse(&node(
+            "{b=1.0,a=2.0,aa=4.0}",
+            "{'extraArgs.a','extraArgs.aa','extraArgs.b'}",
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(target.extra_names, ["a", "aa", "b"]);
+        target.rebase_extras(&started.extra_names, &mut from);
+        assert_eq!(from.extras[0], 0.5, "a keeps its in-flight value");
+        assert_eq!(from.extras[1], 4.0, "a new key starts at its target");
+        assert_eq!(from.extras[2], 0.5, "b keeps its in-flight value");
     }
 
     #[test]

@@ -17,6 +17,7 @@ struct State {
     shift: Animated<Vector>,
     shift_control: Control,
     change: Option<Animated<Motion>>,
+    change_names: Vec<String>,
     change_control: Control,
     state_animation: Option<Arc<Mutex<StateAnimation>>>,
     redraw: bool,
@@ -140,6 +141,11 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
                 .property
                 .as_ref()
                 .map(|(_, t)| Animated::new(t.motion.clone(), t.mode)),
+            change_names: self
+                .property
+                .as_ref()
+                .map(|(_, t)| t.extra_names.clone())
+                .unwrap_or_default(),
             change_control,
             state_animation: self
                 .property
@@ -173,17 +179,21 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         state.redraw = state.state_animation.is_some();
         match (&mut state.change, &self.property) {
             (Some(change), Some((_, transition))) if change.target() != &transition.motion => {
-                *change = Animated::new(change.value().clone(), transition.mode)
-                    .to(transition.motion.clone());
+                let mut from = change.value().clone();
+                transition.rebase_extras(&state.change_names, &mut from);
+                *change = Animated::new(from, transition.mode).to(transition.motion.clone());
+                state.change_names = transition.extra_names.clone();
                 state.change_control.request("change");
             }
             (None, Some((_, transition))) => {
                 state.change = Some(Animated::new(transition.motion.clone(), transition.mode));
+                state.change_names = transition.extra_names.clone();
                 state.change_control = Control::default();
                 state.change_control.state().completed = true;
             }
             (_, None) => {
                 state.change = None;
+                state.change_names.clear();
                 state.change_control.cancel();
             }
             _ => {}
