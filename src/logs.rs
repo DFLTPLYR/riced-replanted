@@ -118,10 +118,11 @@ pub fn external(target: &str, message: &str) {
 }
 
 /// Prints stored logs, or truncates the file when `clear` is set.
-pub fn show(profile: &str, clear: bool) -> io::Result<()> {
-    let path = crate::ipc::runtime_dir()?
-        .join("logs")
-        .join(format!("{profile}.log"));
+pub fn show(profile: &str, previous: bool, clear: bool) -> io::Result<()> {
+    let path = crate::ipc::runtime_dir()?.join("logs").join(format!(
+        "{profile}{}.log",
+        if previous { ".previous" } else { "" }
+    ));
     if clear {
         let file = match OpenOptions::new().write(true).open(&path) {
             Ok(file) => file,
@@ -133,7 +134,17 @@ pub fn show(profile: &str, clear: bool) -> io::Result<()> {
     }
     let contents = match read_log(&path) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if previous {
+                // The main log is skipped silently, but asking for a rotation
+                // that never happened is a mistake worth reporting.
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no previous log for profile {profile}"),
+                ));
+            }
+            return Ok(());
+        }
         Err(error) => return Err(error),
     };
     let mut stdout = io::stdout().lock();
@@ -185,8 +196,20 @@ fn prune_interval(retention: Duration) -> Duration {
     (retention / 4).clamp(Duration::from_secs(1), Duration::from_secs(30))
 }
 
+/// Blocking `flock`, retrying signals so an interrupted lock does not drop
+/// the line; any other error keeps the silent skip.
+fn lock_file(mut lock: impl FnMut() -> io::Result<()>) -> bool {
+    loop {
+        match lock() {
+            Ok(()) => return true,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return false,
+        }
+    }
+}
+
 fn write_line(sink: &mut Sink, line: &str) {
-    if sink.file.lock().is_err() {
+    if !lock_file(|| sink.file.lock()) {
         return;
     }
     let stamp = now_millis();
@@ -338,5 +361,48 @@ mod tests {
             prune_interval(Duration::from_secs(3600)),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn interrupted_locks_are_retried_and_other_errors_skip_the_line() {
+        let mut attempts = vec![
+            Err(io::Error::new(io::ErrorKind::Interrupted, "signal")),
+            Ok(()),
+        ];
+        assert!(lock_file(|| attempts.remove(0)));
+        assert!(attempts.is_empty());
+        assert!(!lock_file(|| Err(io::Error::other("busy"))));
+    }
+
+    static RUNTIME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn show_reads_the_previous_log_or_reports_it_missing() {
+        let _guard = RUNTIME_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("riced-logs-show-{}", std::process::id()));
+        let logs = root.join("riced").join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let restore = std::env::var_os("XDG_RUNTIME_DIR");
+        // SAFETY: single-threaded under the RUNTIME_LOCK guard, then restored.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &root) };
+        fs::write(logs.join("t.previous.log"), "123 [lua]: old\n").unwrap();
+
+        assert_eq!(
+            read_log(&logs.join("t.previous.log")).unwrap(),
+            "123 [lua]: old\n"
+        );
+        show("t", true, false).unwrap();
+        let error = show("missing", true, false).unwrap_err();
+        assert!(error.to_string().contains("no previous log"), "{error}");
+        // The main log stays skipped silently, as before.
+        show("t", false, false).unwrap();
+
+        // SAFETY: single-threaded under the RUNTIME_LOCK guard, restoring the
+        // value captured above.
+        match restore {
+            Some(dir) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
+        let _ = fs::remove_dir_all(root);
     }
 }

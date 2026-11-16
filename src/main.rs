@@ -68,6 +68,9 @@ enum Command {
     Logs {
         #[command(flatten)]
         config: ConfigArgs,
+        /// Print the previous run's log instead of the current one
+        #[arg(long)]
+        previous: bool,
         /// Remove stored logs instead of printing them
         #[arg(long)]
         clear: bool,
@@ -362,12 +365,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 ipc::queue(selected_profile(&config)?.as_deref(), command, args)?;
             }
-            Command::Logs { config, clear } => {
+            Command::Logs {
+                config,
+                previous,
+                clear,
+            } => {
                 let profile = match selected_profile(&config)? {
                     Some(profile) => profile,
                     None => ipc::running_profile()?,
                 };
-                logs::show(&profile, clear)?;
+                logs::show(&profile, previous, clear)?;
             }
             Command::Stubs { config } => install_stubs(&config)?,
             Command::Extension { command } => match command {
@@ -388,9 +395,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let path = directory.canonicalize()?.join("shell.lua");
     let plugins = Rc::new(RefCell::new(plugins::Plugins::start(&path)?));
     // After Plugins::start clears stale runtime state for this profile.
-    ipc::record_running_shell(&ipc::profile_id(&directory)?, &path)?;
+    let profile = ipc::profile_id(&directory)?;
+    ipc::record_running_shell(&profile, &path)?;
     logs::start(
-        &ipc::profile_id(&directory)?,
+        &profile,
         (cli.log_retention > 0).then(|| Duration::from_secs(cli.log_retention)),
         cli.logs,
     )?;
