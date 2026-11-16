@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use super::animation::{Control, Effects, Transform};
 use super::{Ctx, Motion, StateAnimation, Transition};
 use crate::runtime::Message;
+use riced_extension_sdk::log;
 
 struct State {
     control: Control,
@@ -215,15 +216,22 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         if let (Some(change), Some((node, transition))) = (&state.change, &self.property) {
             let mut transition = transition.clone();
             transition.motion = change.value().clone();
-            self.content = crate::runtime::checked(super::build(
+            match super::build(
                 node,
                 &Ctx {
                     rebuilding: true,
                     ..self.ctx.clone()
                 },
                 Some(&transition),
-            ));
-            tree.children[0].diff(&self.content);
+            ) {
+                Ok(content) => {
+                    self.content = content;
+                    tree.children[0].diff(&self.content);
+                }
+                // A bouncy tween can dip a text/icon scale below 0 without any
+                // user error; keep the previous build instead of exiting.
+                Err(error) => log::error!(target: "runtime.error", "{error}"),
+            }
         }
         let bounds = state.control.state().bounds;
         let limits = if self.retained
@@ -380,15 +388,22 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
             if changing {
                 let mut transition = transition.clone();
                 transition.motion = change.value().clone();
-                self.content = crate::runtime::checked(super::build(
+                match super::build(
                     node,
                     &Ctx {
                         rebuilding: true,
                         ..self.ctx.clone()
                     },
                     Some(&transition),
-                ));
-                tree.children[0].diff(&self.content);
+                ) {
+                    Ok(content) => {
+                        self.content = content;
+                        tree.children[0].diff(&self.content);
+                    }
+                    // Same degrade as layout: an overshooting tween is not a
+                    // fatal error, keep the previous build.
+                    Err(error) => log::error!(target: "runtime.error", "{error}"),
+                }
                 shell.invalidate_layout();
             }
             if !change.is_animating() {
