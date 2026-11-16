@@ -43,6 +43,17 @@ fn paint_text_editor(style: &mut widget::text_editor::Style, patch: &super::styl
     }
 }
 
+/// Scopes a widget id by its component so two components declaring the same
+/// id never share host state (editors, combo boxes, pane grids). Components
+/// here mirror the name in `Message::Widget`, keeping the two key spaces
+/// consistent.
+fn scoped(id: String, ctx: &Ctx) -> String {
+    match &ctx.component {
+        Some((name, _, _)) => format!("{name}:{id}"),
+        None => id,
+    }
+}
+
 pub(super) fn text_editor(
     node: &Table,
     ctx: &Ctx,
@@ -53,6 +64,7 @@ pub(super) fn text_editor(
         .get::<Option<String>>("id")?
         .filter(|id| !id.is_empty())
         .ok_or_else(|| mlua::Error::runtime("text_editor requires a non-empty id"))?;
+    let id = scoped(id, ctx);
     let value = node.get::<Option<String>>("value")?.unwrap_or_default();
     let cell = state::editor(ctx.generation, &id, &value);
     let content = state::read_editor(cell);
@@ -156,6 +168,7 @@ pub(super) fn combo_box(
         .get::<Option<String>>("id")?
         .filter(|id| !id.is_empty())
         .ok_or_else(|| mlua::Error::runtime("combo_box requires a non-empty id"))?;
+    let id = scoped(id, ctx);
     let options = node
         .get::<Table>("options")?
         .sequence_values::<String>()
@@ -697,6 +710,7 @@ pub(super) fn pane_grid(
         .get::<Option<String>>("id")?
         .filter(|id| !id.is_empty())
         .ok_or_else(|| mlua::Error::runtime("pane_grid requires a non-empty id"))?;
+    let id = scoped(id, ctx);
     let panes = node
         .get::<Table>("content")?
         .sequence_values::<Table>()
@@ -819,4 +833,31 @@ pub(super) fn pane_grid(
         });
     }
     Ok(grid.into())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_editor_id_in_two_components_keeps_separate_state() {
+        let generation = 997;
+        let mut alpha = Ctx::new(generation);
+        alpha.component = Some(("alpha".to_owned(), 0, None));
+        let mut beta = Ctx::new(generation);
+        beta.component = Some(("beta".to_owned(), 0, None));
+        let a = scoped("doc".to_owned(), &alpha);
+        let b = scoped("doc".to_owned(), &beta);
+        assert_ne!(a, b);
+        state::editor(generation, &a, "");
+        state::editor(generation, &b, "");
+        state::perform(
+            generation,
+            &a,
+            iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert('x')),
+        );
+        assert_eq!(state::text(generation, &a).as_deref(), Some("x"));
+        assert_eq!(state::text(generation, &b).as_deref(), Some(""));
+        state::forget_generation(generation);
+        state::free_retired();
+    }
 }
