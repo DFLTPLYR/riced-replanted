@@ -179,13 +179,12 @@ pub fn reconcile_popups(
     let mut actions = Vec::new();
     let mut used = Vec::new();
     for popup in next.iter_mut() {
+        // prepare_layers rejects popups whose parent is not a declared layer,
+        // so every popup's parent is present in `parents`.
         let Some(old) = previous.iter().find(|old| old.id == popup.id) else {
-            if let Some(parent) = parents.get(&popup.parent).copied() {
-                popup.parent_window = Some(parent);
-                actions.push(open_popup(popup, parent));
-            } else {
-                popup.closed = true;
-            }
+            let parent = parents[&popup.parent];
+            popup.parent_window = Some(parent);
+            actions.push(open_popup(popup, parent));
             continue;
         };
         used.push(old.window);
@@ -195,12 +194,7 @@ pub fn reconcile_popups(
             popup.parent_window = old.parent_window;
             continue;
         }
-        let Some(parent) = parents.get(&popup.parent).copied() else {
-            actions.push(remove_popup(old.window));
-            popup.window = old.window;
-            popup.closed = true;
-            continue;
-        };
+        let parent = parents[&popup.parent];
         if old.parent != popup.parent || old.parent_window != Some(parent) {
             actions.push(remove_popup(old.window));
             popup.window = window::Id::unique();
