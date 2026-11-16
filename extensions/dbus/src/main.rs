@@ -521,7 +521,12 @@ fn pick_file(model: &Arc<Mutex<Model>>, args: &Value) -> Result<Value, String> {
     match receiver.recv_timeout(PICKER_TIMEOUT) {
         Ok(result) => result,
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            // Dismiss the dialog so the waiting iterator can finish.
+            // Dismiss the dialog so the waiting iterator can finish; the
+            // cancelled response wakes the thread, whose send then fails and
+            // drops the iterator with its match rule.
+            // shortcut: a portal that never answers the Close parks the
+            // waiter thread until the process exits; upgrade if zbus grows a
+            // timed receive for MessageIterator.
             let _ = connection.call_method(
                 Some(PORTAL),
                 handle.as_str(),
