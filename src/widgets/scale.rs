@@ -213,7 +213,9 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
         limits: &layout::Limits,
     ) -> layout::Node {
         let state = tree.state.downcast_ref::<State>();
-        if let (Some(change), Some((node, transition))) = (&state.change, &self.property) {
+        if let (Some(change), Some((node, transition))) = (&state.change, &self.property)
+            && change.is_animating()
+        {
             let mut transition = transition.clone();
             transition.motion = change.value().clone();
             match super::build(
@@ -286,8 +288,10 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
             let local_cursor = state.cursor(cursor, layout.bounds());
             let inside = local_cursor.is_over(layout.bounds()) && cursor.is_over(*viewport);
             if matches!(event, Event::Mouse(_)) {
+                let mut hover_changed = false;
                 if inside != state.hovered {
                     state.hovered = inside;
+                    hover_changed = true;
                     let name = if inside {
                         "pointer_enter"
                     } else {
@@ -314,7 +318,11 @@ impl Widget<Message, Theme, iced::Renderer> for ScaleItem<'_> {
                     state.control.request(name);
                 }
                 state.control.sync(&self.effects);
-                shell.request_redraw();
+                // Only the mouse-event branch that changed something redraws;
+                // plain pointer movement over the widget should not.
+                if hover_changed || trigger.is_some() {
+                    shell.request_redraw();
+                }
             }
             self.content.as_widget_mut().update(
                 &mut tree.children[0],
