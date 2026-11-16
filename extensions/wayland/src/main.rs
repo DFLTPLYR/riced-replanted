@@ -123,6 +123,7 @@ impl Requests {
         let seat = self
             .seat
             .as_ref()
+            .filter(|seat| seat.is_alive())
             .ok_or_else(|| "compositor has no wl_seat".to_owned())?;
         handle.activate(seat);
         self.flush()
