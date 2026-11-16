@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     io::{self, Write},
+    os::unix::ffi::OsStringExt,
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -53,27 +54,31 @@ pub fn running_shell() -> io::Result<PathBuf> {
 fn running_shell_at(root: &Path) -> io::Result<PathBuf> {
     let profile = running_profile_at(root)?;
     let path = root.join(format!("{profile}.profile"));
-    let shell = fs::read_to_string(&path).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "running profile location is missing",
-        )
-    })?;
-    let directory = Path::new(&shell).parent().ok_or_else(|| {
+    // The recorded path is raw OS bytes (see `record_running_shell_at`) and may
+    // not be valid UTF-8, so read and decode it losslessly.
+    let shell = PathBuf::from(std::ffi::OsString::from_vec(
+        fs::read(&path).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "running profile location is missing",
+            )
+        })?,
+    ));
+    let directory = shell.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "recorded shell path has no parent",
         )
     })?;
     if profile_id(directory)? != profile
-        || Path::new(&shell).file_name().and_then(|name| name.to_str()) != Some("shell.lua")
+        || shell.file_name().and_then(|name| name.to_str()) != Some("shell.lua")
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "running profile location is stale; restart the daemon",
         ));
     }
-    Ok(PathBuf::from(shell))
+    Ok(shell)
 }
 
 pub(crate) fn runtime_dir() -> io::Result<PathBuf> {
@@ -264,6 +269,27 @@ mod tests {
             TEST.fetch_add(1, Ordering::Relaxed)
         ));
         let profile_dir = root.join("config");
+        fs::create_dir_all(&profile_dir).unwrap();
+        let profile = profile_id(&profile_dir).unwrap();
+        let shell = profile_dir.join("shell.lua");
+        record_running_shell_at(&root, &profile, &shell).unwrap();
+        let _socket = UnixListener::bind(root.join(format!("{profile}.sock"))).unwrap();
+
+        assert_eq!(running_shell_at(&root).unwrap(), shell);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn running_shell_reads_paths_with_invalid_utf8_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::net::UnixListener;
+
+        let root = env::temp_dir().join(format!(
+            "riced-running-utf8-{}-{}",
+            process::id(),
+            TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        let profile_dir = root.join(std::ffi::OsString::from_vec(b"config-\xff".to_vec()));
         fs::create_dir_all(&profile_dir).unwrap();
         let profile = profile_id(&profile_dir).unwrap();
         let shell = profile_dir.join("shell.lua");
