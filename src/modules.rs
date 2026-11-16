@@ -141,7 +141,9 @@ impl Modules {
     pub fn require(&mut self, lua: &Lua, name: &str) -> mlua::Result<Table> {
         let loaded = loaded_table(lua)?;
         if let Some(table) = loaded.get::<Option<Table>>(name)? {
-            self.watch(lua, name)?;
+            // Best effort: the module is loaded and usable even when it has no
+            // file to watch (compiled, preloaded, or deleted sources).
+            let _ = self.watch(lua, name);
             return Ok(table);
         }
         let before = names(&loaded)?;
@@ -151,7 +153,9 @@ impl Modules {
             .difference(&before)
             .cloned()
             .collect::<Vec<_>>();
-        self.watch(lua, name)?;
+        // Same best-effort rule as the deps below: watching must not fail a
+        // require that already succeeded.
+        let _ = self.watch(lua, name);
         for dep in &deps {
             // Best effort: compiled modules and preloaded names have no file to watch.
             let _ = self.watch(lua, dep);
