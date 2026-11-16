@@ -72,7 +72,6 @@ fn normalize(value: &Value) -> Option<Key> {
     }
 }
 
-
 pub(crate) fn forget_window(generation: u64, window: iced::window::Id) {
     LISTS.with_borrow_mut(|lists| {
         lists.retain(|(owner, id, _), _| *owner != generation || *id != Some(window))
@@ -310,7 +309,11 @@ pub(super) fn list(
         let mut lists = lists.borrow_mut();
         let key = (generation, window, id.to_owned());
         if lists.len() >= LIMIT && !lists.contains_key(&key) {
-            lists.clear();
+            // Evict one entry like editors/combos do; clearing the whole map
+            // would cancel every list's exit animations at once.
+            if let Some(oldest) = lists.keys().next().cloned() {
+                lists.remove(&oldest);
+            }
         }
         let entry = lists.entry(key).or_default();
         entry.owner = owner;
@@ -539,15 +542,7 @@ mod tests {
             true,
             None,
         );
-        assert_eq!(
-            next.tokens,
-            [
-                initial.tokens[3],
-                initial.tokens[2],
-                initial.tokens[1],
-                initial.tokens[0]
-            ]
-        );
+        assert_eq!(next.tokens, [initial.tokens[3], initial.tokens[2], initial.tokens[1], initial.tokens[0]]);
         assert!(next.leaving.is_empty());
         forget_generation(995);
     }
