@@ -1588,7 +1588,6 @@ mod tests {
             "{kind='combo_box',options={'a'}}",
             "{kind='combo_box',id='c',options={'a'},style={bogus=1}}",
             "{kind='table',columns={},content={}}",
-            "{kind='table',columns={{header='a'}},content={{false}}}",
             "{kind='list_view',content={}}",
             "{kind='list_view',id='list',content={},direction='diagonal'}",
             "{kind='list_view',id='list',content={function() end}}",

@@ -4,6 +4,7 @@ use iced::widget::{markdown as markdown_widget, text_editor as text_editor_widge
 use mlua::{Function, Table, Value};
 
 use crate::runtime::{Message, WidgetEvent};
+use riced_extension_sdk::log;
 
 use super::enums::{horizontal, vertical, wrapping};
 use super::input::paint_text_input;
@@ -512,12 +513,6 @@ pub(super) fn table(
         .get::<Table>("content")?
         .sequence_values::<Table>()
         .collect::<mlua::Result<Vec<_>>>()?;
-    // Validate every cell now; the widget's view closure cannot report errors.
-    for row in &rows {
-        for column in 0..columns.len() {
-            text_or_element(row.get::<Value>(column + 1)?, ctx)?;
-        }
-    }
     let rows = std::rc::Rc::new(rows);
     let mut widget_columns = Vec::with_capacity(columns.len());
     for (index, column) in columns.iter().enumerate() {
@@ -527,7 +522,12 @@ pub(super) fn table(
         let ctx = ctx.clone();
         let mut widget_column = widget::table::column(header, move |row: usize| {
             let cell = rows[row].get::<Value>(index + 1).unwrap_or(Value::Nil);
-            text_or_element(cell, &ctx).unwrap_or_else(|_| widget::Space::new().into())
+            // The closure cannot report errors; degrade one bad cell to a
+            // blank space and say why, like responsive and shader do.
+            text_or_element(cell, &ctx).unwrap_or_else(|error| {
+                log::error!(target: "widgets", "table cell failed: {error}");
+                widget::Space::new().into()
+            })
         });
         if let Some(width) = column.get::<Option<Value>>("width")? {
             widget_column = widget_column.width(length(width)?);
@@ -644,7 +644,12 @@ pub(super) fn responsive(
             let node: Table = callback.call(props)?;
             element(node, &ctx)
         })();
-        result.unwrap_or_else(|_| widget::Space::new().into())
+        result.unwrap_or_else(|error| {
+            // A broken content callback must stay visible in the log; every
+            // other Lua-error surface in the bridge reports.
+            log::error!(target: "widgets", "responsive content failed: {error}");
+            widget::Space::new().into()
+        })
     });
     if let Some(width) = layout.width {
         responsive = responsive.width(width);
