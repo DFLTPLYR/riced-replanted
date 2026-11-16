@@ -800,7 +800,10 @@ pub(super) fn pane_grid(
     if let Some(event) = on_click {
         let component = component.clone();
         grid = grid.on_click(move |pane| {
-            let index = state.get(pane).copied().unwrap_or(0);
+            // An unknown pane would be misattributed to pane 0; say nothing.
+            let Some(index) = state.get(pane).copied() else {
+                return Message::Noop;
+            };
             Message::Widget(
                 generation,
                 component.clone(),
@@ -828,7 +831,9 @@ pub(super) fn pane_grid(
                 widget::pane_grid::DragEvent::Dropped { pane, .. } => ("dropped", pane),
                 widget::pane_grid::DragEvent::Canceled { pane } => ("canceled", pane),
             };
-            let index = state.get(pane).copied().unwrap_or(0);
+            let Some(index) = state.get(pane).copied() else {
+                return Message::Noop;
+            };
             Message::Widget(
                 generation,
                 component.clone(),
@@ -839,6 +844,7 @@ pub(super) fn pane_grid(
     }
     Ok(grid.into())
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
