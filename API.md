@@ -1456,7 +1456,9 @@ Props: `min` (default 0), `max` (default 1), `value` (default `min`, clamped to
 the range), `step` (finite positive), `on_change`, `on_release`, and `style`.
 
 `min` must be finite and less than `max`. `on_change` fires while dragging;
-`on_release` fires when the drag ends. Both send a numeric `value`.
+`on_release` fires when the drag ends. Both send a numeric `value`. The value
+passed to `on_release` is the one from the last view build; for the final
+value, read the last value your `on_change` handler received.
 
 #### `iced.text_input(content, props)`
 
@@ -1467,7 +1469,9 @@ Props: `placeholder`, `value`, `secure` (boolean), `id`, `size` (positive),
 `on_paste`, and `style`.
 
 `on_input` sends the new text, `on_submit` sends the submitted value, and
-`on_paste` sends pasted text. All are wrapped events.
+`on_paste` sends pasted text. All are wrapped events. The value passed to
+`on_submit` is the one from the last view build; read the last value your
+`on_input` handler received for the final text.
 
 #### `iced.pick_list(content, props)`
 
