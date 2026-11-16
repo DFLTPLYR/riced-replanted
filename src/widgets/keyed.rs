@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use iced::advanced::layout::{self, flex};
 use iced::advanced::widget::{Operation, Tree, tree};
 use iced::advanced::{Clipboard, Layout, Shell, Widget, mouse, overlay, renderer};
@@ -66,13 +68,20 @@ impl<'a> From<KeyedList<'a>> for Element<'a, Message> {
 }
 
 fn positions(old: &[u64], new: &[u64]) -> Vec<Option<usize>> {
+    // Index old keys so matching stays linear; every occurrence is kept so
+    // first-unused matching matches the scan it replaces.
+    let mut index: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (position, key) in old.iter().enumerate() {
+        index.entry(*key).or_default().push(position);
+    }
     let mut used = vec![false; old.len()];
     new.iter()
         .map(|key| {
-            let index = old
+            let index = index
+                .get(key)?
                 .iter()
-                .enumerate()
-                .position(|(index, old_key)| !used[index] && old_key == key)?;
+                .copied()
+                .find(|&position| !used[position])?;
             used[index] = true;
             Some(index)
         })
@@ -149,6 +158,12 @@ impl Widget<Message, Theme, iced::Renderer> for KeyedList<'_> {
             &mut tree.children[..self.live_len],
         );
         let state = tree.state.downcast_mut::<State>();
+        if self.live_len >= self.children.len() {
+            // Nothing is leaving; the resolved node already is the final
+            // layout, so skip cloning its whole subtree.
+            state.size = node.size();
+            return node;
+        }
         let mut size = node.size();
         let mut children = node.children().to_vec();
         if self.live_len < self.children.len() {

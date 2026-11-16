@@ -48,6 +48,31 @@ thread_local! {
 /// Upper bound for id-keyed state; bounds configs that generate unique ids.
 const LIMIT: usize = 256;
 
+/// Hashable form of a Lua list key. Exotic values return `None` and fall back
+/// to the linear scan, so matching stays exactly `Value::eq`.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Key {
+    Nil,
+    Bool(bool),
+    Int(i64),
+    Num(u64), // f64 bit pattern, -0.0 canonicalized to 0.0
+    Str(String),
+}
+
+fn normalize(value: &Value) -> Option<Key> {
+    match value {
+        Value::Nil => Some(Key::Nil),
+        Value::Boolean(flag) => Some(Key::Bool(*flag)),
+        Value::Integer(int) => Some(Key::Int(*int)),
+        Value::Number(number) if number.is_finite() => Some(Key::Num(
+            if *number == 0.0 { 0.0 } else { *number }.to_bits(),
+        )),
+        Value::String(string) => string.to_str().ok().map(|s| Key::Str(s.to_owned())),
+        _ => None,
+    }
+}
+
+
 pub(crate) fn forget_window(generation: u64, window: iced::window::Id) {
     LISTS.with_borrow_mut(|lists| {
         lists.retain(|(owner, id, _), _| *owner != generation || *id != Some(window))
@@ -295,14 +320,33 @@ pub(super) fn list(
         let mut controls = Vec::with_capacity(items.len());
         let mut next_items = Vec::with_capacity(items.len());
 
+        // Index the previous items by normalized key. Every occurrence is
+        // kept so first-unused matching matches the linear scan it replaces.
+        let mut index: HashMap<Key, Vec<usize>> = HashMap::new();
+        for (old_index, (_, old_key, _, _)) in previous.iter().enumerate() {
+            if let Some(normalized) = normalize(old_key) {
+                index.entry(normalized).or_default().push(old_index);
+            }
+        }
+
         for (item, key) in items.iter().zip(keys) {
-            let matched =
-                previous
+            let matched = match normalize(key) {
+                Some(normalized) => index.get(&normalized).and_then(|candidates| {
+                    candidates
+                        .iter()
+                        .copied()
+                        .find(|&old_index| !old_used[old_index])
+                        .map(|old_index| (old_index, previous[old_index].2))
+                }),
+                // Exotic keys (tables, functions, invalid UTF-8) fall back to
+                // the linear scan so matching stays exactly `Value::eq`.
+                None => previous
                     .iter()
                     .enumerate()
                     .find_map(|(old_index, (_, old_key, token, _))| {
                         (!old_used[old_index] && old_key == key).then_some((old_index, *token))
-                    });
+                    }),
+            };
             let returning = entry.leaving.iter().position(|leaving| leaving.key == *key);
             let (token, control) = match (matched, returning) {
                 (Some((old_index, token)), _) => {
@@ -469,6 +513,53 @@ mod tests {
         assert_eq!(restored.controls[0].state().event, "enter");
         forget_generation(992);
         assert!(!initial.controls[0].state().alive);
+    }
+
+    #[test]
+    fn mixed_type_keys_match_across_rebuilds() {
+        let lua = mlua::Lua::new();
+        let key = |name: &str| Value::String(lua.create_string(name).unwrap());
+        // String, integer, float, and boolean keys; the float is -0.0, which
+        // must match the plain 0.0 from the first build.
+        let initial = list(
+            995,
+            None,
+            "mixed",
+            vec![key("a"), Value::Integer(2), Value::Number(0.0), Value::Boolean(true)],
+            &[key("a"), Value::Integer(2), Value::Number(-0.0), Value::Boolean(true)],
+            true,
+            None,
+        );
+        let next = list(
+            995,
+            None,
+            "mixed",
+            vec![Value::Boolean(true), Value::Number(0.0), Value::Integer(2), key("a")],
+            &[Value::Boolean(true), Value::Number(0.0), Value::Integer(2), key("a")],
+            true,
+            None,
+        );
+        assert_eq!(
+            next.tokens,
+            [
+                initial.tokens[3],
+                initial.tokens[2],
+                initial.tokens[1],
+                initial.tokens[0]
+            ]
+        );
+        assert!(next.leaving.is_empty());
+        forget_generation(995);
+    }
+
+    #[test]
+    fn duplicate_previous_keys_still_match_in_order() {
+        let items = vec![Value::Integer(1), Value::Integer(1), Value::Integer(1)];
+        let initial = list(996, None, "dup", items.clone(), &items, true, None);
+        let next = list(996, None, "dup", items.clone(), &items, true, None);
+        // First-unused matching keeps every token in place.
+        assert_eq!(next.tokens, initial.tokens);
+        forget_generation(996);
     }
 
     #[test]
