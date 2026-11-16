@@ -266,8 +266,6 @@ impl Plugins {
                         },
                     );
                     self.install_one(lua, &name)?;
-                    self.refresh_store(lua, &name)?;
-                    self.set_alive(lua, &name, true)?;
                 }
                 Incoming::State { conn, store } => {
                     let Some(name) = self.conns.get(&conn).cloned() else {
@@ -836,6 +834,14 @@ fn restart_delay(failures: u32) -> Duration {
     (RESTART_DELAY * (1 << failures.min(5))).min(MAX_RESTART_DELAY)
 }
 
+fn reset_failures(failures: u32, lifetime: Duration) -> u32 {
+    if lifetime < MAX_RESTART_DELAY {
+        failures.saturating_add(1)
+    } else {
+        0
+    }
+}
+
 impl Supervisor {
     fn new(dir: PathBuf, socket: PathBuf, profile: String, profile_dir: PathBuf) -> Self {
         Self {
@@ -886,11 +892,9 @@ impl Supervisor {
                 None => false,
             };
             if exited {
-                entry.failures = if entry.started.elapsed() < RESTART_DELAY * 2 {
-                    entry.failures.saturating_add(1)
-                } else {
-                    0
-                };
+                // A child that outlived the full backoff proved itself; a
+                // shorter lifetime keeps the failure count climbing.
+                entry.failures = reset_failures(entry.failures, entry.started.elapsed());
                 entry.restart_at = Some(now + restart_delay(entry.failures));
             }
             if entry.child.is_none() && entry.restart_at.is_some_and(|at| now >= at) {
@@ -1269,6 +1273,15 @@ mod tests {
         assert_eq!(restart_delay(1), Duration::from_secs(2));
         assert_eq!(restart_delay(5), MAX_RESTART_DELAY);
         assert_eq!(restart_delay(99), MAX_RESTART_DELAY);
+    }
+
+    #[test]
+    fn failures_reset_only_after_a_full_backoff_lifetime() {
+        assert_eq!(reset_failures(3, RESTART_DELAY), 4);
+        assert_eq!(reset_failures(3, RESTART_DELAY * 2), 4);
+        assert_eq!(reset_failures(3, MAX_RESTART_DELAY - Duration::from_nanos(1)), 4);
+        assert_eq!(reset_failures(3, MAX_RESTART_DELAY), 0);
+        assert_eq!(reset_failures(0, MAX_RESTART_DELAY), 0);
     }
 
     #[test]
