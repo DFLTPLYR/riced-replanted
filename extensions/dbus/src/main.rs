@@ -615,6 +615,9 @@ fn file_uri_path(uri: &str) -> Result<String, String> {
 struct Model {
     connection: Option<Connection>,
     tray: BTreeMap<String, TrayItem>,
+    // Consecutive failed property reads per tray key. Kept outside `TrayItem`
+    // so a watcher re-insert of a dead item does not reset the count.
+    tray_failures: BTreeMap<String, u8>,
     tray_menu: Option<TrayMenu>,
     notifications: BTreeMap<u32, Notification>,
     next_notification: u32,
@@ -635,7 +638,6 @@ struct TrayItem {
     status: String,
     menu: Option<String>,
     item_is_menu: bool,
-    failures: u8,
 }
 
 #[derive(Clone)]
@@ -926,7 +928,7 @@ fn refresh_tray(connection: &Connection, model: &Arc<Mutex<Model>>) {
                         current.item_is_menu = item_is_menu;
                         changed = true;
                     }
-                    current.failures = 0;
+                    model.tray_failures.remove(&key);
                 }
                 if changed {
                     model.dirty = true;
@@ -936,9 +938,11 @@ fn refresh_tray(connection: &Connection, model: &Arc<Mutex<Model>>) {
                 let removed = {
                     let mut model = model.lock().unwrap();
                     let mut removed = false;
-                    if let Some(current) = model.tray.get_mut(&key) {
-                        current.failures += 1;
-                        if current.failures > 2 {
+                    if model.tray.contains_key(&key) {
+                        let failures = model.tray_failures.entry(key.clone()).or_insert(0);
+                        *failures += 1;
+                        if *failures > 2 {
+                            model.tray_failures.remove(&key);
                             model.tray.remove(&key);
                             if model.tray_menu.as_ref().is_some_and(|menu| menu.id == key) {
                                 model.tray_menu = None;
