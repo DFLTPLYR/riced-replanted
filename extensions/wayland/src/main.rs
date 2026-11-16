@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use riced_extension_sdk::{Plugin, log};
+use riced_extension_sdk::{Plugin, clamp, log};
 use serde_json::{Value, json};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop, event_created_child,
@@ -205,13 +205,6 @@ fn connected(
 }
 
 const MAX_TEXT: usize = 1024;
-
-fn clamp(mut value: String, max: usize) -> String {
-    if let Some((index, _)) = value.char_indices().nth(max) {
-        value.truncate(index);
-    }
-    value
-}
 
 fn empty(connected: bool) -> Value {
     json!({

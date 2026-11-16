@@ -44,6 +44,31 @@ pub fn bounded_array(items: impl IntoIterator<Item = Value>, budget: usize) -> V
     items
 }
 
+/// Truncates to `max` characters without splitting one.
+pub fn clamp(value: impl AsRef<str>, max: usize) -> String {
+    let value = value.as_ref();
+    match value.char_indices().nth(max) {
+        Some((index, _)) => value[..index].to_owned(),
+        None => value.to_owned(),
+    }
+}
+
+/// Expands a leading `~` or `~/` against `$HOME`; anything else is unchanged.
+pub fn expand_home(path: &str) -> std::path::PathBuf {
+    let home = || std::env::var_os("HOME").filter(|home| !home.is_empty());
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = home()
+    {
+        return std::path::PathBuf::from(home).join(rest);
+    }
+    if path == "~"
+        && let Some(home) = home()
+    {
+        return std::path::PathBuf::from(home);
+    }
+    std::path::PathBuf::from(path)
+}
+
 pub struct Plugin {
     name: String,
     state: Vec<String>,

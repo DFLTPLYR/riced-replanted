@@ -12,7 +12,7 @@ use std::{
 };
 
 use freedesktop_entry_parser::Entry;
-use riced_extension_sdk::{Plugin, bounded_array, protocol::MAX_LINE};
+use riced_extension_sdk::{Plugin, bounded_array, clamp, protocol::MAX_LINE};
 use serde_json::{Value, json};
 
 const REFRESH: Duration = Duration::from_secs(30);
@@ -328,10 +328,6 @@ fn parse(path: &Path, id: String) -> Option<Application> {
 
 fn flag<T: AsRef<str>>(section: &freedesktop_entry_parser::AttrSelector<'_, T>, key: &str) -> bool {
     section.attr(key) == Some("true")
-}
-
-fn clamp(value: &str, max: usize) -> String {
-    value.chars().take(max).collect()
 }
 
 fn snapshot(applications: &[Application]) -> Value {

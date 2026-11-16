@@ -16,7 +16,7 @@ use std::{
 
 use material_colors::{color::Argb, dynamic_color::Variant, scheme::Scheme, theme::ThemeBuilder};
 use riced_extension_sdk::write_atomic::write_atomic;
-use riced_extension_sdk::{Context, Plugin, log};
+use riced_extension_sdk::{Context, Plugin, expand_home, log};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 
@@ -894,20 +894,6 @@ fn run_hook(command: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
-}
-
-fn expand_home(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    if path == "~"
-        && let Some(home) = env::var_os("HOME")
-    {
-        return PathBuf::from(home);
-    }
-    PathBuf::from(path)
 }
 
 fn config_path() -> Result<PathBuf, String> {

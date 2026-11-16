@@ -7,7 +7,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     error::Error,
-    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -17,7 +16,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use riced_extension_sdk::{Plugin, bounded_array, log, protocol::MAX_LINE};
+use riced_extension_sdk::{Plugin, bounded_array, clamp, expand_home, log, protocol::MAX_LINE};
 use serde_json::{Value, json};
 type ItemInfo = (String, String, Option<String>, String, Option<String>, bool);
 
@@ -117,13 +116,6 @@ fn argument(args: &Value, what: &str) -> Result<u32, String> {
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| format!("missing {what} id"))
-}
-
-fn clamp(mut value: String, max: usize) -> String {
-    if let Some((index, _)) = value.char_indices().nth(max) {
-        value.truncate(index);
-    }
-    value
 }
 
 /// StatusNotifier items often use an `Id` like `vesktop_status_icon_1` while the
@@ -587,18 +579,6 @@ fn response_signals(connection: &Connection) -> Result<MessageIterator, String> 
         .map_err(|error| error.to_string())?
         .build();
     MessageIterator::for_match_rule(rule, connection, Some(8)).map_err(|error| error.to_string())
-}
-
-fn expand_home(path: &str) -> PathBuf {
-    let Some(rest) = path.strip_prefix("~/") else {
-        return PathBuf::from(path);
-    };
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map_or_else(
-            || PathBuf::from(path),
-            |home| PathBuf::from(home).join(rest),
-        )
 }
 
 /// Converts a `file://` URI from the portal into a local path. Percent escapes
