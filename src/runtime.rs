@@ -348,6 +348,10 @@ pub struct App {
     extras: RefCell<HashMap<window::Id, SurfaceKind>>,
     plugins: Rc<RefCell<plugins::Plugins>>,
     restart: Option<crate::restart::Restart>,
+    // Some(list) while a module reload trial runs: window forgets observed
+    // during the trial are applied only on success, so a failed reload does
+    // not destroy widget state for windows it rolls back.
+    deferred_forgets: Option<Vec<window::Id>>,
 }
 
 impl App {
@@ -557,6 +561,7 @@ pub fn load_with_plugins(
         extras: RefCell::new(HashMap::new()),
         plugins,
         restart: None,
+        deferred_forgets: None,
     };
     for name in [
         "title",
@@ -1459,8 +1464,14 @@ impl App {
                 .copied()
                 .filter(|id| !live.contains(id))
                 .collect::<Vec<_>>();
-            for id in removed {
-                self.forget_window(id)?;
+            if let Some(deferred) = &mut self.deferred_forgets {
+                // A reload trial: defer so a failed trial rolls the windows
+                // (and their widget state) back intact.
+                deferred.extend(removed);
+            } else {
+                for id in removed {
+                    self.forget_window(id)?;
+                }
             }
         }
         Ok(())
@@ -2056,6 +2067,7 @@ impl App {
         let previous_windows = self.windows.borrow().clone();
         let previous_sizes = self.sizes.borrow().clone();
         let pending_count = self.pending.len();
+        self.deferred_forgets = Some(Vec::new());
         let handlers: Table = self.lua.named_registry_value("riced.ipc_handlers")?;
         let previous_handlers = copy_table(&self.lua, &handlers)?;
         let widgets: Table = self.lua.globals().get("iced")?;
@@ -2109,10 +2121,20 @@ impl App {
                 }
             }
             for &id in &affected {
+                // Windows this trial removes are flushed after success; do
+                // not view or redraw them.
+                if self
+                    .deferred_forgets
+                    .as_ref()
+                    .is_some_and(|deferred| deferred.contains(&id))
+                {
+                    continue;
+                }
                 self.view(id)?;
             }
             Ok(())
         })();
+        let deferred = self.deferred_forgets.take().unwrap_or_default();
         if let Err(error) = result {
             self.modules.borrow_mut().restore(&self.lua, snapshot)?;
             restore_animations.call::<()>(())?;
@@ -2135,6 +2157,10 @@ impl App {
             *self.sizes.borrow_mut() = previous_sizes;
             self.pending.truncate(pending_count);
             return Err(error);
+        }
+        // Trial succeeded: apply the window forgets it deferred.
+        for id in deferred {
+            self.forget_window(id)?;
         }
         if !affected.is_empty() {
             log::info!(target: "reload.modules", "reloaded modules {}", changed.join(", "));
@@ -4990,6 +5016,68 @@ return m";
         assert_eq!(app.mounts.borrow()[&(id, "right".to_owned())].revision, 0);
         assert!(matches!(app.check_reload().unwrap(), Change::None));
     }
+
+    #[test]
+    fn failed_module_reload_keeps_widget_state_for_rolled_back_surfaces() {
+        let good = r#"
+            local function layers()
+                return {
+                    iced.layer(iced.text_editor(nil, { id = 'a' }), { id = 'L1' }),
+                    iced.layer(iced.text_editor(nil, { id = 'b' }), { id = 'L2' }),
+                }
+            end
+            return { layers = layers }
+        "#;
+        // The saved module drops L2, so the trial forgets its window; the
+        // third view of the surviving layer then fails, rolling everything
+        // back. The typed text must survive that rollback.
+        let bad = r#"
+            local calls = 0
+            local function layers()
+                calls = calls + 1
+                if calls > 2 then error('boom') end
+                return { iced.layer(iced.text_editor(nil, { id = 'a' }), { id = 'L1' }) }
+            end
+            return { layers = layers }
+        "#;
+        let shell = r#"
+            local panel = require('panel')
+            local app = {}
+            function app:view() return panel.layers() end
+            return riced.daemon(app, 'test', function() end, app.view):run()
+        "#;
+        let profile = Profile::new(&[("shell.lua", shell), ("panel.lua", good)]);
+        let mut app = load(shell, &profile.shell()).unwrap();
+        app.prepare_layers().unwrap();
+        let insert = |app: &App, id: &str| {
+            crate::widgets::edit(
+                app.generation,
+                id,
+                iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert('x')),
+            )
+        };
+        let first = app.layers[0].window;
+        let second = app.layers[1].window;
+        app.view(first).unwrap();
+        app.view(second).unwrap();
+        assert_eq!(insert(&app, "a").as_deref(), Some("x"));
+        assert_eq!(insert(&app, "b").as_deref(), Some("x"));
+
+        profile.write("panel.lua", bad);
+        assert!(app.reload_modules().is_err());
+        assert_eq!(app.layers.len(), 2);
+        assert_eq!(crate::widgets::editor_text(app.generation, "a").as_deref(), Some("x"));
+        assert_eq!(crate::widgets::editor_text(app.generation, "b").as_deref(), Some("x"));
+        app.view(first).unwrap();
+        app.view(second).unwrap();
+
+        profile.write("panel.lua", good);
+        app.reload_modules().unwrap();
+        assert_eq!(app.layers.len(), 2);
+        app.view(first).unwrap();
+        app.view(second).unwrap();
+    }
+
 
     #[test]
     fn bounds_changes_do_not_skip_saved_modules() {
