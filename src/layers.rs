@@ -890,7 +890,8 @@ mod tests {
     }
 
     #[test]
-    fn nested_popups_keep_an_explicit_parent() {        let lua = Lua::new();
+    fn nested_popups_keep_an_explicit_parent() {
+        let lua = Lua::new();
         crate::lua::load(&lua).unwrap();
         let root: Table = lua
             .load(

@@ -333,23 +333,23 @@ pub(super) fn list(
         }
 
         for (item, key) in items.iter().zip(keys) {
-            let matched = match normalize(key) {
-                Some(normalized) => index.get(&normalized).and_then(|candidates| {
-                    candidates
-                        .iter()
-                        .copied()
-                        .find(|&old_index| !old_used[old_index])
-                        .map(|old_index| (old_index, previous[old_index].2))
-                }),
-                // Exotic keys (tables, functions, invalid UTF-8) fall back to
-                // the linear scan so matching stays exactly `Value::eq`.
-                None => previous
-                    .iter()
-                    .enumerate()
-                    .find_map(|(old_index, (_, old_key, token, _))| {
-                        (!old_used[old_index] && old_key == key).then_some((old_index, *token))
+            let matched =
+                match normalize(key) {
+                    Some(normalized) => index.get(&normalized).and_then(|candidates| {
+                        candidates
+                            .iter()
+                            .copied()
+                            .find(|&old_index| !old_used[old_index])
+                            .map(|old_index| (old_index, previous[old_index].2))
                     }),
-            };
+                    // Exotic keys (tables, functions, invalid UTF-8) fall back to
+                    // the linear scan so matching stays exactly `Value::eq`.
+                    None => previous.iter().enumerate().find_map(
+                        |(old_index, (_, old_key, token, _))| {
+                            (!old_used[old_index] && old_key == key).then_some((old_index, *token))
+                        },
+                    ),
+                };
             let returning = entry.leaving.iter().position(|leaving| leaving.key == *key);
             let (token, control) = match (matched, returning) {
                 (Some((old_index, token)), _) => {
@@ -528,8 +528,18 @@ mod tests {
             995,
             None,
             "mixed",
-            vec![key("a"), Value::Integer(2), Value::Number(0.0), Value::Boolean(true)],
-            &[key("a"), Value::Integer(2), Value::Number(-0.0), Value::Boolean(true)],
+            vec![
+                key("a"),
+                Value::Integer(2),
+                Value::Number(0.0),
+                Value::Boolean(true),
+            ],
+            &[
+                key("a"),
+                Value::Integer(2),
+                Value::Number(-0.0),
+                Value::Boolean(true),
+            ],
             true,
             None,
         );
@@ -537,12 +547,30 @@ mod tests {
             995,
             None,
             "mixed",
-            vec![Value::Boolean(true), Value::Number(0.0), Value::Integer(2), key("a")],
-            &[Value::Boolean(true), Value::Number(0.0), Value::Integer(2), key("a")],
+            vec![
+                Value::Boolean(true),
+                Value::Number(0.0),
+                Value::Integer(2),
+                key("a"),
+            ],
+            &[
+                Value::Boolean(true),
+                Value::Number(0.0),
+                Value::Integer(2),
+                key("a"),
+            ],
             true,
             None,
         );
-        assert_eq!(next.tokens, [initial.tokens[3], initial.tokens[2], initial.tokens[1], initial.tokens[0]]);
+        assert_eq!(
+            next.tokens,
+            [
+                initial.tokens[3],
+                initial.tokens[2],
+                initial.tokens[1],
+                initial.tokens[0]
+            ]
+        );
         assert!(next.leaving.is_empty());
         forget_generation(995);
     }

@@ -1279,7 +1279,10 @@ mod tests {
     fn failures_reset_only_after_a_full_backoff_lifetime() {
         assert_eq!(reset_failures(3, RESTART_DELAY), 4);
         assert_eq!(reset_failures(3, RESTART_DELAY * 2), 4);
-        assert_eq!(reset_failures(3, MAX_RESTART_DELAY - Duration::from_nanos(1)), 4);
+        assert_eq!(
+            reset_failures(3, MAX_RESTART_DELAY - Duration::from_nanos(1)),
+            4
+        );
         assert_eq!(reset_failures(3, MAX_RESTART_DELAY), 0);
         assert_eq!(reset_failures(0, MAX_RESTART_DELAY), 0);
     }

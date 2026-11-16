@@ -5089,7 +5089,9 @@ return m";
             crate::widgets::edit(
                 app.generation,
                 id,
-                iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert('x')),
+                iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert(
+                    'x',
+                )),
             )
         };
         let first = app.layers[0].window;
@@ -5102,8 +5104,14 @@ return m";
         profile.write("panel.lua", bad);
         assert!(app.reload_modules().is_err());
         assert_eq!(app.layers.len(), 2);
-        assert_eq!(crate::widgets::editor_text(app.generation, "a").as_deref(), Some("x"));
-        assert_eq!(crate::widgets::editor_text(app.generation, "b").as_deref(), Some("x"));
+        assert_eq!(
+            crate::widgets::editor_text(app.generation, "a").as_deref(),
+            Some("x")
+        );
+        assert_eq!(
+            crate::widgets::editor_text(app.generation, "b").as_deref(),
+            Some("x")
+        );
         app.view(first).unwrap();
         app.view(second).unwrap();
 

@@ -56,14 +56,14 @@ fn running_shell_at(root: &Path) -> io::Result<PathBuf> {
     let path = root.join(format!("{profile}.profile"));
     // The recorded path is raw OS bytes (see `record_running_shell_at`) and may
     // not be valid UTF-8, so read and decode it losslessly.
-    let shell = PathBuf::from(std::ffi::OsString::from_vec(
-        fs::read(&path).map_err(|_| {
+    let shell = PathBuf::from(std::ffi::OsString::from_vec(fs::read(&path).map_err(
+        |_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "running profile location is missing",
             )
-        })?,
-    ));
+        },
+    )?));
     let directory = shell.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
