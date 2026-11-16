@@ -352,6 +352,9 @@ pub struct App {
     // during the trial are applied only on success, so a failed reload does
     // not destroy widget state for windows it rolls back.
     deferred_forgets: Option<Vec<window::Id>>,
+    // (mtime, size) of shell.lua at the last read; the 250 ms check reloads
+    // only when this stat changes.
+    shell_stamp: (Option<std::time::SystemTime>, u64),
 }
 
 impl App {
@@ -360,6 +363,12 @@ impl App {
         self.restart = restart;
         self
     }
+}
+
+// (mtime, size) of a file, for stat-first reload checks.
+fn shell_stamp(path: &Path) -> Option<(Option<std::time::SystemTime>, u64)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.modified().ok(), metadata.len()))
 }
 
 // Startup errors after loading are fatal; runtime callbacks fall back.
@@ -562,6 +571,7 @@ pub fn load_with_plugins(
         plugins,
         restart: None,
         deferred_forgets: None,
+        shell_stamp: shell_stamp(path).unwrap_or((None, 0)),
     };
     for name in [
         "title",
@@ -2009,6 +2019,13 @@ impl App {
         } else {
             change
         };
+        // Stat first: a full read of shell.lua 4x/second is wasted work when
+        // nothing changed. Metadata failure falls back to reading.
+        if let Some(stamp) = shell_stamp(&self.path)
+            && stamp == self.shell_stamp
+        {
+            return Ok(change);
+        }
         let source = match std::fs::read_to_string(&self.path) {
             Ok(source) => source,
             Err(error) => {
@@ -2022,6 +2039,11 @@ impl App {
             }
         };
         if self.source.as_deref() == Some(&source) {
+            // Same contents after all; remember the stamp so the next poll
+            // skips the read.
+            if let Some(stamp) = shell_stamp(&self.path) {
+                self.shell_stamp = stamp;
+            }
             return Ok(change);
         }
         if self.reload_failed.as_deref() == Some(source.as_str())
@@ -2034,6 +2056,11 @@ impl App {
         self.reload_attempt = Some(Instant::now());
         match self.reload(&source) {
             Ok(()) => {
+                // Only record the stamp on success so a failed reload keeps
+                // re-reading until the 1 s retry window re-attempts it.
+                if let Some(stamp) = shell_stamp(&self.path) {
+                    self.shell_stamp = stamp;
+                }
                 self.source = Some(source);
                 self.reload_failed = None;
                 self.reload_error = None;
@@ -5086,7 +5113,6 @@ return m";
         app.view(first).unwrap();
         app.view(second).unwrap();
     }
-
 
     #[test]
     fn bounds_changes_do_not_skip_saved_modules() {
