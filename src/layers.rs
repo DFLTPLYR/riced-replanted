@@ -80,7 +80,11 @@ pub fn hoist_popups(lua: &Lua, node: Table) -> mlua::Result<Table> {
         if matches!(kind.as_deref(), Some("layer" | "window")) {
             let parent = surface
                 .get::<Option<Table>>("settings")?
-                .and_then(|settings| settings.get::<Option<String>>("id").ok().flatten());
+                .and_then(|settings| settings.get::<Option<String>>("id").ok().flatten())
+                // The runtime names an id-less surface after its 1-based
+                // position in the flattened surface list; mirror that so a
+                // nested popup can address the layer without an explicit id.
+                .or_else(|| Some(format!("#{}", count + 1)));
             let mut popups = Vec::new();
             if let Some(content) = surface.get::<Option<Value>>("content")? {
                 let cleaned = extract(lua, content, parent.as_deref(), &mut popups)?;
@@ -128,6 +132,15 @@ fn extract(
     let kind = node.get::<Option<String>>("kind")?;
     if kind.as_deref() == Some("popup") {
         let settings: Table = node.get("settings")?;
+        // Invisible popups never reach the runtime's surface list; drop them
+        // here so they cannot shift the position-based surface ids either.
+        // The raw field, not popup(): the parent default below has not been
+        // applied yet, and the full parse runs later in prepare_layers.
+        if !settings.get::<Option<bool>>("visible")?.unwrap_or(true) {
+            let space = lua.create_table()?;
+            space.set("kind", "space")?;
+            return Ok(Value::Table(space));
+        }
         if settings.get::<Option<String>>("parent")?.is_none() {
             let parent = parent.ok_or_else(|| {
                 mlua::Error::runtime("popup nested in a layer without an id requires parent")
@@ -813,8 +826,71 @@ mod tests {
     }
 
     #[test]
-    fn nested_popups_keep_an_explicit_parent() {
+    fn an_idless_layer_still_anchors_its_popup_by_position() {
         let lua = Lua::new();
+        crate::lua::load(&lua).unwrap();
+        let root: Table = lua
+            .load(
+                r#"
+                iced.layer(iced.row({
+                    iced.popup(iced.text("menu"), { id = "menu", width = 10, height = 10 }),
+                }), {})
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        let root = hoist_popups(&lua, root).unwrap();
+        let surfaces = nodes(root).unwrap();
+        assert_eq!(surfaces.len(), 2);
+        let popup = surfaces
+            .iter()
+            .find(|surface| surface.get::<String>("kind").unwrap() == "popup")
+            .unwrap();
+        assert_eq!(
+            popup
+                .get::<Table>("settings")
+                .unwrap()
+                .get::<String>("parent")
+                .unwrap(),
+            // Position 1 in the flattened list, matching the runtime default.
+            "#1"
+        );
+    }
+
+    #[test]
+    fn hidden_popups_are_not_hoisted_or_counted() {
+        let lua = Lua::new();
+        crate::lua::load(&lua).unwrap();
+        let root: Table = lua
+            .load(
+                r#"
+                {
+                    iced.layer(iced.row({
+                        iced.popup(iced.text("hidden"), {
+                            id = "hidden", width = 10, height = 10, visible = false,
+                        }),
+                    }), {}),
+                    iced.layer(iced.text("second"), {}),
+                }
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        let root = hoist_popups(&lua, root).unwrap();
+        let surfaces = nodes(root).unwrap();
+        // The hidden popup consumes no surface slot: two layers only.
+        assert_eq!(surfaces.len(), 2);
+        assert!(
+            surfaces
+                .iter()
+                .all(|surface| surface.get::<String>("kind").unwrap() == "layer")
+        );
+    }
+
+    #[test]
+    fn nested_popups_keep_an_explicit_parent() {        let lua = Lua::new();
         crate::lua::load(&lua).unwrap();
         let root: Table = lua
             .load(
