@@ -425,16 +425,16 @@ fn invoke_notification_action(
     action: &str,
 ) -> Result<(), String> {
     let mut model = model.lock().unwrap();
-    if let Some(notification) = model.notifications.get(&id)
-        && !notification.actions.iter().any(|(key, _)| key == action)
-    {
+    let Some(notification) = model.notifications.get(&id) else {
+        return Err(format!("unknown notification: {id}"));
+    };
+    if !notification.actions.iter().any(|(key, _)| key == action) {
         return Err(format!("unknown notification action: {action}"));
     }
-    if model.notifications.remove(&id).is_some() {
-        model.signals.push(Signal::Action(id, action.to_owned()));
-        model.signals.push(Signal::Closed(id, 2));
-        model.dirty = true;
-    }
+    model.notifications.remove(&id);
+    model.signals.push(Signal::Action(id, action.to_owned()));
+    model.signals.push(Signal::Closed(id, 2));
+    model.dirty = true;
     Ok(())
 }
 
