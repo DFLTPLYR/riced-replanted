@@ -333,8 +333,8 @@ fn parse_layout(
         "" => "standard",
         kind => kind,
     };
-    let label = clamp(text("label").to_owned(), MAX_MENU_TEXT);
-    let icon = clamp(text("icon-name").to_owned(), MAX_MENU_TEXT);
+    let label = clamp(text("label"), MAX_MENU_TEXT);
+    let icon = clamp(text("icon-name"), MAX_MENU_TEXT);
     let toggle = text("toggle-type");
     let checked = number("toggle-state").unwrap_or(0) == 1;
     let mut items = Vec::new();
