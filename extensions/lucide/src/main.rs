@@ -46,9 +46,8 @@ fn main() -> std::io::Result<()> {
             ))
         })
         .serve(|context| {
-            // Static catalog: publish once; the host never subscribes in
-            // practice, but the SDK requires a state write to stay alive.
-            context.publish(json!({"count": 1}));
+            // Static catalog: publish the real icon count once and park.
+            context.publish(json!({"count": ICONS.lines().count()}));
             std::thread::park();
         })
 }

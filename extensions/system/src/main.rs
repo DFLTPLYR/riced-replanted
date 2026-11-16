@@ -39,7 +39,9 @@ fn main() -> std::io::Result<()> {
                     kind = kind.with_memory(MemoryRefreshKind::everything());
                 }
                 if context.wants("processes") {
-                    kind = kind.with_processes(ProcessRefreshKind::everything());
+                    // Only the count is published; nothing() still enumerates
+                    // PIDs but skips cmdlines, cwd, exe, and disk usage.
+                    kind = kind.with_processes(ProcessRefreshKind::nothing());
                 }
                 system.refresh_specifics(kind);
 
