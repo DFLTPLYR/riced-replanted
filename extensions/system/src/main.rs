@@ -123,6 +123,12 @@ fn main() -> std::io::Result<()> {
         })
 }
 
+// libc does not expose tzset on Linux; declare it so a timezone change is
+// picked up without a restart.
+unsafe extern "C" {
+    fn tzset();
+}
+
 fn clock() -> Value {
     let Ok(seconds) = SystemTime::now().duration_since(UNIX_EPOCH) else {
         return Value::Null;
@@ -131,6 +137,8 @@ fn clock() -> Value {
         return Value::Null;
     };
     // localtime_r fills a broken-down local time; no allocation, thread-safe.
+    // glibc caches the timezone on first use, so re-check it.
+    unsafe { tzset() };
     let mut time: libc::tm = unsafe { std::mem::zeroed() };
     if unsafe { libc::localtime_r(&epoch, &mut time) }.is_null() {
         return Value::Null;
