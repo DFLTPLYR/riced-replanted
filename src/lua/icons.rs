@@ -48,12 +48,16 @@ impl Theme {
             .iter()
             .find_map(|root| Entry::parse_file(root.join(theme).join("index.theme")).ok())?;
         let header = entry.section("Icon Theme");
-        let directories = header
-            .attr("Directories")
-            .or_else(|| header.attr("ScaledDirectories"))?;
+        // Union both keys: `Directories` is required by spec, but some themes
+        // list only `ScaledDirectories`.
+        let directories = header.attr("Directories").unwrap_or("");
+        let scaled = header.attr("ScaledDirectories").unwrap_or("");
+        if directories.is_empty() && scaled.is_empty() {
+            return None;
+        }
         let directories = directories
             .split(',')
-            .chain(header.attr("ScaledDirectories").unwrap_or("").split(','))
+            .chain(scaled.split(','))
             .map(str::trim)
             .filter(|path| relative(path))
             .filter_map(|path| {
