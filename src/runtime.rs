@@ -2050,6 +2050,9 @@ impl App {
     // Re-renders every window that shows a changed module. A broken module restores the
     // previous one so the current UI keeps running, matching shell.lua reload behaviour.
     fn reload_modules(&mut self) -> mlua::Result<Change> {
+        // Modules first required outside a mount (timers, callbacks) only
+        // enter the watch list here, so their edits are detected too.
+        self.modules.borrow_mut().watch_all(&self.lua)?;
         let changed = self.modules.borrow_mut().detect_changes();
         if changed.is_empty() {
             return Ok(Change::None);
