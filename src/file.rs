@@ -102,6 +102,9 @@ struct File {
     kind: Kind,
     data: Value,
     error: Option<String>,
+    // Construction failed to read/parse the original file; saving the empty
+    // fallback table would overwrite the user's real contents.
+    load_error: bool,
 }
 
 impl UserData for File {
@@ -113,6 +116,7 @@ impl UserData for File {
         fields.add_field_method_get("data", |_, file| Ok(file.data.clone()));
         fields.add_field_method_set("data", |_, file, value: Value| {
             file.data = value;
+            file.load_error = false;
             Ok(())
         });
         fields.add_field_method_get("error", |_, file| Ok(file.error.clone()));
@@ -123,6 +127,7 @@ impl UserData for File {
         methods.add_method_mut("write", |lua, file, value: Option<Value>| {
             if let Some(value) = value {
                 file.data = value;
+                file.load_error = false;
             }
             Ok(file.save(lua))
         });
@@ -132,6 +137,14 @@ impl UserData for File {
 impl File {
     /// Writes `data`. Returns `true` or `false, error`; file errors are not fatal.
     fn save(&mut self, lua: &Lua) -> (bool, Option<String>) {
+        if self.load_error {
+            let error = format!(
+                "{} failed to load; replace its contents with file:write(value) before saving",
+                self.path.display()
+            );
+            self.error = Some(error.clone());
+            return (false, Some(error));
+        }
         let json = match lua.from_value::<Json>(self.data.clone()) {
             Ok(json) => json,
             Err(error) => {
@@ -172,7 +185,21 @@ pub fn install(lua: &Lua, base: &Path) -> mlua::Result<()> {
         if path.is_empty() {
             return Err(mlua::Error::runtime("file path must not be empty"));
         }
-        let path = PathBuf::from(path);
+        // Expand `~` so `~/notes.json` does not land in a literal tilde
+        // directory under the profile.
+        let path = if path == "~" || path.starts_with("~/") {
+            let home = std::env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .ok_or_else(|| mlua::Error::runtime("cannot expand file path: HOME is not set"))?;
+            let home = PathBuf::from(home);
+            if path == "~" {
+                home
+            } else {
+                home.join(&path[2..])
+            }
+        } else {
+            PathBuf::from(path)
+        };
         let path = if path.is_absolute() {
             path
         } else {
@@ -207,7 +234,8 @@ pub fn install(lua: &Lua, base: &Path) -> mlua::Result<()> {
             path,
             kind,
             data,
-            error,
+            error: error.clone(),
+            load_error: error.is_some(),
         };
         let userdata: AnyUserData = lua.create_userdata(file)?;
         let error = userdata.borrow::<File>()?.error.clone();
@@ -239,6 +267,80 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         install(&lua, &dir).unwrap();
         (lua, dir)
+    }
+
+    #[test]
+    fn corrupt_load_refuses_save_until_data_is_replaced() {
+        let (lua, dir) = setup("corrupt");
+        let path = dir.join("data.json");
+        std::fs::write(&path, "{broken").unwrap();
+        lua.load(
+            r#"
+            local f = riced.file({path = "data.json", onError = function() end})
+            local ok, err = f:save()
+            assert(not ok)
+            assert(err:find("failed to load"))
+            "#,
+        )
+        .exec()
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+        lua.load(
+            r#"
+            local f = riced.file({path = "data.json", onError = function() end})
+            assert(not f:save())
+            assert(f:write({ value = 2 }))
+            assert(f:save())
+            "#,
+        )
+        .exec()
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\n  \"value\": 2\n}"
+        );
+    }
+
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn home_paths_are_expanded_and_require_home() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let (lua, _) = setup("home");
+        let home = std::env::temp_dir().join(format!("riced-home-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let previous = std::env::var_os("HOME");
+        // SAFETY: single-threaded under the HOME_LOCK guard, then restored.
+        unsafe { std::env::set_var("HOME", &home) };
+
+        lua.load(
+            r#"
+            local f = riced.file({path = "~/notes.json", type = "json"})
+            f:write({ value = 1 })
+            "#,
+        )
+        .exec()
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.join("notes.json")).unwrap(),
+            "{\n  \"value\": 1\n}"
+        );
+
+        // SAFETY: single-threaded under the HOME_LOCK guard, then restored.
+        unsafe { std::env::remove_var("HOME") };
+        let result: Result<AnyUserData, _> = lua
+            .load(r#"return riced.file({path = "~/notes.json", type = "json"})"#)
+            .eval();
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("HOME is not set"), "{error}");
+
+        // SAFETY: single-threaded under the HOME_LOCK guard, restoring the
+        // value captured above.
+        match previous {
+            Some(home) => unsafe { std::env::set_var("HOME", home) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]
