@@ -1849,7 +1849,13 @@ impl App {
                 if self.stale(component) {
                     return Ok(Scope::None);
                 }
-                let text = widgets::editor_text(*generation, &action.id).unwrap_or_default();
+                // update() only delivers actions whose editor state exists;
+                // skip the same ones so redraw_scope never sees an event the
+                // handler will not receive. By redraw time the editor holds
+                // the post-edit text, the same value the handler acts on.
+                let Some(text) = widgets::editor_text(*generation, &action.id) else {
+                    return Ok(Scope::None);
+                };
                 editor_payload(&self.lua, component, action, &text)?
             }
             Message::Key(..) | Message::Mouse(..) | Message::Frame(..) | Message::Editor(..) => {
