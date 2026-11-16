@@ -73,20 +73,22 @@ fn bounds(id: &str) -> Option<Rectangle> {
 }
 
 fn record(id: &str, window: Option<window::Id>, bounds: Rectangle) {
-    let key = (window, id.to_owned());
     let changed = BOUNDS.with_borrow_mut(|stored| {
+        let key = (window, id.to_owned());
         if stored.len() >= LIMIT && !stored.contains_key(&key) {
             stored.clear();
         }
         stored.insert(key, bounds) != Some(bounds)
     });
-    LATEST.with_borrow_mut(|stored| {
-        if stored.len() >= LIMIT && !stored.contains_key(id) {
-            stored.clear();
-        }
-        stored.insert(id.to_owned(), (window, bounds));
-    });
+    // The id-keyed map only serves cross-surface anchoring, which cares about
+    // bounds; skip the insert while a widget holds still.
     if changed {
+        LATEST.with_borrow_mut(|stored| {
+            if stored.len() >= LIMIT && !stored.contains_key(id) {
+                stored.clear();
+            }
+            stored.insert(id.to_owned(), (window, bounds));
+        });
         CHANGED.set(true);
     }
 }
