@@ -83,6 +83,7 @@ enum Incoming {
 pub struct Plugins {
     socket: Option<PathBuf>,
     socket_id: Option<(u64, u64)>,
+    started: Instant,
     _lock: Option<fs::File>,
     incoming: Receiver<Incoming>,
     conns: HashMap<u64, String>,
@@ -125,6 +126,7 @@ impl Plugins {
         Ok(Self {
             socket: Some(socket),
             socket_id,
+            started: Instant::now(),
             _lock: Some(lock),
             incoming,
             conns: HashMap::new(),
@@ -138,6 +140,55 @@ impl Plugins {
         crate::ipc::take(self.socket.as_ref()?.file_stem()?.to_str()?)
     }
 
+    /// Mirrors registry liveness into `$XDG_RUNTIME_DIR/riced/<profile>.status`
+    /// so `riced ipc status` reports without a daemon round-trip.
+    fn write_status(&self) {
+        let Some(path) = self.status_path() else {
+            return;
+        };
+        let extensions = self
+            .handles
+            .iter()
+            .map(|(name, handle)| {
+                let mut methods: Vec<String> = handle.methods.keys().cloned().collect();
+                methods.sort();
+                (
+                    name.clone(),
+                    Json::Object(serde_json::Map::from_iter([
+                        ("alive".to_owned(), Json::from(handle.alive)),
+                        ("methods".to_owned(), Json::from(methods)),
+                    ])),
+                )
+            })
+            .collect();
+        let document = Json::Object(serde_json::Map::from_iter([
+            ("pid".to_owned(), Json::from(std::process::id())),
+            (
+                "uptime_s".to_owned(),
+                Json::from(self.started.elapsed().as_secs()),
+            ),
+            ("extensions".to_owned(), extensions),
+        ]));
+        let temporary = path.with_extension(format!("status.tmp-{}", std::process::id()));
+        let result = fs::write(
+            &temporary,
+            serde_json::to_vec(&document).unwrap_or_default(),
+        )
+        .and_then(|()| fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)))
+        .and_then(|()| fs::rename(&temporary, &path));
+        if let Err(error) = result {
+            let _ = fs::remove_file(&temporary);
+            log::warn!(target: "plugin.status", "cannot write status: {error}");
+        }
+    }
+
+    fn status_path(&self) -> Option<PathBuf> {
+        Some(crate::ipc::runtime_dir().ok()?.join(format!(
+            "{}.status",
+            self.socket.as_ref()?.file_stem()?.to_str()?
+        )))
+    }
+
     /// A registry with no socket or supervisor, used when plugins are not enabled (tests).
     #[cfg(test)]
     pub fn detached() -> Self {
@@ -145,6 +196,7 @@ impl Plugins {
         Self {
             socket: None,
             socket_id: None,
+            started: Instant::now(),
             _lock: None,
             incoming: rx,
             conns: HashMap::new(),
@@ -175,6 +227,7 @@ impl Plugins {
         Self {
             socket: None,
             socket_id: None,
+            started: Instant::now(),
             _lock: None,
             incoming,
             conns: HashMap::new(),
@@ -270,6 +323,7 @@ impl Plugins {
                         },
                     );
                     self.install_one(lua, &name)?;
+                    self.write_status();
                 }
                 Incoming::State { conn, store } => {
                     let Some(name) = self.conns.get(&conn).cloned() else {
@@ -354,6 +408,7 @@ impl Plugins {
                         }
                     }
                     self.set_alive(lua, &name, false)?;
+                    self.write_status();
                     changed = true;
                 }
             }
@@ -1910,6 +1965,7 @@ mod tests {
         let plugins = Plugins {
             socket: Some(socket.clone()),
             socket_id: Some((metadata.dev(), metadata.ino())),
+            started: Instant::now(),
             _lock: Some(lock),
             incoming,
             conns: HashMap::new(),

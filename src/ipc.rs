@@ -106,19 +106,30 @@ pub fn running_profile() -> io::Result<String> {
     running_profile_at(&runtime_dir()?)
 }
 
+/// Returns every live daemon's profile id, for status listings.
+pub fn running_profiles() -> io::Result<Vec<String>> {
+    running_profiles_at(&runtime_dir()?)
+}
+
 const NO_RUNNING_PROFILE: &str =
     "expected one running profile; use -c <name> or -p <directory> to select a configuration";
 
 fn running_profile_at(root: &Path) -> io::Result<String> {
+    let mut profiles = running_profiles_at(root)?;
+    if profiles.len() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            NO_RUNNING_PROFILE,
+        ));
+    }
+    Ok(profiles.remove(0))
+}
+
+fn running_profiles_at(root: &Path) -> io::Result<Vec<String>> {
     let mut profiles = Vec::new();
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                NO_RUNNING_PROFILE,
-            ));
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(profiles),
         Err(error) => return Err(error),
     };
     for entry in entries {
@@ -130,13 +141,7 @@ fn running_profile_at(root: &Path) -> io::Result<String> {
             profiles.push(name.to_owned());
         }
     }
-    if profiles.len() != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            NO_RUNNING_PROFILE,
-        ));
-    }
-    Ok(profiles.remove(0))
+    Ok(profiles)
 }
 
 pub fn queue(profile: Option<&str>, command: &str, args: &[String]) -> io::Result<()> {

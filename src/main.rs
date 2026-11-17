@@ -64,6 +64,11 @@ enum Command {
         #[arg(required = true, num_args = 1.., trailing_var_arg = true, value_name = "COMMAND")]
         command: Vec<String>,
     },
+    /// Print running daemons and their extension health
+    Status {
+        #[command(flatten)]
+        config: ConfigArgs,
+    },
     /// Print stored logs, or clear them with --clear
     Logs {
         #[command(flatten)]
@@ -364,6 +369,58 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     return Err("IPC command must not be empty".into());
                 }
                 ipc::queue(selected_profile(&config)?.as_deref(), command, args)?;
+            }
+            Command::Status { config } => {
+                let profiles = match selected_profile(&config)? {
+                    Some(profile) => vec![profile],
+                    None => ipc::running_profiles()?,
+                };
+                if profiles.is_empty() {
+                    return Err("no running daemon found".into());
+                }
+                for profile in profiles {
+                    match std::fs::read(ipc::runtime_dir()?.join(format!("{profile}.status")))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    {
+                        Some(status) => {
+                            let pid = status
+                                .get("pid")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or_default();
+                            let uptime = status
+                                .get("uptime_s")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or_default();
+                            println!("{profile}: pid {pid}, up {uptime}s");
+                            let extensions = status
+                                .get("extensions")
+                                .and_then(serde_json::Value::as_object);
+                            match extensions {
+                                None => println!("  no extensions"),
+                                Some(extensions) if extensions.is_empty() => {
+                                    println!("  no extensions")
+                                }
+                                Some(extensions) => {
+                                    for (name, extension) in extensions {
+                                        let alive = extension
+                                            .get("alive")
+                                            .and_then(serde_json::Value::as_bool)
+                                            .unwrap_or(false);
+                                        let methods = extension
+                                            .get("methods")
+                                            .and_then(serde_json::Value::as_array)
+                                            .map(Vec::len)
+                                            .unwrap_or(0);
+                                        let state = if alive { "alive" } else { "stopped" };
+                                        println!("  {name}: {state}, {methods} methods");
+                                    }
+                                }
+                            }
+                        }
+                        None => println!("{profile}: no status reported yet"),
+                    }
+                }
             }
             Command::Logs {
                 config,

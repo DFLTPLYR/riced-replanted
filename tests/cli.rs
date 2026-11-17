@@ -187,6 +187,60 @@ fn ipc_targets_one_of_several_running_profiles() {
 }
 
 #[test]
+fn status_lists_live_daemons_and_extensions() {
+    let runtime = format!("/tmp/opencode/riced-status-{}", std::process::id());
+    let _ = std::fs::remove_dir_all(&runtime);
+    std::fs::create_dir_all(format!("{runtime}/riced")).unwrap();
+    let profile_dir = Path::new(&runtime).join("configs/riced/demo");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    let id = profile_id(&profile_dir);
+    let _listener =
+        std::os::unix::net::UnixListener::bind(format!("{runtime}/riced/{id}.sock")).unwrap();
+    std::fs::write(
+        format!("{runtime}/riced/{id}.status"),
+        serde_json::json!({
+            "pid": 1234,
+            "uptime_s": 61,
+            "extensions": {
+                "system": {"alive": true, "methods": ["disk", "load"]},
+                "dbus": {"alive": false, "methods": []}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .args(["status"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("{id}: pid 1234, up 61s")),
+        "{stdout}"
+    );
+    assert!(stdout.contains("system: alive, 2 methods"), "{stdout}");
+    assert!(stdout.contains("dbus: stopped, 0 methods"), "{stdout}");
+
+    // A selector prints exactly that daemon.
+    let selected = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("XDG_CONFIG_HOME", Path::new(&runtime).join("configs"))
+        .args(["status", "-c", "demo"])
+        .output()
+        .unwrap();
+    assert!(selected.status.success());
+    assert!(String::from_utf8_lossy(&selected.stdout).contains("pid 1234"));
+    let _ = std::fs::remove_dir_all(&runtime);
+}
+
+#[test]
 fn help_does_not_require_configuration_or_compositor() {
     let output = Command::new(env!("CARGO_BIN_EXE_riced"))
         .env_remove("HOME")
