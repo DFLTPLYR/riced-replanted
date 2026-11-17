@@ -27,6 +27,10 @@ and named configurations. `-c` / `--config` accepts a single directory name;
 from the current directory. The shell expands `~` in unquoted paths. The two
 selectors cannot be combined. `require` also searches the selected directory.
 Use `riced --help`, `riced ipc --help`, or `riced --version` for CLI information.
+`riced status` lists running daemons with PID, uptime, and extension health;
+with several running, select one with `-c`/`-p`. `riced ipc eval '<lua>'` runs
+code in the live state of a daemon without touching files; changes are lost at
+the next reload.
 
 Previously, `-p test` selected a named profile; use `-c test` for that now.
 
@@ -138,6 +142,10 @@ The bundled extensions are:
   refresh, and `iced.openmeteo`.
 - [`riced-applications`](extensions/applications/API.md) — installed XDG desktop
   entries and launching them.
+- [`riced-screenshot`](extensions/screenshot/API.md) — output screenshots as
+  PNG via `zwlr-screencopy-v1` (wlroots-family compositors).
+- [`riced-shortcuts`](extensions/shortcuts/API.md) — compositor global
+  keybindings (Hyprland, sway) forwarded to Lua as plugin events.
 
 The D-Bus and Wayland extensions bound display text and array snapshots to stay
 below the protocol's 256 KiB message limit. Entries that exceed an array's byte
@@ -155,6 +163,8 @@ just extension-themeagen
 just extension-lucide
 just extension-openmeteo
 just extension-applications
+just extension-screenshot
+just extension-shortcuts
 ```
 
 Build any Rust extension into an output directory:

@@ -18,6 +18,7 @@ installed by `riced stubs`; extension definitions live in each extension's
   - [`riced.daemon`](#riceddaemon)
   - [Daemon callbacks](#daemon-callbacks)
   - [`riced.ipc`](#ricedipc)
+  - [`riced.watch`](#ricedwatch)
   - [`config` and `theme`](#config-and-theme)
   - [`riced.file`](#ricedfile)
   - [Plugins and extensions](#plugins-and-extensions)
@@ -342,11 +343,47 @@ riced ipc restart
 riced ipc -c work restart
 ```
 
+`eval` is built in the same way: it runs the arguments as Lua code in the
+daemon's live state. Changes apply immediately and are lost at the next reload,
+when Lua state is rebuilt. It sits behind the same trust boundary as the rest
+of the CLI: the queue directory is `0700`, so only the user running the daemon
+can reach it. Errors are logged like handler errors and do not stop the daemon.
+
+```sh
+riced ipc eval 'log("probe", 41 + 1)'
+riced ipc -c work eval 'theme.background = "#101010"'
+```
+
 The CLI only queues the request, so success means it was queued, not that a
 daemon handled it. Each profile has its own queue; starting a new daemon discards
 requests left by the previous instance. Without `-c` or `-p`, the CLI targets
 the only running profile discovered through `$XDG_RUNTIME_DIR/riced/*.sock`;
 with several running profiles it asks for `-c <name>` or `-p <directory>`.
+
+### `riced.watch`
+
+Registers a file watcher. The callback receives the daemon's state table as
+`self` and the file contents as a string, or nil when the file is missing or
+not valid UTF-8:
+
+```lua
+riced.watch("~/notes/todo.txt", function(self, contents)
+    self.todos = {}
+    for line in (contents or ""):gmatch("([^\n]*)\n?") do
+        if #line > 0 then table.insert(self.todos, line) end
+    end
+end)
+```
+
+Paths may be absolute, `~/`-prefixed, or relative to the profile directory,
+matching `riced.file`. Watching stats the file every 250 ms and reads it only
+when the stat changed, so an unchanged file costs one stat call. The first
+observation only records: a watch registered on a missing file stays quiet
+until the file appears. Registering a path again replaces its callback, and
+passing nil as the callback removes the watch. Callback return values behave
+like an `update` return value, and errors are logged without stopping the
+daemon. Watches reset when the Lua state reloads, so register them from
+`shell.lua` or a watched module.
 Selectors go before the command name; everything after it is passed to the
 handler unchanged. To target the default configuration explicitly, use
 `riced ipc -p ~/.config/riced settings` (adjust for `$XDG_CONFIG_HOME` if set).
@@ -466,11 +503,12 @@ if wayland.connected then
 end
 ```
 
-| Field   | Type    | Meaning                            |
-| ------- | ------- | ---------------------------------- |
-| `name`  | string  | Extension name                     |
-| `alive` | boolean | Whether the extension is connected |
-| `store` | table   | Last published snapshot            |
+| Field   | Type      | Meaning                              |
+| ------- | --------- | ------------------------------------ |
+| `name`  | string    | Extension name                       |
+| `alive` | boolean   | Whether the extension is connected   |
+| `store` | table     | Last published snapshot              |
+| `state` | string[]  | Store keys the extension advertises  |
 
 Unknown keys on the proxy read through to `store`, so `plugin.cpu` and
 `plugin.store.cpu` are equivalent. Declared extension methods keep their names.
@@ -507,17 +545,20 @@ Extensions may push events. They arrive in `update` as:
 | Extension      | Store fields                                                                                     | Methods                                                                                                                                                                                  | Events |
 | -------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
 | `system`       | `host`, `time`, `cpu`, `memory`, `disks`, `gpus`, `processes`                                    | none                                                                                                                                                                                     | none   |
-| `wayland`      | `connected`, `capabilities`, `outputs`, `toplevels`, `workspaces`, `workspace_groups`, `focused` | `activate_toplevel`, `close_toplevel`, `activate_workspace`                                                                                                                              | none   |
+| `wayland`      | `connected`, `capabilities`, `outputs`, `toplevels`, `workspaces`, `workspace_groups`, `focused`, `idle` | `activate_toplevel`, `close_toplevel`, `activate_workspace`, `set_idle_timeout`                                                                                                          | none   |
 | `dbus`         | `connected`, `capabilities`, `tray`, `tray_menu`, `notifications`                                | `activate_tray`, `secondary_activate_tray`, `context_menu_tray`, `open_tray_menu`, `close_tray_menu`, `tray_menu_event`, `close_notification`, `invoke_notification_action`, `pick_file` | none   |
 | `themeagen`    | `ready`, `mode`, `source`, `colors`                                                              | `generate`, `populate`, `regenerate`                                                                                                                                                     | none   |
 | `lucide`       | `count`                                                                                          | `resolve`, `exists`, `list`                                                                                                                                                              | none   |
 | `openmeteo`    | `ready`, `latitude`, `longitude`, `current`, `current_units`, `timezone`, `updated_at`, `error`, `readings` | `configure`                                                                                                                                                                   | none   |
 | `applications` | `applications`                                                                                   | `launch`                                                                                                                                                                                 | none   |
+| `screenshot`   | `connected`, `capturing`, `last`                                                                 | `capture`                                                                                                                                                                                | none   |
+| `shortcuts`    | `connected`, `compositor`, `binds`                                                               | `bind`, `unbind`                                                                                                                                                                         | `{shortcut = string}` |
 
-All bundled extensions publish whole snapshots rather than pushing events.
-Each publish replaces the snapshot contents, so re-read a field in `view`
+All bundled extensions publish whole snapshots; each publish replaces the
+snapshot contents, so re-read a field in `view`
 instead of caching a nested table across updates; the proxy table itself stays
-live. Store reads are synchronous and subscribe to fields the first time Lua
+live. Only `shortcuts` also pushes events. Store reads are synchronous and
+subscribe to fields the first time Lua
 reads them. JSON `null` fields are exposed as `nil`, and `null` array entries are
 removed. Methods are asynchronous and use positional arguments. `system` has no
 methods. Wayland, most D-Bus methods, and `applications.launch` return no value
