@@ -42,6 +42,7 @@ struct Handle {
     conn: u64,
     store: Json,
     alive: bool,
+    state: Vec<String>,
     methods: HashMap<String, MethodSpec>,
     writer: SyncSender<Vec<u8>>,
     pending: Pending,
@@ -55,6 +56,7 @@ enum Incoming {
         conn: u64,
         v: u32,
         name: String,
+        state: Vec<String>,
         methods: HashMap<String, MethodSpec>,
         writer: SyncSender<Vec<u8>>,
     },
@@ -224,6 +226,7 @@ impl Plugins {
                     conn,
                     v,
                     name,
+                    state,
                     methods,
                     writer,
                 } => {
@@ -257,6 +260,7 @@ impl Plugins {
                             conn,
                             store: Json::Null,
                             alive: true,
+                            state,
                             methods,
                             writer,
                             pending: Arc::new(Mutex::new(HashMap::new())),
@@ -386,6 +390,10 @@ impl Plugins {
         };
         proxy.set("name", name)?;
         proxy.set("alive", handle.alive)?;
+        proxy.set(
+            "state",
+            lua.create_sequence_from(handle.state.iter().cloned())?,
+        )?;
         if let Some(meta) = lua.globals().get::<Option<Table>>("__riced_plugin_meta")? {
             proxy.set_metatable(Some(meta))?;
         }
@@ -768,13 +776,14 @@ fn read_conn(stream: UnixStream, id: u64, tx: SyncSender<Incoming>, stop: Arc<At
             ToHost::Register {
                 v,
                 name,
+                state,
                 methods,
                 pid: _,
-                ..
             } => Incoming::Register {
                 conn: id,
                 v,
                 name,
+                state,
                 methods,
                 writer: out_tx.clone(),
             },
@@ -1039,6 +1048,7 @@ pub(crate) fn audit_ready() -> (std::rc::Rc<std::cell::RefCell<Plugins>>, impl F
         conn: 1,
         v: VERSION,
         name: "demo".into(),
+        state: Vec::new(),
         methods: HashMap::from([("query".into(), MethodSpec::default())]),
         writer,
     })
@@ -1090,11 +1100,39 @@ mod tests {
             conn: 1,
             v: VERSION,
             name: "demo".to_owned(),
+            state: Vec::new(),
             methods,
             writer,
         })
         .unwrap();
         calls
+    }
+
+    #[test]
+    fn exposes_advertised_state_keys_on_the_proxy() {
+        let (tx, mut plugins, lua) = setup();
+        let (writer, _calls) = mpsc::sync_channel(16);
+        tx.send(Incoming::Register {
+            conn: 1,
+            v: VERSION,
+            name: "demo".to_owned(),
+            state: vec!["battery".into(), "load".into()],
+            methods: HashMap::new(),
+            writer,
+        })
+        .unwrap();
+        plugins.poll(&lua).unwrap();
+
+        let proxy: Table = lua
+            .globals()
+            .get::<Table>("__riced_plugins")
+            .unwrap()
+            .get("demo")
+            .unwrap();
+        assert_eq!(
+            proxy.get::<Vec<String>>("state").unwrap(),
+            vec!["battery", "load"]
+        );
     }
 
     #[test]
@@ -1350,6 +1388,7 @@ mod tests {
                 conn,
                 v: VERSION,
                 name: "lucide".into(),
+                state: Vec::new(),
                 methods: HashMap::from([("resolve".into(), MethodSpec::default())]),
                 writer,
             })
@@ -1537,6 +1576,7 @@ mod tests {
             conn: 2,
             v: VERSION,
             name: "demo".to_owned(),
+            state: Vec::new(),
             methods: HashMap::new(),
             writer,
         })
