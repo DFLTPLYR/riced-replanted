@@ -58,7 +58,7 @@ build-extensions:
     #!/usr/bin/env bash
     set -euo pipefail
     output="${XDG_CONFIG_HOME:-$HOME/.config}/riced/extensions"
-    for extension in applications dbus lucide openmeteo system themeagen wayland; do
+    for extension in applications dbus lucide openmeteo screenshot shortcuts system themeagen wayland; do
         {{nix}} riced extension build "extensions/$extension" -o "$output/$extension"
     done
 
@@ -121,3 +121,9 @@ extension-screenshot:
     {{nix}} cargo build --release -p riced-extension-screenshot
     install -Dm755 target/release/riced-screenshot "{{ home_directory() }}/.config/riced/extensions/screenshot/riced-screenshot"
     install -Dm644 extensions/screenshot/stub.lua "{{ home_directory() }}/.config/riced/extensions/screenshot/stub.lua"
+
+# Build the Global shortcuts extension and install it into the default profile
+extension-shortcuts:
+    {{nix}} cargo build --release -p riced-extension-shortcuts
+    install -Dm755 target/release/riced-shortcuts "{{ home_directory() }}/.config/riced/extensions/shortcuts/riced-shortcuts"
+    install -Dm644 extensions/shortcuts/stub.lua "{{ home_directory() }}/.config/riced/extensions/shortcuts/stub.lua"
