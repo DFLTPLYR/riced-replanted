@@ -3,6 +3,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use mlua::{
@@ -12,7 +13,7 @@ use mlua::{
 use riced_extension_sdk::write_atomic::write_atomic;
 use serde_json::Value as Json;
 
-use crate::runtime::keys;
+use crate::runtime::{keys, shell_stamp};
 
 #[derive(Clone, Copy)]
 enum Kind {
@@ -105,6 +106,8 @@ struct File {
     // Construction failed to read/parse the original file; saving the empty
     // fallback table would overwrite the user's real contents.
     load_error: bool,
+    // Stat at the last read; the poll re-reads only when this changed.
+    stamp: Option<(Option<SystemTime>, u64)>,
 }
 
 impl UserData for File {
@@ -230,14 +233,30 @@ pub fn install(lua: &Lua, base: &Path) -> mlua::Result<()> {
             }
             Err(read) => error = Some(format!("cannot read {}: {read}", path.display())),
         }
+        let stamp = shell_stamp(&path);
         let file = File {
             path,
             kind,
             data,
             error: error.clone(),
             load_error: error.is_some(),
+            stamp,
         };
         let userdata: AnyUserData = lua.create_userdata(file)?;
+        // Track the mount for the poll; weak values drop entries once the
+        // profile stops holding the file and its callbacks.
+        let mounted = lua.create_table()?;
+        mounted.raw_set("file", userdata.clone())?;
+        if let Some(callback) = &on_loaded {
+            mounted.raw_set("onLoaded", callback.clone())?;
+        }
+        if let Some(callback) = &on_error {
+            mounted.raw_set("onError", callback.clone())?;
+        }
+        let next: i64 = lua.named_registry_value("riced.files_next")?;
+        let instances: Table = lua.named_registry_value("riced.files")?;
+        instances.raw_set(next + 1, mounted)?;
+        lua.set_named_registry_value("riced.files_next", next + 1)?;
         let error = userdata.borrow::<File>()?.error.clone();
         if let Some(error) = error {
             if let Some(callback) = on_error {
@@ -251,7 +270,80 @@ pub fn install(lua: &Lua, base: &Path) -> mlua::Result<()> {
     })?;
     let riced: Table = lua.globals().get("riced")?;
     riced.set("file", constructor)?;
+    let instances = lua.create_table()?;
+    let weak = lua.create_table()?;
+    weak.set("__mode", "v")?;
+    instances.set_metatable(Some(weak))?;
+    lua.set_named_registry_value("riced.files", instances)?;
+    lua.set_named_registry_value("riced.files_next", 0i64)?;
     Ok(())
+}
+
+/// Reads and parses the current contents for the poll. A failure keeps the
+/// mount's last good data and sets `load_error`, so save refuses until
+/// `file:write` replaces the data.
+fn reload(lua: &Lua, path: &Path, kind: Kind) -> Result<Value, String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let json = kind
+        .parse_contents(&contents)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    lua.to_value(&json).map_err(|error| error.to_string())
+}
+
+/// Re-reads live `riced.file` mounts whose stat changed since the last read
+/// and re-runs `onLoaded` with the fresh data (or `onError`). Returns every
+/// `onLoaded` return value; the caller runs them as tasks.
+pub fn poll(lua: &Lua) -> mlua::Result<Vec<Value>> {
+    let instances: Table = lua.named_registry_value("riced.files")?;
+    let entries: Vec<Table> = instances
+        .pairs::<mlua::Integer, Table>()
+        .filter_map(|pair| pair.ok())
+        .map(|(_, entry)| entry)
+        .collect();
+    let mut returns = Vec::new();
+    for entry in entries {
+        let file: AnyUserData = entry.get("file")?;
+        let (path, kind, stamp) = {
+            let file = file.borrow::<File>()?;
+            (file.path.clone(), file.kind, file.stamp)
+        };
+        let fresh = shell_stamp(&path);
+        if fresh == stamp {
+            continue;
+        }
+        let outcome = reload(lua, &path, kind);
+        let (loaded, failed) = {
+            let mut file = file.borrow_mut::<File>()?;
+            file.stamp = fresh;
+            match outcome {
+                Ok(data) => {
+                    file.data = data.clone();
+                    file.error = None;
+                    file.load_error = false;
+                    (Some(data), None)
+                }
+                Err(error) => {
+                    file.error = Some(error.clone());
+                    file.load_error = true;
+                    (None, Some(error))
+                }
+            }
+        };
+        if let Some(data) = loaded {
+            if let Some(callback) = entry.get::<Option<Function>>("onLoaded")? {
+                let value = callback.call::<Value>((file.clone(), data))?;
+                if !value.is_nil() {
+                    returns.push(value);
+                }
+            }
+        } else if let (Some(error), Some(callback)) =
+            (failed, entry.get::<Option<Function>>("onError")?)
+        {
+            callback.call::<()>((file.clone(), error))?;
+        }
+    }
+    Ok(returns)
 }
 
 #[cfg(test)]
@@ -299,6 +391,99 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "{\n  \"value\": 2\n}"
         );
+    }
+
+    #[test]
+    fn file_reloads_when_the_file_changes_externally() {
+        let (lua, dir) = setup("sync");
+        let path = dir.join("data.json");
+        std::fs::write(&path, r#"{"value": 1}"#).unwrap();
+        lua.load(
+            r#"
+            FIRES = 0
+            f = riced.file({path = "data.json", onLoaded = function(file, data)
+                FIRES = FIRES + 1
+                LAST = data.value
+            end})
+            "#,
+        )
+        .exec()
+        .unwrap();
+        assert_eq!(
+            lua.globals().get::<i32>("LAST").unwrap(),
+            1,
+            "constructor load"
+        );
+
+        // An unchanged file does not fire again.
+        crate::file::poll(&lua).unwrap();
+        assert_eq!(lua.globals().get::<i32>("FIRES").unwrap(), 1);
+
+        std::fs::write(&path, r#"{"value": 2}"#).unwrap();
+        poll(&lua).unwrap();
+        assert_eq!(lua.globals().get::<i32>("FIRES").unwrap(), 2);
+        assert_eq!(lua.globals().get::<i32>("LAST").unwrap(), 2);
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["value"], 2);
+    }
+
+    #[test]
+    fn a_corrupt_external_change_keeps_data_and_refuses_save() {
+        let (lua, dir) = setup("corrupt-sync");
+        let path = dir.join("data.json");
+        std::fs::write(&path, r#"{"value": 1}"#).unwrap();
+        lua.load(
+            r#"
+            ERRORS = 0
+            f = riced.file({path = "data.json", onError = function() ERRORS = ERRORS + 1 end})
+            "#,
+        )
+        .exec()
+        .unwrap();
+        std::fs::write(&path, "{broken").unwrap();
+        poll(&lua).unwrap();
+        assert_eq!(lua.globals().get::<i32>("ERRORS").unwrap(), 1);
+        // The last good data survives, save refuses, and write clears it.
+        let ok: (bool, Option<String>) = lua.load("return f:save()").eval().unwrap();
+        assert!(!ok.0);
+        assert_eq!(lua.load("return f.data.value").eval::<i32>().unwrap(), 1);
+        lua.load("f:write({value = 3})").exec().unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["value"], 3);
+    }
+
+    #[test]
+    fn a_deleted_file_errors_once_and_recovers() {
+        let (lua, dir) = setup("delete-sync");
+        let path = dir.join("data.json");
+        std::fs::write(&path, r#"{"value": 1}"#).unwrap();
+        lua.load(
+            r#"
+            ERRORS = 0
+            LOADED = 0
+            f = riced.file({
+                path = "data.json",
+                onLoaded = function() LOADED = LOADED + 1 end,
+                onError = function() ERRORS = ERRORS + 1 end,
+            })
+            "#,
+        )
+        .exec()
+        .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        poll(&lua).unwrap();
+        assert_eq!(lua.globals().get::<i32>("ERRORS").unwrap(), 1);
+        poll(&lua).unwrap();
+        assert_eq!(
+            lua.globals().get::<i32>("ERRORS").unwrap(),
+            1,
+            "errors once"
+        );
+        std::fs::write(&path, r#"{"value": 7}"#).unwrap();
+        poll(&lua).unwrap();
+        assert_eq!(lua.globals().get::<i32>("LOADED").unwrap(), 2);
     }
 
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

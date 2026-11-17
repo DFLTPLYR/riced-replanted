@@ -383,7 +383,9 @@ until the file appears. Registering a path again replaces its callback, and
 passing nil as the callback removes the watch. Callback return values behave
 like an `update` return value, and errors are logged without stopping the
 daemon. Watches reset when the Lua state reloads, so register them from
-`shell.lua` or a watched module.
+`shell.lua` or a watched module. For JSON/TOML files that should expose the
+latest contents as data, prefer `riced.file`, which syncs and re-runs
+`onLoaded` on the same poll.
 Selectors go before the command name; everything after it is passed to the
 handler unchanged. To target the default configuration explicitly, use
 `riced ipc -p ~/.config/riced settings` (adjust for `$XDG_CONFIG_HOME` if set).
@@ -468,6 +470,15 @@ document for TOML. Missing parent directories are created. Writes are atomic
 (temporary file plus rename). Existing symbolic links are preserved and their
 destinations are updated; dangling links return an error. File errors are
 returned, not raised; `file.error` is updated.
+
+Files sync on the daemon's 250 ms poll. When a file's stat changes, the new
+contents replace `data` and `onLoaded` runs again; its return value behaves
+like an `update` return value, so the UI redraws. A change that fails to read
+or parse keeps the last good `data`, reports `onError`, and refuses `save`
+until `file:write` replaces the data — an external edit never silently
+destroys the file, and saving after a clean external change overwrites the
+file with your `data`. Watched Lua modules and `riced.watch` cover raw text
+and non-JSON/TOML files.
 
 Callbacks run during construction, so they run before the daemon starts. A file
 created as empty gets `onLoaded`, not `onError`. TOML requires a table at the top

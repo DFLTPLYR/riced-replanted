@@ -778,6 +778,9 @@ riced.stylesheet = nil
 ---@field onLoaded? fun(file: riced.File, data: any)
 ---@field onError? fun(file: riced.File, error: string)
 
+---Synced on the daemon's poll: external changes re-read `data` and re-run
+---`onLoaded`; a change that fails to parse keeps the last good data, reports
+---`onError`, and refuses `save` until `write` replaces the data.
 ---@class riced.File
 ---@field path string
 ---@field type "json"|"toml"

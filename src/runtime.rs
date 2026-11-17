@@ -370,7 +370,7 @@ impl App {
 }
 
 // (mtime, size) of a file, for stat-first reload checks.
-fn shell_stamp(path: &Path) -> Option<(Option<std::time::SystemTime>, u64)> {
+pub(crate) fn shell_stamp(path: &Path) -> Option<(Option<std::time::SystemTime>, u64)> {
     let metadata = std::fs::metadata(path).ok()?;
     Some((metadata.modified().ok(), metadata.len()))
 }
@@ -978,6 +978,22 @@ impl App {
         } else {
             self.path.parent().unwrap_or(Path::new(".")).join(expanded)
         }
+    }
+
+    /// Runs `riced.file` mount reloads; an `onLoaded` return behaves like an
+    /// update return.
+    fn poll_files(&mut self) -> mlua::Result<Task<Message>> {
+        let mut tasks = Vec::new();
+        for value in crate::file::poll(&self.lua)? {
+            match self.tasks(value) {
+                Ok(task) => tasks.push(task.chain(Task::done(Message::Reloaded))),
+                Err(error) => log::error!(
+                    target: "file.loaded",
+                    "onLoaded returned an invalid task: {error}"
+                ),
+            }
+        }
+        Ok(Task::batch(tasks))
     }
 
     fn surface_kind(&self, id: window::Id) -> Option<SurfaceKind> {
@@ -2346,7 +2362,11 @@ impl App {
                         log::error!(target: "watch.poll", "file watch poll failed: {error}");
                         Task::none()
                     });
-                    return reload.chain(surfaces).chain(ipc).chain(watches);
+                    let files = app.poll_files().unwrap_or_else(|error| {
+                        log::error!(target: "file.poll", "file poll failed: {error}");
+                        Task::none()
+                    });
+                    return reload.chain(surfaces).chain(ipc).chain(watches).chain(files);
                 }
                 if matches!(message, Message::PollPlugins) {
                     let (changed, tasks) = checked_fallback(
