@@ -6,8 +6,9 @@ workspace data through the `wayland` plugin store.
 - Binary: `riced-wayland`
 - Lua proxy: `riced.plugin("wayland")` (also `iced.plugins("wayland")`)
 - Store fields: `connected`, `capabilities`, `outputs`, `toplevels`,
-  `workspaces`, `workspace_groups`, `focused`
-- Methods: `activate_toplevel`, `close_toplevel`, `activate_workspace`
+  `workspaces`, `workspace_groups`, `focused`, `idle`
+- Methods: `activate_toplevel`, `close_toplevel`, `activate_workspace`,
+  `set_idle_timeout`
 - Events: none
 
 ## Install
@@ -43,6 +44,7 @@ The extension uses:
 - `zwlr-foreign-toplevel-management-v1` for controllable toplevels when
   available.
 - `ext-foreign-toplevel-list-v1` as a read-only toplevel fallback.
+- `ext-idle-notify-v1` for idle reporting.
 
 Missing protocols produce empty data and `false` capability flags. The extension
 is not compositor-specific and publishes store data only.
@@ -52,12 +54,13 @@ is not compositor-specific and publishes store data only.
 | Field              | Type / shape                                                                                                                    |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
 | `connected`        | boolean; false while the compositor connection is down                                                                          |
-| `capabilities`     | `{ toplevels = boolean, toplevel_control = boolean, workspaces = boolean }`                                                     |
+| `capabilities`     | `{ toplevels = boolean, toplevel_control = boolean, workspaces = boolean, idle = boolean }`                                     |
 | `outputs`          | array of `{ id, name, description, make, model, x, y, width, height, scale }`                                                   |
 | `toplevels`        | array of `{ id, title, app_id, outputs, activated, maximized, minimized, fullscreen }`; the read-only fallback uses `identifier` instead |
 | `workspaces`       | array of `{ id, protocol_id, name, coordinates, active, urgent, hidden, capabilities, group, outputs }`                         |
 | `workspace_groups` | array of `{ id, capabilities, outputs }`                                                                                        |
 | `focused`          | `{ toplevel = string or nil, workspace = string or nil, output = string or nil }`                                               |
+| `idle`             | boolean, or nil until the first idle event; nil also after changing the timeout                                                 |
 
 `outputs` come from `wl_output`. `id` is the registry name, `name` is the
 connector name or `output-<id>`, and `width`/`height` are the current mode
@@ -85,15 +88,21 @@ disappeared, and is nil when focus cannot be attributed to one output.
 
 ## Methods
 
-| Method                   | Arguments | Requirements                                                | Errors                                                                                       |
-| ------------------------ | --------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `activate_toplevel(id)`  | string    | `toplevel_control`, a live toplevel handle, and a `wl_seat` | not connected, unknown/stale toplevel, no seat, or Wayland flush failure                     |
-| `close_toplevel(id)`     | string    | `toplevel_control` and a live toplevel handle               | not connected, unknown/stale toplevel, or Wayland flush failure                              |
-| `activate_workspace(id)` | string    | `ext-workspace-v1` and workspace capability `activate`      | not connected, unknown/stale workspace, no manager, unsupported capability, or flush failure |
+| Method                     | Arguments         | Requirements                                                | Errors                                                                                       |
+| -------------------------- | ----------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `activate_toplevel(id)`    | string            | `toplevel_control`, a live toplevel handle, and a `wl_seat` | not connected, unknown/stale toplevel, no seat, or Wayland flush failure                     |
+| `close_toplevel(id)`       | string            | `toplevel_control` and a live toplevel handle               | not connected, unknown/stale toplevel, or Wayland flush failure                              |
+| `activate_workspace(id)`   | string            | `ext-workspace-v1` and workspace capability `activate`      | not connected, unknown/stale workspace, no manager, unsupported capability, or flush failure |
+| `set_idle_timeout(seconds)`| number            | `ext-idle-notify-v1` and a `wl_seat`                        | timeout outside 0..=86400, not connected, no seat, or missing protocol                        |
 
-All three return no value on success. IDs must come from the current `toplevels`
+All of them return no value on success. IDs must come from the current `toplevels`
 or `workspaces` snapshot; handles become invalid when the compositor closes the
 object.
+
+`set_idle_timeout` arms idle reporting after a number of idle seconds
+(`0` disables it). The timeout survives extension reconnects. `idle` in the
+store flips while the session is idle or resumed; it is nil until the first
+event and right after the timeout changes.
 
 ## Behavior and limits
 

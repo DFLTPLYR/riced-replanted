@@ -30,6 +30,10 @@ use wayland_protocols::ext::{
         ext_foreign_toplevel_handle_v1::{self as ext_handle, ExtForeignToplevelHandleV1},
         ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
     },
+    idle_notify::v1::client::{
+        ext_idle_notification_v1::{self, ExtIdleNotificationV1},
+        ext_idle_notifier_v1::ExtIdleNotifierV1,
+    },
     workspace::v1::client::{
         ext_workspace_group_handle_v1::{self, ExtWorkspaceGroupHandleV1},
         ext_workspace_handle_v1::{self, ExtWorkspaceHandleV1},
@@ -47,6 +51,7 @@ fn main() -> io::Result<()> {
     let activate = Arc::clone(&requests);
     let close = Arc::clone(&requests);
     let workspace = Arc::clone(&requests);
+    let idle = Arc::clone(&requests);
 
     Plugin::new("wayland")
         .state([
@@ -57,6 +62,7 @@ fn main() -> io::Result<()> {
             "workspaces",
             "workspace_groups",
             "focused",
+            "idle",
         ])
         .method("activate_toplevel", false, move |args| {
             let id = argument(args, "toplevel")?;
@@ -69,6 +75,14 @@ fn main() -> io::Result<()> {
         .method("activate_workspace", false, move |args| {
             let id = argument(args, "workspace")?;
             with_requests(&workspace, |requests| requests.activate_workspace(&id))
+        })
+        .method("set_idle_timeout", false, move |args| {
+            let seconds = args
+                .get(0)
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "missing idle timeout in seconds".to_owned())?;
+            idle.lock().unwrap().idle_timeout = validate_idle_seconds(seconds)?;
+            Ok(Value::Null)
         })
         .serve(move |context| run(context, requests))
 }
@@ -99,11 +113,15 @@ struct Requests {
     toplevels: BTreeMap<String, ZwlrForeignToplevelHandleV1>,
     workspaces: BTreeMap<String, ExtWorkspaceHandleV1>,
     workspace_caps: BTreeMap<String, u32>,
+    // Idle timeout in seconds, configured from Lua; survives reconnects.
+    idle_timeout: Option<u32>,
 }
 
 impl Requests {
     fn clear(&mut self) {
+        let idle_timeout = self.idle_timeout;
         *self = Self::default();
+        self.idle_timeout = idle_timeout;
     }
 
     fn flush(&self) -> Result<(), String> {
@@ -187,7 +205,7 @@ fn connected(
     let mut state = Wayland::new(connection.clone(), registry.clone(), Arc::clone(requests));
     queue.roundtrip(&mut state)?;
 
-    state.sync_requests();
+    state.sync_requests(&qh);
     let store = state.store();
     context.publish(store.clone());
     *last = store;
@@ -195,7 +213,7 @@ fn connected(
 
     loop {
         queue.blocking_dispatch(&mut state)?;
-        state.sync_requests();
+        state.sync_requests(&qh);
         if state.dirty {
             let store = state.store();
             context.publish(store.clone());
@@ -214,12 +232,14 @@ fn empty(connected: bool) -> Value {
             "toplevels": false,
             "toplevel_control": false,
             "workspaces": false,
+            "idle": false,
         },
         "outputs": [],
         "toplevels": [],
         "workspaces": [],
         "workspace_groups": [],
         "focused": {},
+        "idle": null,
     })
 }
 
@@ -333,6 +353,10 @@ struct Wayland {
     ext_list: Option<ExtForeignToplevelListV1>,
     workspace_manager: Option<ExtWorkspaceManagerV1>,
     seat: Option<WlSeat>,
+    idle_notifier: Option<ExtIdleNotifierV1>,
+    idle_notification: Option<ExtIdleNotificationV1>,
+    idle_timeout: Option<u32>,
+    idle: Option<bool>,
     wlr_toplevels: BTreeMap<String, WlrToplevel>,
     ext_toplevels: BTreeMap<String, ExtToplevel>,
     workspaces: BTreeMap<String, Workspace>,
@@ -352,6 +376,10 @@ impl Wayland {
             ext_list: None,
             workspace_manager: None,
             seat: None,
+            idle_notifier: None,
+            idle_notification: None,
+            idle_timeout: None,
+            idle: None,
             wlr_toplevels: BTreeMap::new(),
             ext_toplevels: BTreeMap::new(),
             workspaces: BTreeMap::new(),
@@ -406,6 +434,11 @@ impl Wayland {
                     Some(registry.bind::<ExtWorkspaceManagerV1, _, _>(name, 1, qh, ()));
                 self.dirty = true;
             }
+            "ext_idle_notifier_v1" if self.idle_notifier.is_none() => {
+                self.idle_notifier =
+                    Some(registry.bind::<ExtIdleNotifierV1, _, _>(name, 1, qh, ()));
+                self.dirty = true;
+            }
             _ => {}
         }
     }
@@ -449,7 +482,7 @@ impl Wayland {
             .unwrap_or_default()
     }
 
-    fn sync_requests(&self) {
+    fn sync_requests(&mut self, qh: &QueueHandle<Self>) {
         let mut requests = self.requests.lock().unwrap();
         requests.connection = Some(self.connection.clone());
         requests.seat = self.seat.clone();
@@ -469,6 +502,25 @@ impl Wayland {
             .iter()
             .map(|(id, workspace)| (id.clone(), workspace.capabilities))
             .collect();
+        // A new timeout (or a fresh connection) re-arms the idle notification.
+        if requests.idle_timeout != self.idle_timeout {
+            self.idle_timeout = requests.idle_timeout;
+            self.idle_notification = None;
+            self.idle = None;
+            self.dirty = true;
+            let manager = self.idle_notifier.clone();
+            if let (Some(manager), Some(seconds)) = (manager, self.idle_timeout)
+                && let Some(seat) = self.seat.clone()
+            {
+                // The protocol timeout is milliseconds.
+                self.idle_notification = Some(manager.get_idle_notification(
+                    seconds.saturating_mul(1000),
+                    &seat,
+                    qh,
+                    (),
+                ));
+            }
+        }
     }
 
     fn store(&self) -> Value {
@@ -590,6 +642,7 @@ impl Wayland {
                 "toplevels": has_wlr || self.ext_list.is_some(),
                 "toplevel_control": has_wlr,
                 "workspaces": self.workspace_manager.is_some(),
+                "idle": self.idle_notifier.is_some(),
             },
             "outputs": riced_extension_sdk::bounded_array(outputs, riced_extension_sdk::protocol::MAX_LINE / 8),
             "toplevels": riced_extension_sdk::bounded_array(toplevels, riced_extension_sdk::protocol::MAX_LINE / 8),
@@ -600,6 +653,7 @@ impl Wayland {
                 "workspace": focused_workspace,
                 "output": focused_output.filter(|name| name.len() <= MAX_TEXT),
             },
+            "idle": self.idle,
         })
     }
 }
@@ -654,6 +708,39 @@ fn decode_coordinates(bytes: &[u8]) -> Vec<u32> {
 fn id(proxy: &impl Proxy) -> String {
     proxy.id().protocol_id().to_string()
 }
+
+fn validate_idle_seconds(seconds: u64) -> Result<Option<u32>, String> {
+    match seconds {
+        0 => Ok(None),
+        1..=86_400 => Ok(Some(seconds as u32)),
+        _ => Err("idle timeout must be 0..=86400 seconds".to_owned()),
+    }
+}
+
+impl Dispatch<ExtIdleNotificationV1, ()> for Wayland {
+    fn event(
+        state: &mut Self,
+        _: &ExtIdleNotificationV1,
+        event: ext_idle_notification_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_idle_notification_v1::Event::Idled => {
+                state.idle = Some(true);
+                state.dirty = true;
+            }
+            ext_idle_notification_v1::Event::Resumed => {
+                state.idle = Some(false);
+                state.dirty = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+delegate_noop!(Wayland: ExtIdleNotifierV1);
 
 impl Dispatch<WlRegistry, ()> for Wayland {
     fn event(
@@ -1046,5 +1133,16 @@ mod tests {
         let store = empty(false);
         assert_eq!(store["connected"], false);
         assert_eq!(store["toplevels"], json!([]));
+        assert_eq!(store["idle"], Value::Null);
+        assert_eq!(store["capabilities"]["idle"], false);
+    }
+
+    #[test]
+    fn validates_idle_timeouts() {
+        assert_eq!(validate_idle_seconds(0), Ok(None));
+        assert_eq!(validate_idle_seconds(300), Ok(Some(300)));
+        assert_eq!(validate_idle_seconds(86_400), Ok(Some(86_400)));
+        assert!(validate_idle_seconds(86_401).is_err());
+        assert!(validate_idle_seconds(u64::MAX).is_err());
     }
 }
