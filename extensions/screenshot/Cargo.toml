@@ -1,0 +1,15 @@
+[package]
+name = "riced-extension-screenshot"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "riced-screenshot"
+path = "src/main.rs"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+riced-extension-sdk = { path = "../../crates/riced-extension-sdk" }
+serde_json = "1"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }

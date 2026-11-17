@@ -115,3 +115,9 @@ extension-openmeteo:
     install -Dm755 target/release/riced-openmeteo "{{ home_directory() }}/.config/riced/extensions/openmeteo/riced-openmeteo"
     install -Dm644 extensions/openmeteo/openmeteo.lua "{{ home_directory() }}/.config/riced/extensions/openmeteo/openmeteo.lua"
     install -Dm644 extensions/openmeteo/stub.lua "{{ home_directory() }}/.config/riced/extensions/openmeteo/stub.lua"
+
+# Build the Screenshot extension and install it into the default profile
+extension-screenshot:
+    {{nix}} cargo build --release -p riced-extension-screenshot
+    install -Dm755 target/release/riced-screenshot "{{ home_directory() }}/.config/riced/extensions/screenshot/riced-screenshot"
+    install -Dm644 extensions/screenshot/stub.lua "{{ home_directory() }}/.config/riced/extensions/screenshot/stub.lua"

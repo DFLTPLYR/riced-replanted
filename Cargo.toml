@@ -9,6 +9,7 @@ members = [
   "extensions/lucide",
   "extensions/openmeteo",
   "extensions/applications",
+  "extensions/screenshot",
 ]
 resolver = "3"
 

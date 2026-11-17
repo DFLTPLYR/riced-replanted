@@ -3836,6 +3836,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "riced-extension-screenshot"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "riced-extension-sdk",
+ "serde_json",
+ "wayland-client",
+ "wayland-protocols-wlr",
+]
+
+[[package]]
 name = "riced-extension-sdk"
 version = "0.1.0"
 dependencies = [
