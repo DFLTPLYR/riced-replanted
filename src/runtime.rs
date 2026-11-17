@@ -1028,6 +1028,9 @@ impl App {
             if command == "restart" {
                 return self.restart(args);
             }
+            if command == "eval" {
+                return self.eval_ipc(args);
+            }
             log::warn!(target: "ipc.command", "no IPC handler for {command:?}");
             return Ok(Task::none());
         };
@@ -1045,6 +1048,16 @@ impl App {
                 Ok(Task::none())
             }
         }
+    }
+
+    /// Runs CLI-supplied Lua in the live state. Safe because the IPC queue is
+    /// 0700: anything that can reach it already owns the profile.
+    fn eval_ipc(&mut self, args: &[String]) -> mlua::Result<Task<Message>> {
+        let code = args.join(" ");
+        if code.trim().is_empty() {
+            return Err(mlua::Error::runtime("eval needs code to run"));
+        }
+        self.lua.load(&code).exec().map(|()| Task::none())
     }
 
     /// Replaces the process image; returns an error only when the exec failed.
@@ -2669,6 +2682,46 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("restart takes no arguments"), "{error}");
+    }
+
+    #[test]
+    fn eval_runs_code_in_the_live_state() {
+        let mut app = load(
+            r#"
+            local app = {}
+            function app:update() end
+            function app:view() return iced.text('ipc') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+            "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+
+        let _ = app
+            .run_ipc("eval", &["RICED_EVAL = 41 + 1".into()])
+            .unwrap();
+        assert_eq!(app.lua.globals().get::<i32>("RICED_EVAL").unwrap(), 42);
+    }
+
+    #[test]
+    fn eval_rejects_empty_code_and_reports_errors() {
+        let mut app = load(
+            r#"
+            local app = {}
+            function app:update() end
+            function app:view() return iced.text('ipc') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+            "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+
+        assert!(app.run_ipc("eval", &[]).is_err());
+        assert!(app.run_ipc("eval", &["   ".into()]).is_err());
+        assert!(app.run_ipc("eval", &["syntax (".into()]).is_err());
+        // A failed eval leaves the daemon usable.
+        let _ = app.update(Message::Tick).unwrap();
+        app.view(window::Id::unique()).unwrap();
     }
 
     #[test]
