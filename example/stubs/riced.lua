@@ -848,10 +848,18 @@ function Daemon:run() end
 ---@param handlers table<string, fun(self: table, args: string[])>
 function riced.ipc(handlers) end
 
+---Watches a file and calls the callback with its contents, or nil when the
+---file is missing or not valid UTF-8. Paths may be absolute, `~/`-prefixed, or
+---profile-relative. The first observation only records the initial stamp.
+---@param path string
+---@param callback? fun(self: table, contents: string?)
+function riced.watch(path, callback) end
+
 ---@class riced.Extension
 ---@field name string
 ---@field alive boolean
 ---@field store table<string, any>
+---@field state string[]
 
 ---@param name string
 ---@return riced.Extension

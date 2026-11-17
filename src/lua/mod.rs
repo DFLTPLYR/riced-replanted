@@ -57,6 +57,8 @@ pub fn load(lua: &mlua::Lua) -> mlua::Result<()> {
     icons::install(lua)?;
     let handlers = lua.create_table()?;
     lua.set_named_registry_value("riced.ipc_handlers", handlers.clone())?;
+    let watchers = lua.create_table()?;
+    lua.set_named_registry_value("riced.file_watchers", watchers)?;
     let riced: mlua::Table = lua.globals().get("riced")?;
     riced.set(
         "ipc",
@@ -70,6 +72,26 @@ pub fn load(lua: &mlua::Lua) -> mlua::Result<()> {
                 // Replacement keeps handlers working when their module reloads.
                 registered.set(name, handler)?;
             }
+            Ok(())
+        })?,
+    )?;
+    riced.set(
+        "watch",
+        lua.create_function(|lua, (path, callback): (String, Option<mlua::Function>)| {
+            if path.is_empty() {
+                return Err(mlua::Error::runtime("watch path must not be empty"));
+            }
+            if (path == "~" || path.starts_with("~/"))
+                && std::env::var_os("HOME").is_none_or(|home| home.is_empty())
+            {
+                // Mirrors riced.file: `~` needs HOME to expand.
+                return Err(mlua::Error::runtime(
+                    "cannot expand watch path: HOME is not set",
+                ));
+            }
+            let registered: mlua::Table = lua.named_registry_value("riced.file_watchers")?;
+            // nil removes the watch; a new callback replaces the old one.
+            registered.set(path, callback)?;
             Ok(())
         })?,
     )?;

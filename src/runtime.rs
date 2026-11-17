@@ -355,6 +355,10 @@ pub struct App {
     // (mtime, size) of shell.lua at the last read; the 250 ms check reloads
     // only when this stat changes.
     shell_stamp: (Option<std::time::SystemTime>, u64),
+    // riced.watch tracking: last seen stat per registered path. Entries for
+    // paths that come back after a reload keep their stamps, so an unchanged
+    // file does not fire again.
+    watches: HashMap<String, WatchStamp>,
 }
 
 impl App {
@@ -369,6 +373,14 @@ impl App {
 fn shell_stamp(path: &Path) -> Option<(Option<std::time::SystemTime>, u64)> {
     let metadata = std::fs::metadata(path).ok()?;
     Some((metadata.modified().ok(), metadata.len()))
+}
+
+// Watch registration state: `seen` separates the silent first observation
+// (which only records) from later changes that fire the callback.
+#[derive(Default)]
+struct WatchStamp {
+    seen: bool,
+    stamp: Option<(Option<std::time::SystemTime>, u64)>,
 }
 
 // Startup errors after loading are fatal; runtime callbacks fall back.
@@ -569,6 +581,7 @@ pub fn load_with_plugins(
         sizes: RefCell::new(HashMap::new()),
         extras: RefCell::new(HashMap::new()),
         plugins,
+        watches: HashMap::new(),
         restart: None,
         deferred_forgets: None,
         shell_stamp: shell_stamp(path).unwrap_or((None, 0)),
@@ -902,6 +915,69 @@ impl App {
             }
         }
         Ok(Task::batch(tasks))
+    }
+
+    /// Fires `riced.watch` callbacks for files whose stat changed. The first
+    /// observation only records, so registering on a missing file stays quiet
+    /// until the file appears.
+    fn poll_watches(&mut self) -> mlua::Result<Task<Message>> {
+        let table: Table = self.lua.named_registry_value("riced.file_watchers")?;
+        let mut tasks = Vec::new();
+        for pair in table.pairs::<String, Function>() {
+            let (raw, callback) = pair?;
+            let path = self.watch_path(&raw);
+            let stamp = shell_stamp(&path);
+            let watch = self.watches.entry(raw.clone()).or_default();
+            if watch.seen && watch.stamp == stamp {
+                continue;
+            }
+            let initialized = watch.seen;
+            watch.seen = true;
+            watch.stamp = stamp;
+            // The first observation only records, present file or not.
+            if !initialized {
+                continue;
+            }
+            // A file that vanished, or is not UTF-8, hands nil to the callback.
+            let content = match std::fs::read_to_string(&path) {
+                Ok(text) => Value::String(self.lua.create_string(&text)?),
+                Err(_) => Value::Nil,
+            };
+            match callback.call::<Value>((self.state.clone(), content)) {
+                Ok(value) => match self.tasks(value) {
+                    Ok(task) => tasks.push(task.chain(Task::done(Message::Reloaded))),
+                    Err(error) => log::error!(
+                        target: "watch.callback",
+                        "watch {raw:?} returned an invalid task: {error}"
+                    ),
+                },
+                Err(error) => {
+                    log::error!(target: "watch.callback", "watch {raw:?} callback failed: {error}")
+                }
+            }
+        }
+        Ok(Task::batch(tasks))
+    }
+
+    /// Expands `~` and resolves relative watch paths against the profile, the
+    /// same convention `riced.file` uses.
+    fn watch_path(&self, raw: &str) -> PathBuf {
+        let expanded = match raw
+            .strip_prefix("~/")
+            .or_else(|| (raw == "~").then_some(""))
+        {
+            Some(rest) => match std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+                Some(home) => PathBuf::from(home).join(rest),
+                // Registration rejects this case; keep the raw path for logs.
+                None => PathBuf::from(raw),
+            },
+            None => PathBuf::from(raw),
+        };
+        if expanded.is_absolute() {
+            expanded
+        } else {
+            self.path.parent().unwrap_or(Path::new(".")).join(expanded)
+        }
     }
 
     fn surface_kind(&self, id: window::Id) -> Option<SurfaceKind> {
@@ -2266,7 +2342,11 @@ impl App {
                         log::error!(target: "ipc.poll", "IPC poll failed: {error}");
                         Task::none()
                     });
-                    return reload.chain(surfaces).chain(ipc);
+                    let watches = app.poll_watches().unwrap_or_else(|error| {
+                        log::error!(target: "watch.poll", "file watch poll failed: {error}");
+                        Task::none()
+                    });
+                    return reload.chain(surfaces).chain(ipc).chain(watches);
                 }
                 if matches!(message, Message::PollPlugins) {
                     let (changed, tasks) = checked_fallback(
@@ -2722,6 +2802,46 @@ mod tests {
         // A failed eval leaves the daemon usable.
         let _ = app.update(Message::Tick).unwrap();
         app.view(window::Id::unique()).unwrap();
+    }
+
+    #[test]
+    fn file_watches_fire_on_changes_and_removals() {
+        let shell = r#"
+            PROBES = 0
+            LAST = nil
+            riced.watch('notes.txt', function(self, contents)
+                PROBES = PROBES + 1
+                LAST = contents
+            end)
+            local app = {}
+            function app:update() end
+            function app:view() return iced.text('watch') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+            "#;
+        let profile = Profile::new(&[("notes.txt", "one"), ("shell.lua", shell)]);
+        let mut app = load(shell, &profile.shell()).unwrap();
+
+        // The first poll records the stamp without firing.
+        let _ = app.poll_watches().unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("PROBES").unwrap(), 0);
+
+        profile.write("notes.txt", "twenty-two");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _ = app.poll_watches().unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("PROBES").unwrap(), 1);
+        assert_eq!(
+            app.lua.globals().get::<String>("LAST").unwrap(),
+            "twenty-two"
+        );
+
+        // An unchanged file does not fire again.
+        let _ = app.poll_watches().unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("PROBES").unwrap(), 1);
+
+        std::fs::remove_file(profile.0.join("notes.txt")).unwrap();
+        let _ = app.poll_watches().unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("PROBES").unwrap(), 2);
+        assert!(app.lua.globals().get::<Value>("LAST").unwrap().is_nil());
     }
 
     #[test]
