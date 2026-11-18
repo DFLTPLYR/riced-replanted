@@ -557,7 +557,7 @@ Extensions may push events. They arrive in `update` as:
 | -------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
 | `system`       | `host`, `time`, `cpu`, `memory`, `disks`, `gpus`, `processes`                                    | none                                                                                                                                                                                     | none   |
 | `wayland`      | `connected`, `capabilities`, `outputs`, `toplevels`, `workspaces`, `workspace_groups`, `focused`, `idle` | `activate_toplevel`, `close_toplevel`, `activate_workspace`, `set_idle_timeout`                                                                                                          | none   |
-| `dbus`         | `connected`, `capabilities`, `tray`, `tray_menu`, `notifications`                                | `activate_tray`, `secondary_activate_tray`, `context_menu_tray`, `open_tray_menu`, `close_tray_menu`, `tray_menu_event`, `close_notification`, `invoke_notification_action`, `pick_file` | none   |
+| `dbus`         | `connected`, `capabilities`, `tray`, `tray_menu`, `notifications`                                | `activate_tray`, `secondary_activate_tray`, `context_menu_tray`, `open_tray_menu`, `close_tray_menu`, `tray_menu_event`, `close_notification`, `invoke_notification_action`, `notify`, `pick_file` | none   |
 | `themeagen`    | `ready`, `mode`, `source`, `colors`                                                              | `generate`, `populate`, `regenerate`                                                                                                                                                     | none   |
 | `lucide`       | `count`                                                                                          | `resolve`, `exists`, `list`                                                                                                                                                              | none   |
 | `openmeteo`    | `ready`, `latitude`, `longitude`, `current`, `current_units`, `timezone`, `updated_at`, `error`, `readings` | `configure`                                                                                                                                                                   | none   |
@@ -903,7 +903,9 @@ is false when it registered with another watcher.
 `capabilities.notifications` is true only when this extension owns
 `org.freedesktop.Notifications`. If another daemon already owns the name, the
 extension does not receive notifications and the `notifications` array stays
-empty.
+empty. `dbus.notify{ summary = "...", body = "...", icon = "..." }` sends one
+through whichever daemon owns the name; when this extension is the owner the
+request lands in `notifications` instead of a popup.
 
 Tray item fields:
 

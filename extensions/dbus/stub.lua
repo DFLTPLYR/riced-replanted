@@ -54,6 +54,14 @@
 ---@field directory? boolean Select a directory instead of a file
 ---@field path? string Absolute starting directory; a leading ~/ is expanded
 
+---@class riced.DbusNotifyOptions
+---@field summary string Required notification title
+---@field body? string Body text
+---@field app_name? string Sender name; defaults to "riced"
+---@field icon? string Icon name or path; defaults to none
+---@field timeout? integer Milliseconds from 0 (never expires) to 60000; defaults to 5000
+---@field urgency? "low"|"normal"|"critical" Urgency hint; defaults to "normal"
+
 ---@class riced.DbusStore
 ---@field connected? boolean
 ---@field capabilities? riced.DbusCapabilities
@@ -71,6 +79,7 @@
 ---@field tray_menu_event fun(id: string, menu_id: integer, event: "clicked"|"opened"|"closed"|"hovered", callback?: fun(result: nil, err: string?)): nil
 ---@field close_notification fun(id: integer, callback?: fun(result: nil, err: string?)): nil
 ---@field invoke_notification_action fun(id: integer, key: string, callback?: fun(result: nil, err: string?)): nil
+---@field notify fun(options: riced.DbusNotifyOptions, callback?: fun(id: integer?, err: string?)): nil
 ---@field pick_file fun(options?: riced.DbusPickFileOptions, callback?: fun(paths: string[]?, err: string?)): nil
 
 ---@overload fun(name: "dbus"): riced.DbusExtension

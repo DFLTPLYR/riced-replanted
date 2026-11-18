@@ -186,7 +186,18 @@ closed and the callback receives `(nil, "the file chooser timed out")`.
 | `tray_menu_event(id, menu_id, event, callback?)` | string, integer, string | Sends `clicked`, `opened`, `closed`, or `hovered` for a menu item |
 | `close_notification(id)`              | integer                 | Removes the notification if present and emits `NotificationClosed`; unknown ids are ignored          |
 | `invoke_notification_action(id, key)` | integer, string         | Validates the action key, removes the notification, and emits `ActionInvoked` + `NotificationClosed` |
+| `notify(options, callback?)`          | table                   | Sends a desktop notification through the current `org.freedesktop.Notifications` owner; returns its id |
 | `pick_file(options?, callback?)`      | table                   | Opens the XDG desktop portal file chooser; the callback receives selected absolute paths              |
+
+`notify` options: `summary` (required, nonempty), `body`, `app_name`
+(default `riced`), `icon` (icon name or path), `timeout` in milliseconds
+from 0 (never expires) to 60000 (default 5000), and `urgency`
+(`low`, `normal`, or `critical`; default `normal`). The callback receives
+`(id, nil)` on success. The request goes over D-Bus, so it also works when
+another daemon such as dunst or mako owns the notification name; `urgency` is
+a hint, so the daemon decides how to honor it. When this extension owns the
+name there is no popup: the notification is added to the `notifications` store
+for a Lua widget to render, and `urgency` is ignored.
 
 Tray methods fail if the item id is unknown, the session bus is disconnected, or
 the D-Bus call fails. They use a one-second D-Bus method timeout.
@@ -223,4 +234,13 @@ local notification = (dbus.notifications or {})[1]
 if notification then
     dbus.close_notification(notification.id)
 end
+
+dbus.notify({
+    summary = "Screenshot saved",
+    body = "~/Pictures/Screenshots.png",
+    icon = "accessories-screenshot",
+    urgency = "low",
+}, function(id, error)
+    if error then log(error) end
+end)
 ```

@@ -64,6 +64,7 @@ fn main() -> std::io::Result<()> {
     let menu_event = Arc::clone(&model);
     let close = Arc::clone(&model);
     let invoke = Arc::clone(&model);
+    let notify = Arc::clone(&model);
     let picker = Arc::clone(&model);
 
     Plugin::new("dbus")
@@ -106,6 +107,9 @@ fn main() -> std::io::Result<()> {
                 .ok_or_else(|| "missing notification action".to_owned())?;
             invoke_notification_action(&invoke, id, action)?;
             Ok(Value::Null)
+        })
+        .method("notify", false, move |args| {
+            send_notification(&notify, args)
         })
         .method("pick_file", false, move |args| pick_file(&picker, args))
         .serve(move |context| run(context, model))
@@ -436,6 +440,109 @@ fn invoke_notification_action(
     model.signals.push(Signal::Closed(id, 2));
     model.dirty = true;
     Ok(())
+}
+
+/// A validated request built from the `notify` options table.
+struct Notice {
+    app_name: String,
+    icon: String,
+    summary: String,
+    body: String,
+    timeout: i32,
+    urgency: u8,
+}
+
+fn notice(options: &Value) -> Result<Notice, String> {
+    let options = options
+        .as_object()
+        .ok_or_else(|| "notification options must be a table".to_owned())?;
+    if let Some(key) = options.keys().find(|key| {
+        !matches!(
+            key.as_str(),
+            "summary" | "body" | "app_name" | "icon" | "timeout" | "urgency"
+        )
+    }) {
+        return Err(format!("unsupported notification option: {key}"));
+    }
+    let text = |key: &str, max: usize, default: &str| match options.get(key) {
+        None | Some(Value::Null) => Ok(default.to_owned()),
+        Some(Value::String(value)) => Ok(clamp(value, max)),
+        Some(_) => Err(format!("notification {key} must be a string")),
+    };
+    let summary = text("summary", MAX_TEXT, "")?;
+    if summary.is_empty() {
+        return Err("notification summary must be a nonempty string".to_owned());
+    }
+    let timeout = match options.get("timeout") {
+        None | Some(Value::Null) => 5_000,
+        Some(value) => value
+            .as_u64()
+            .filter(|ms| *ms <= 60_000)
+            .and_then(|ms| i32::try_from(ms).ok())
+            .ok_or_else(|| {
+                "notification timeout must be a whole number from 0 to 60000 milliseconds"
+                    .to_owned()
+            })?,
+    };
+    let urgency = match options.get("urgency") {
+        None | Some(Value::Null) => 1,
+        Some(Value::String(value)) => match value.as_str() {
+            "low" => 0,
+            "normal" => 1,
+            "critical" => 2,
+            _ => return Err("notification urgency must be low, normal, or critical".to_owned()),
+        },
+        Some(_) => return Err("notification urgency must be a string".to_owned()),
+    };
+    Ok(Notice {
+        app_name: text("app_name", MAX_NAME, "riced")?,
+        icon: text("icon", MAX_NAME, "")?,
+        summary,
+        body: text("body", MAX_TEXT, "")?,
+        timeout,
+        urgency,
+    })
+}
+
+/// Sends a desktop notification through whichever daemon owns
+/// `org.freedesktop.Notifications`; when this extension owns the name the
+/// request lands in its own store instead of a popup.
+fn send_notification(model: &Arc<Mutex<Model>>, args: &Value) -> Result<Value, String> {
+    let notice = notice(
+        args.get(0)
+            .ok_or_else(|| "missing notification options".to_owned())?,
+    )?;
+    let connection = model
+        .lock()
+        .unwrap()
+        .connection
+        .clone()
+        .ok_or_else(|| "session bus is not connected".to_owned())?;
+    let proxy = Proxy::new(
+        &connection,
+        NOTIFICATIONS,
+        NOTIFICATIONS_PATH,
+        NOTIFICATIONS,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut hints: HashMap<String, VariantValue<'static>> = HashMap::new();
+    hints.insert("urgency".into(), VariantValue::from(notice.urgency));
+    let id: u32 = proxy
+        .call(
+            "Notify",
+            &(
+                notice.app_name,
+                0u32,
+                notice.icon,
+                notice.summary,
+                notice.body,
+                Vec::<String>::new(),
+                hints,
+                notice.timeout,
+            ),
+        )
+        .map_err(|error| format!("notification failed: {error}"))?;
+    Ok(json!(id))
 }
 
 /// Opens the desktop file chooser. Returns the selected absolute paths; a user
@@ -1544,6 +1651,48 @@ mod tests {
             [Signal::Action(action_id, action), Signal::Closed(closed, 2)]
                 if *action_id == second && action == "default" && *closed == second
         ));
+    }
+
+    #[test]
+    fn notification_options_are_validated_and_defaulted() {
+        let parsed = notice(&json!({ "summary": "shot" })).unwrap();
+        assert_eq!(parsed.app_name, "riced");
+        assert_eq!(parsed.icon, "");
+        assert_eq!(parsed.body, "");
+        assert_eq!(parsed.timeout, 5_000);
+        assert_eq!(parsed.urgency, 1);
+
+        let parsed = notice(&json!({
+            "summary": "long",
+            "body": "b",
+            "app_name": "wallpaper",
+            "icon": "preferences-desktop-wallpaper",
+            "timeout": 0,
+            "urgency": "critical",
+        }))
+        .unwrap();
+        assert_eq!(parsed.body, "b");
+        assert_eq!(parsed.timeout, 0);
+        assert_eq!(parsed.urgency, 2);
+
+        let clamped = notice(&json!({ "summary": "x".repeat(MAX_TEXT + 10) })).unwrap();
+        assert_eq!(clamped.summary.chars().count(), MAX_TEXT);
+
+        for invalid in [
+            json!({}),
+            json!({ "summary": "" }),
+            json!({ "summary": 1 }),
+            json!({ "summary": "a", "body": 1 }),
+            json!({ "summary": "a", "timeout": -1 }),
+            json!({ "summary": "a", "timeout": 1.5 }),
+            json!({ "summary": "a", "timeout": 60_001 }),
+            json!({ "summary": "a", "urgency": "urgent" }),
+            json!({ "summary": "a", "urgency": 2 }),
+            json!({ "summary": "a", "urgency": "critical", "category": "x" }),
+            json!("not a table"),
+        ] {
+            assert!(notice(&invalid).is_err(), "{invalid}");
+        }
     }
 
     fn text(value: &str) -> OwnedValue {
