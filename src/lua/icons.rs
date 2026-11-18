@@ -170,8 +170,8 @@ struct Resolver {
 }
 
 /// How long a resolved icon path stays cached before the cache is re-checked
-/// against the filesystem.
-const REFRESH: Duration = Duration::from_secs(1);
+/// against the filesystem. Matches the 250 ms shell reload tick.
+const REFRESH: Duration = Duration::from_millis(250);
 
 impl Resolver {
     fn theme(
@@ -198,8 +198,8 @@ impl Resolver {
     }
 
     fn resolve(&mut self, query: Query) -> Option<PathBuf> {
-        // Installed themes and icons are re-checked once a second so new files
-        // appear without a shell reload, including newly installed themes.
+        // Installed themes and icons are re-checked on the shell tick so new
+        // files appear without a shell reload, including newly installed themes.
         let stale = self
             .checked
             .is_none_or(|checked| checked.elapsed() >= REFRESH);
@@ -228,7 +228,7 @@ impl Resolver {
                         .find_map(|root| icon_file(root, &query.name))
                 })
         };
-        // shortcut: icon lookups re-check the filesystem once a second, add a watcher if instant visibility is needed.
+        // shortcut: icons are polled on the 250 ms shell tick, a watcher would make installs instant.
         if self.cache.len() >= 1024 {
             self.cache.clear();
             self.themes.clear();
