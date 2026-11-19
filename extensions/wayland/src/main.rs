@@ -505,7 +505,10 @@ impl Wayland {
         // A new timeout (or a fresh connection) re-arms the idle notification.
         if requests.idle_timeout != self.idle_timeout {
             self.idle_timeout = requests.idle_timeout;
-            self.idle_notification = None;
+            // Drop the old object on the compositor too, not only locally.
+            if let Some(old) = self.idle_notification.take() {
+                old.destroy();
+            }
             self.idle = None;
             self.dirty = true;
             let manager = self.idle_notifier.clone();
