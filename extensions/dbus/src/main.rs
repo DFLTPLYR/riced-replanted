@@ -698,15 +698,20 @@ fn response_signals(connection: &Connection) -> Result<MessageIterator, String> 
 }
 
 /// Converts a `file://` URI from the portal into a local path. Percent escapes
-/// are decoded; non-file and non-UTF-8 URIs are rejected.
+/// are decoded; non-file, remote, and non-UTF-8 URIs are rejected.
 fn file_uri_path(uri: &str) -> Result<String, String> {
     let rest = uri
         .strip_prefix("file://")
         .ok_or_else(|| format!("unsupported URI from the file chooser: {uri}"))?;
-    let path = rest
+    let (authority, path) = rest
         .find('/')
-        .map(|index| &rest[index..])
+        .map(|index| rest.split_at(index))
         .ok_or_else(|| format!("invalid file URI: {uri}"))?;
+    // The portal returns `file:///path` or `file://localhost/path`; any other
+    // host names a remote file, not one of ours.
+    if !authority.is_empty() && authority != "localhost" {
+        return Err(format!("unsupported remote file URI: {uri}"));
+    }
     let bytes = path.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -1554,6 +1559,7 @@ mod tests {
             "file:///bad%zz",
             "https://example.com/x",
             "file://",
+            "file://otherhost/tmp/x",
         ] {
             assert!(file_uri_path(uri).is_err(), "{uri}");
         }
