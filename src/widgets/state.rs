@@ -4,7 +4,9 @@
 //! allocation. Entries are keyed by Lua generation and widget id; a shell
 //! reload gets a fresh generation. Retired generations are kept for one reload
 //! so iced can drop the old element tree, then freed. Entries evicted at the
-//! id limit stay until the generation that may still reference them is replaced.
+//! id limit record which windows rendered them and are freed once each of
+//! those windows has rendered twice more, so the queue stays bounded without
+//! freeing state a live element still points into.
 
 use std::{
     cell::{Cell, RefCell},
@@ -18,11 +20,30 @@ use mlua::Value;
 
 type PaneState = Rc<RefCell<pane_grid::State<usize>>>;
 type ComboState = Rc<combo_box::State<String>>;
+type PaneKey = (u64, String, u8, usize);
 type ListKey = (u64, Option<iced::window::Id>, String);
+type Used = Vec<(iced::window::Id, u64)>;
 
 struct EditorState {
     value: String,
     cell: Rc<RefCell<text_editor::Content>>,
+    entry: u64,
+}
+
+/// A state allocation plus the id its usage record is stored under.
+struct Leased<T> {
+    entry: u64,
+    state: T,
+}
+
+/// State removed from a map, kept alive until the windows that rendered it
+/// have replaced their element trees.
+struct Evicted {
+    generation: u64,
+    used: Used,
+    // Owns the allocation only until this entry is freed.
+    #[allow(dead_code)]
+    retired: Retired,
 }
 
 #[allow(dead_code)] // Fields only keep the allocations alive.
@@ -34,11 +55,17 @@ enum Retired {
 
 thread_local! {
     static EDITORS: RefCell<HashMap<(u64, String), EditorState>> = RefCell::new(HashMap::new());
-    static COMBOS: RefCell<HashMap<(u64, String), ComboState>> = RefCell::new(HashMap::new());
-    static PANES: RefCell<HashMap<(u64, String, u8, usize), PaneState>> =
+    static COMBOS: RefCell<HashMap<(u64, String), Leased<ComboState>>> =
         RefCell::new(HashMap::new());
+    static PANES: RefCell<HashMap<PaneKey, Leased<PaneState>>> = RefCell::new(HashMap::new());
     static RETIRED: RefCell<Vec<Retired>> = const { RefCell::new(Vec::new()) };
-    static EVICTED: RefCell<Vec<(u64, Retired)>> = const { RefCell::new(Vec::new()) };
+    static EVICTED: RefCell<Vec<Evicted>> = const { RefCell::new(Vec::new()) };
+    // Windows whose element for `id` may reference a state allocation, with
+    // the render epoch of their last use.
+    static USED: RefCell<HashMap<u64, Used>> = RefCell::new(HashMap::new());
+    // One counter per window, advanced by `begin_render`.
+    static EPOCH: RefCell<HashMap<iced::window::Id, u64>> = RefCell::new(HashMap::new());
+    static NEXT_ENTRY: Cell<u64> = const { Cell::new(0) };
     static MARKDOWN: RefCell<HashMap<String, Rc<Vec<iced::widget::markdown::Item>>>> =
         RefCell::new(HashMap::new());
     static LISTS: RefCell<HashMap<ListKey, ListEntry>> = RefCell::new(HashMap::new());
@@ -83,6 +110,62 @@ pub(crate) fn forget_window(generation: u64, window: iced::window::Id) {
     LISTS.with_borrow_mut(|lists| {
         lists.retain(|(owner, id, _), _| *owner != generation || *id != Some(window))
     });
+    // The window's element tree is gone; its state no longer needs to wait.
+    EPOCH.with_borrow_mut(|epochs| {
+        epochs.remove(&window);
+    });
+}
+
+/// Marks the start of one window's render and frees evicted state whose last
+/// user has since rebuilt its element tree.
+pub(crate) fn begin_render(window: iced::window::Id) {
+    EPOCH.with_borrow_mut(|epochs| {
+        *epochs.entry(window).or_default() += 1;
+    });
+    free_expired();
+}
+
+/// Two renders after the last use, the element from that use has been replaced
+/// by the next one and then by the current one; no tree can still point into it.
+fn free_expired() {
+    let epochs = EPOCH.with_borrow(|epochs| epochs.clone());
+    EVICTED.with_borrow_mut(|evicted| {
+        evicted.retain(|entry| {
+            // No recorded user means we cannot prove it safe; keep it until reload.
+            entry.used.is_empty()
+                || entry.used.iter().any(|(window, used)| {
+                    epochs
+                        .get(window)
+                        .is_some_and(|current| *current <= used.saturating_add(1))
+                })
+        });
+    });
+}
+
+fn next_entry(window: Option<iced::window::Id>) -> u64 {
+    let entry = NEXT_ENTRY.with(|next| {
+        let entry = next.get().wrapping_add(1);
+        next.set(entry);
+        entry
+    });
+    touch(entry, window);
+    entry
+}
+
+/// Records which window rendered this allocation and when.
+fn touch(entry: u64, window: Option<iced::window::Id>) {
+    let Some(window) = window else {
+        return;
+    };
+    let epoch = EPOCH.with_borrow(|epochs| epochs.get(&window).copied().unwrap_or(0));
+    USED.with_borrow_mut(|used| {
+        let list = used.entry(entry).or_default();
+        if let Some(slot) = list.iter_mut().find(|(id, _)| *id == window) {
+            slot.1 = epoch;
+        } else {
+            list.push((window, epoch));
+        }
+    });
 }
 
 pub(crate) fn forget_generation(generation: u64) {
@@ -91,6 +174,9 @@ pub(crate) fn forget_generation(generation: u64) {
     EDITORS.with_borrow_mut(|editors| {
         editors.retain(|(owner, _), state| {
             if *owner == generation {
+                USED.with_borrow_mut(|used| {
+                    used.remove(&state.entry);
+                });
                 retiring.push(Retired::Editor(Rc::clone(&state.cell)));
                 false
             } else {
@@ -99,9 +185,12 @@ pub(crate) fn forget_generation(generation: u64) {
         });
     });
     COMBOS.with_borrow_mut(|combos| {
-        combos.retain(|(owner, _), state| {
+        combos.retain(|(owner, _), lease| {
             if *owner == generation {
-                retiring.push(Retired::Combo(Rc::clone(&*state)));
+                USED.with_borrow_mut(|used| {
+                    used.remove(&lease.entry);
+                });
+                retiring.push(Retired::Combo(Rc::clone(&lease.state)));
                 false
             } else {
                 true
@@ -109,9 +198,12 @@ pub(crate) fn forget_generation(generation: u64) {
         });
     });
     PANES.with_borrow_mut(|panes| {
-        panes.retain(|(owner, _, _, _), state| {
+        panes.retain(|(owner, _, _, _), lease| {
             if *owner == generation {
-                retiring.push(Retired::Pane(Rc::clone(state)));
+                USED.with_borrow_mut(|used| {
+                    used.remove(&lease.entry);
+                });
+                retiring.push(Retired::Pane(Rc::clone(&lease.state)));
                 false
             } else {
                 true
@@ -131,7 +223,7 @@ pub(crate) fn free_retired() {
 /// accepted; evictions from the new generation may still be referenced by the
 /// tree that was just built.
 pub(crate) fn free_evicted(generation: u64) {
-    EVICTED.with_borrow_mut(|evicted| evicted.retain(|(owner, _)| *owner >= generation));
+    EVICTED.with_borrow_mut(|evicted| evicted.retain(|entry| entry.generation >= generation));
 }
 
 /// Evicts one entry instead of the whole map, which would reset every live
@@ -139,13 +231,21 @@ pub(crate) fn free_evicted(generation: u64) {
 fn retire_one<K: std::hash::Hash + Eq + Clone, V>(
     generation: u64,
     map: &mut HashMap<K, V>,
+    entry: impl Fn(&V) -> u64,
     retire: impl FnOnce(V) -> Retired,
 ) {
     let Some(key) = map.keys().next().cloned() else {
         return;
     };
     if let Some(value) = map.remove(&key) {
-        EVICTED.with_borrow_mut(|evicted| evicted.push((generation, retire(value))));
+        let used = USED.with_borrow_mut(|used| used.remove(&entry(&value)).unwrap_or_default());
+        EVICTED.with_borrow_mut(|evicted| {
+            evicted.push(Evicted {
+                generation,
+                used,
+                retired: retire(value),
+            })
+        });
     }
 }
 
@@ -199,6 +299,7 @@ pub(crate) fn sweep_animations() {
 /// text is replaced in place, so a static value does not erase typing.
 pub(super) fn editor(
     generation: u64,
+    window: Option<iced::window::Id>,
     id: &str,
     value: &str,
 ) -> &'static RefCell<text_editor::Content> {
@@ -206,6 +307,7 @@ pub(super) fn editor(
         let mut editors = editors.borrow_mut();
         let key = (generation, id.to_owned());
         if let Some(existing) = editors.get_mut(&key) {
+            touch(existing.entry, window);
             if existing.value != value {
                 let mut content = existing.cell.borrow_mut();
                 content.perform(text_editor::Action::SelectAll);
@@ -217,16 +319,21 @@ pub(super) fn editor(
             return static_ref(&*existing.cell);
         }
         let cell = Rc::new(RefCell::new(text_editor::Content::with_text(value)));
+        let entry = next_entry(window);
         if editors.len() >= LIMIT {
-            retire_one(generation, &mut editors, |state| {
-                Retired::Editor(state.cell)
-            });
+            retire_one(
+                generation,
+                &mut editors,
+                |state| state.entry,
+                |state| Retired::Editor(state.cell),
+            );
         }
         editors.insert(
             key,
             EditorState {
                 value: value.to_owned(),
                 cell: Rc::clone(&cell),
+                entry,
             },
         );
         static_ref(&*cell)
@@ -262,6 +369,7 @@ pub(super) fn text(generation: u64, id: &str) -> Option<String> {
 /// Stable combo state; rebuilt only when the option list changes.
 pub(super) fn combo(
     generation: u64,
+    window: Option<iced::window::Id>,
     id: &str,
     options: &[String],
 ) -> &'static combo_box::State<String> {
@@ -269,16 +377,32 @@ pub(super) fn combo(
         let mut combos = combos.borrow_mut();
         let key = (generation, id.to_owned());
         if let Some(existing) = combos.get(&key)
-            && existing.options() == options
+            && existing.state.options() == options
         {
-            return static_ref(&**existing);
+            touch(existing.entry, window);
+            return static_ref(&*existing.state);
         }
         let state = Rc::new(combo_box::State::new(options.to_vec()));
+        let entry = next_entry(window);
         if combos.len() >= LIMIT && !combos.contains_key(&key) {
-            retire_one(generation, &mut combos, Retired::Combo);
+            retire_one(
+                generation,
+                &mut combos,
+                |lease| lease.entry,
+                |lease| Retired::Combo(lease.state),
+            );
         }
-        if let Some(old) = combos.insert(key, Rc::clone(&state)) {
-            RETIRED.with_borrow_mut(|retired| retired.push(Retired::Combo(old)));
+        if let Some(old) = combos.insert(
+            key,
+            Leased {
+                entry,
+                state: Rc::clone(&state),
+            },
+        ) {
+            USED.with_borrow_mut(|used| {
+                used.remove(&old.entry);
+            });
+            RETIRED.with_borrow_mut(|retired| retired.push(Retired::Combo(old.state)));
         }
         static_ref(&*state)
     })
@@ -435,6 +559,7 @@ pub(super) fn list_node(
 /// Stable pane layout; rebuilt when the pane count changes.
 pub(super) fn panes(
     generation: u64,
+    window: Option<iced::window::Id>,
     id: &str,
     count: usize,
     axis: pane_grid::Axis,
@@ -447,7 +572,8 @@ pub(super) fn panes(
         let mut panes = panes.borrow_mut();
         let key = (generation, id.to_owned(), axis_key, count);
         if let Some(existing) = panes.get(&key) {
-            return static_ref(&**existing);
+            touch(existing.entry, window);
+            return static_ref(&*existing.state);
         }
         let (mut state, mut current) = pane_grid::State::new(0);
         for index in 1..count {
@@ -457,11 +583,26 @@ pub(super) fn panes(
             current = next;
         }
         let state = Rc::new(RefCell::new(state));
+        let entry = next_entry(window);
         if panes.len() >= LIMIT && !panes.contains_key(&key) {
-            retire_one(generation, &mut panes, Retired::Pane);
+            retire_one(
+                generation,
+                &mut panes,
+                |lease| lease.entry,
+                |lease| Retired::Pane(lease.state),
+            );
         }
-        if let Some(old) = panes.insert(key, Rc::clone(&state)) {
-            RETIRED.with_borrow_mut(|retired| retired.push(Retired::Pane(old)));
+        if let Some(old) = panes.insert(
+            key,
+            Leased {
+                entry,
+                state: Rc::clone(&state),
+            },
+        ) {
+            USED.with_borrow_mut(|used| {
+                used.remove(&old.entry);
+            });
+            RETIRED.with_borrow_mut(|retired| retired.push(Retired::Pane(old.state)));
         }
         static_ref(&*state)
     })
@@ -622,16 +763,16 @@ mod tests {
     #[test]
     fn editor_keeps_typed_text_until_the_value_prop_changes() {
         let generation = 993;
-        editor(generation, "doc", "start");
+        editor(generation, None, "doc", "start");
         let typed = perform(
             generation,
             "doc",
             text_editor::Action::Edit(text_editor::Edit::Insert('!')),
         );
         assert_ne!(typed.as_deref(), Some("start"));
-        editor(generation, "doc", "start");
+        editor(generation, None, "doc", "start");
         assert_eq!(text(generation, "doc"), typed);
-        editor(generation, "doc", "reset");
+        editor(generation, None, "doc", "reset");
         assert_eq!(text(generation, "doc").as_deref(), Some("reset"));
         forget_generation(generation);
         free_retired();
@@ -640,15 +781,16 @@ mod tests {
     #[test]
     fn generation_sweep_frees_widget_state_after_one_reload() {
         let generation = 994;
-        editor(generation, "doc", "text");
-        combo(generation, "pick", &["a".to_owned()]);
-        panes(generation, "grid", 2, pane_grid::Axis::Horizontal);
+        editor(generation, None, "doc", "text");
+        combo(generation, None, "pick", &["a".to_owned()]);
+        panes(generation, None, "grid", 2, pane_grid::Axis::Horizontal);
         let editor = EDITORS
             .with_borrow(|editors| Rc::downgrade(&editors[&(generation, "doc".to_owned())].cell));
-        let combo =
-            COMBOS.with_borrow(|combos| Rc::downgrade(&combos[&(generation, "pick".to_owned())]));
-        let pane = PANES
-            .with_borrow(|panes| Rc::downgrade(&panes[&(generation, "grid".to_owned(), 0, 2)]));
+        let combo = COMBOS
+            .with_borrow(|combos| Rc::downgrade(&combos[&(generation, "pick".to_owned())].state));
+        let pane = PANES.with_borrow(|panes| {
+            Rc::downgrade(&panes[&(generation, "grid".to_owned(), 0, 2)].state)
+        });
 
         forget_generation(generation);
         assert!(
@@ -707,9 +849,9 @@ mod tests {
         free_retired();
         free_evicted(u64::MAX);
         for index in 0..LIMIT {
-            editor(generation, &format!("editor-{index}"), "");
+            editor(generation, None, &format!("editor-{index}"), "");
         }
-        editor(generation, "overflow", "");
+        editor(generation, None, "overflow", "");
         assert_eq!(
             EDITORS.with_borrow(|editors| editors.keys().filter(|key| key.0 == generation).count()),
             LIMIT
@@ -721,13 +863,53 @@ mod tests {
     }
 
     #[test]
+    fn evicted_state_is_freed_after_its_window_renders_twice() {
+        let generation = 998;
+        let window = iced::window::Id::unique();
+        EDITORS.with_borrow_mut(HashMap::clear);
+        USED.with_borrow_mut(HashMap::clear);
+        EVICTED.with_borrow_mut(Vec::clear);
+        EPOCH.with_borrow_mut(HashMap::clear);
+        begin_render(window); // epoch 1
+        for index in 0..LIMIT {
+            editor(generation, Some(window), &format!("e-{index}"), "");
+        }
+        let cells = EDITORS.with_borrow(|editors| {
+            editors
+                .values()
+                .map(|state| Rc::clone(&state.cell))
+                .collect::<Vec<_>>()
+        });
+        editor(generation, Some(window), "overflow", "");
+        assert_eq!(EVICTED.with_borrow(|evicted| evicted.len()), 1);
+        // One render is not enough: the previous tree may still reference it.
+        begin_render(window); // epoch 2
+        assert_eq!(EVICTED.with_borrow(|evicted| evicted.len()), 1);
+        begin_render(window); // epoch 3
+        assert!(EVICTED.with_borrow(|evicted| evicted.is_empty()));
+        // Exactly the evicted allocation lost its extra owner.
+        assert_eq!(
+            cells
+                .iter()
+                .filter(|cell| Rc::strong_count(cell) == 1)
+                .count(),
+            1
+        );
+        forget_window(generation, window);
+        forget_generation(generation);
+        free_retired();
+        free_evicted(u64::MAX);
+    }
+
+    #[test]
     fn stateful_widget_maps_are_bounded() {
         let generation = 987_654_321;
         for index in 0..LIMIT + 8 {
-            editor(generation, &format!("editor-{index}"), "");
-            combo(generation, &format!("combo-{index}"), &[]);
+            editor(generation, None, &format!("editor-{index}"), "");
+            combo(generation, None, &format!("combo-{index}"), &[]);
             panes(
                 generation,
+                None,
                 &format!("pane-{index}"),
                 1,
                 pane_grid::Axis::Horizontal,

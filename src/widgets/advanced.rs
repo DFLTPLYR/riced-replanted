@@ -67,7 +67,7 @@ pub(super) fn text_editor(
         .ok_or_else(|| mlua::Error::runtime("text_editor requires a non-empty id"))?;
     let id = scoped(id, ctx);
     let value = node.get::<Option<String>>("value")?.unwrap_or_default();
-    let cell = state::editor(ctx.generation, &id, &value);
+    let cell = state::editor(ctx.generation, ctx.window(), &id, &value);
     let content = state::read_editor(cell);
     let mut editor = text_editor_widget::TextEditor::new(content);
     if let Some(placeholder) = node.get::<Option<String>>("placeholder")? {
@@ -178,7 +178,7 @@ pub(super) fn combo_box(
     let placeholder = node
         .get::<Option<String>>("placeholder")?
         .unwrap_or_default();
-    let state = state::combo(ctx.generation, &id, &options);
+    let state = state::combo(ctx.generation, ctx.window(), &id, &options);
     let generation = ctx.generation;
     let component = ctx.component.clone();
     let on_select = node.get::<Option<String>>("on_select")?;
@@ -732,7 +732,7 @@ pub(super) fn pane_grid(
             )));
         }
     };
-    let cell = state::panes(ctx.generation, &id, panes.len(), axis);
+    let cell = state::panes(ctx.generation, ctx.window(), &id, panes.len(), axis);
     let state = state::read_panes(cell);
     let generation = ctx.generation;
     let component = ctx.component.clone();
@@ -859,8 +859,8 @@ mod tests {
         let a = scoped("doc".to_owned(), &alpha);
         let b = scoped("doc".to_owned(), &beta);
         assert_ne!(a, b);
-        state::editor(generation, &a, "");
-        state::editor(generation, &b, "");
+        state::editor(generation, None, &a, "");
+        state::editor(generation, None, &b, "");
         state::perform(
             generation,
             &a,

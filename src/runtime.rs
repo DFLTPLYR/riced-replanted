@@ -2408,6 +2408,9 @@ impl App {
     }
 
     fn render(app: &Rc<RefCell<App>>, id: window::Id) -> Element<'_, Message> {
+        // Frees evicted widget state once this window has replaced the tree
+        // that referenced it. Only real renders count, not reload validation.
+        widgets::begin_render(id);
         checked_fallback(
             app.borrow().view(id),
             iced::widget::Space::new().into(),

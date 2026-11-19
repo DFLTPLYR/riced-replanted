@@ -33,6 +33,11 @@ pub(crate) use state::{
     forget_generation, forget_window, free_evicted, free_retired, sweep_animations,
 };
 
+/// Marks one window's render and frees evicted widget state that is now safe.
+pub(crate) fn begin_render(window: iced::window::Id) {
+    state::begin_render(window);
+}
+
 pub fn color(value: &str) -> mlua::Result<Color> {
     if !value.is_ascii() {
         return Err(mlua::Error::runtime("colors must be ASCII hex strings"));
