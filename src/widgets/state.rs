@@ -64,9 +64,16 @@ fn normalize(value: &Value) -> Option<Key> {
         Value::Nil => Some(Key::Nil),
         Value::Boolean(flag) => Some(Key::Bool(*flag)),
         Value::Integer(int) => Some(Key::Int(*int)),
-        Value::Number(number) if number.is_finite() => Some(Key::Num(
-            if *number == 0.0 { 0.0 } else { *number }.to_bits(),
-        )),
+        Value::Number(number) if number.is_finite() => {
+            // Lua compares 1 and 1.0 as equal; both must use one key.
+            let integral =
+                number.fract() == 0.0 && *number >= i64::MIN as f64 && *number < i64::MAX as f64;
+            Some(if integral {
+                Key::Int(*number as i64)
+            } else {
+                Key::Num(number.to_bits())
+            })
+        }
         Value::String(string) => string.to_str().ok().map(|s| Key::Str(s.to_owned())),
         _ => None,
     }
@@ -573,6 +580,33 @@ mod tests {
         );
         assert!(next.leaving.is_empty());
         forget_generation(995);
+    }
+
+    #[test]
+    fn integral_float_keys_match_integers() {
+        // Lua compares 1 and 1.0 as equal; a key that flips type between
+        // renders must not reset the item's state or animation.
+        let integral = list(
+            997,
+            None,
+            "num",
+            vec![Value::Integer(1)],
+            &[Value::Integer(1)],
+            true,
+            None,
+        );
+        let float = list(
+            997,
+            None,
+            "num",
+            vec![Value::Number(1.0)],
+            &[Value::Number(1.0)],
+            true,
+            None,
+        );
+        assert_eq!(float.tokens, integral.tokens);
+        assert!(float.leaving.is_empty());
+        forget_generation(997);
     }
 
     #[test]
