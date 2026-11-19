@@ -16,7 +16,8 @@ pub(super) fn row_column(
 ) -> mlua::Result<Element<'static, Message>> {
     let children = children(node, ctx)?;
     let spacing = match transition.and_then(|t| t.value("spacing")) {
-        Some(spacing) => spacing,
+        // A spring can overshoot below zero; clamp like the other widgets.
+        Some(spacing) => spacing.max(0.0),
         None => number(node, "spacing", 0.0)?,
     };
     let clip = node.get::<Option<bool>>("clip")?.unwrap_or(false);
@@ -58,7 +59,7 @@ pub(super) fn grid(
     }
     let mut grid = widget::Grid::with_children(children(node, ctx)?).columns(columns as usize);
     let spacing = match transition.and_then(|transition| transition.value("spacing")) {
-        Some(spacing) => spacing,
+        Some(spacing) => spacing.max(0.0),
         None => number(node, "spacing", 0.0)?,
     };
     grid = grid.spacing(spacing);
