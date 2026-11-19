@@ -551,6 +551,17 @@ Extensions may push events. They arrive in `update` as:
 { type = "plugin", plugin = "system", event = <value> }
 ```
 
+Warnings and errors written to the daemon log arrive in `update` as:
+
+```lua
+{ type = "log", level = "warn" or "error", target = "reload.rejected", message = "..." }
+```
+
+`target` is the log target, for example `runtime.error`, `reload.rejected`,
+`plugin.callback`, or `log.event`. The same target and message are delivered at
+most once a minute, so a failing render does not notify on every tick. Lua
+`log(...)` calls are info level and are not reported this way.
+
 #### Bundled extension APIs
 
 | Extension      | Store fields                                                                                     | Methods                                                                                                                                                                                  | Events |

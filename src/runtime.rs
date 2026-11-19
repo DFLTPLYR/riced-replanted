@@ -359,6 +359,9 @@ pub struct App {
     // paths that come back after a reload keep their stamps, so an unchanged
     // file does not fire again.
     watches: HashMap<String, WatchStamp>,
+    // (target, message) of the last log events delivered to `update`, so a
+    // failing render does not notify on every tick.
+    log_events: HashMap<(String, String), Instant>,
 }
 
 impl App {
@@ -582,6 +585,7 @@ pub fn load_with_plugins(
         extras: RefCell::new(HashMap::new()),
         plugins,
         watches: HashMap::new(),
+        log_events: HashMap::new(),
         restart: None,
         deferred_forgets: None,
         shell_stamp: shell_stamp(path).unwrap_or((None, 0)),
@@ -953,6 +957,50 @@ impl App {
                 },
                 Err(error) => {
                     log::error!(target: "watch.callback", "watch {raw:?} callback failed: {error}")
+                }
+            }
+        }
+        Ok(Task::batch(tasks))
+    }
+
+    /// Delivers warnings and errors written through `log` as `update` events.
+    /// The same target and message are delivered at most once a minute.
+    fn poll_logs(&mut self) -> mlua::Result<Task<Message>> {
+        const REPEAT: Duration = Duration::from_secs(60);
+        let events = crate::logs::events();
+        if events.is_empty() {
+            return Ok(Task::none());
+        }
+        self.log_events.retain(|_, at| at.elapsed() < REPEAT);
+        let mut tasks = Vec::new();
+        for (level, target, message) in events {
+            let key = (target.clone(), message.clone());
+            if self.log_events.contains_key(&key) {
+                continue;
+            }
+            self.log_events.insert(key, Instant::now());
+            let event = self.lua.create_table()?;
+            event.set("type", "log")?;
+            event.set(
+                "level",
+                if level == riced_extension_sdk::log::Level::Error {
+                    "error"
+                } else {
+                    "warn"
+                },
+            )?;
+            event.set("target", target)?;
+            event.set("message", message)?;
+            match self.update.call::<Value>((self.state.clone(), event)) {
+                Ok(value) => match self.tasks(value) {
+                    Ok(task) => tasks.push(task),
+                    Err(error) => log::error!(
+                        target: "log.event",
+                        "log event returned an invalid task: {error}"
+                    ),
+                },
+                Err(error) => {
+                    log::error!(target: "log.event", "log event handler failed: {error}")
                 }
             }
         }
@@ -2366,7 +2414,16 @@ impl App {
                         log::error!(target: "file.poll", "file poll failed: {error}");
                         Task::none()
                     });
-                    return reload.chain(surfaces).chain(ipc).chain(watches).chain(files);
+                    let logs = app.poll_logs().unwrap_or_else(|error| {
+                        log::error!(target: "log.poll", "log event poll failed: {error}");
+                        Task::none()
+                    });
+                    return reload
+                        .chain(surfaces)
+                        .chain(ipc)
+                        .chain(watches)
+                        .chain(files)
+                        .chain(logs);
                 }
                 if matches!(message, Message::PollPlugins) {
                     let (changed, tasks) = checked_fallback(
@@ -2865,6 +2922,56 @@ mod tests {
         let _ = app.poll_watches().unwrap();
         assert_eq!(app.lua.globals().get::<u32>("PROBES").unwrap(), 2);
         assert!(app.lua.globals().get::<Value>("LAST").unwrap().is_nil());
+    }
+
+    #[test]
+    fn log_events_reach_update_once_per_message() {
+        let mut app = load(
+            r#"
+            local app = { count = 0 }
+            function app:update(event)
+                if type(event) == 'table' and event.type == 'log' and event.target == 'test.log.event' then
+                    self.count = self.count + 1
+                    self.level = event.level
+                    self.message = event.message
+                end
+            end
+            function app:view() return iced.text('logs') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+            "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        crate::logs::record(
+            riced_extension_sdk::log::Level::Error,
+            "test.log.event",
+            "boom",
+        );
+        let _ = app.poll_logs().unwrap();
+        assert_eq!(app.state.get::<u32>("count").unwrap(), 1);
+        assert_eq!(app.state.get::<String>("level").unwrap(), "error");
+        assert_eq!(app.state.get::<String>("message").unwrap(), "boom");
+
+        crate::logs::record(
+            riced_extension_sdk::log::Level::Error,
+            "test.log.event",
+            "boom",
+        );
+        let _ = app.poll_logs().unwrap();
+        assert_eq!(
+            app.state.get::<u32>("count").unwrap(),
+            1,
+            "an unchanged message is debounced"
+        );
+
+        crate::logs::record(
+            riced_extension_sdk::log::Level::Warn,
+            "test.log.event",
+            "other",
+        );
+        let _ = app.poll_logs().unwrap();
+        assert_eq!(app.state.get::<u32>("count").unwrap(), 2);
+        assert_eq!(app.state.get::<String>("level").unwrap(), "warn");
     }
 
     #[test]

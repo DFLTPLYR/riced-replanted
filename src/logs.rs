@@ -4,6 +4,7 @@
 //! also mirrors it to stderr; without that flag the daemon is quiet.
 
 use std::{
+    collections::VecDeque,
     fs::{self, File, OpenOptions},
     io::{self, IsTerminal, Read, Seek, SeekFrom, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -26,6 +27,32 @@ struct Sink {
 
 static SINK: Mutex<Option<Sink>> = Mutex::new(None);
 static LOGGER: Logger = Logger;
+/// Errors and warnings waiting for the shell's `update`, oldest first.
+static EVENTS: Mutex<VecDeque<(log::Level, String, String)>> = Mutex::new(VecDeque::new());
+const MAX_EVENTS: usize = 32;
+
+/// Takes the pending warnings and errors for delivery as `log` events.
+pub fn events() -> Vec<(log::Level, String, String)> {
+    let mut events = EVENTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::take(&mut *events).into()
+}
+
+#[cfg(test)]
+pub fn record(level: log::Level, target: &str, message: &str) {
+    push_event(level, target, message);
+}
+
+fn push_event(level: log::Level, target: &str, message: &str) {
+    let mut events = EVENTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if events.len() >= MAX_EVENTS {
+        events.pop_front();
+    }
+    events.push_back((level, target.to_owned(), message.to_owned()));
+}
 
 struct Logger;
 
@@ -49,6 +76,9 @@ impl Log for Logger {
             let _ = riced_extension_sdk::logging::write_record(&mut stderr, record, color);
         }
         write_line(sink, &format!("[{}]: {}", record.target(), record.args()));
+        if record.level() <= log::Level::Warn {
+            push_event(record.level(), record.target(), &record.args().to_string());
+        }
     }
 
     fn flush(&self) {
