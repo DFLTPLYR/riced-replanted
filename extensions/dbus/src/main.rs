@@ -143,19 +143,7 @@ fn tray_call(model: &Arc<Mutex<Model>>, args: &Value, method: &str) -> Result<Va
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
         .ok_or_else(|| "missing tray item id".to_owned())?;
-    let (connection, item) = {
-        let model = model.lock().unwrap();
-        let connection = model
-            .connection
-            .clone()
-            .ok_or_else(|| "session bus is not connected".to_owned())?;
-        let item = model
-            .tray
-            .get(id)
-            .cloned()
-            .ok_or_else(|| format!("unknown tray item: {id}"))?;
-        (connection, item)
-    };
+    let (connection, item) = lookup_tray(model, id)?;
     let proxy = Proxy::new(
         &connection,
         item.bus.as_str(),
