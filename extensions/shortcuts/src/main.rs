@@ -359,12 +359,17 @@ fn main() -> io::Result<()> {
             validate_label(label)?;
             let backend = bind_backend.as_ref().ok_or(NOT_CONNECTED)?;
             let command = exec_command(label, &queue_path()?);
-            backend
+            let result = backend
                 .unbind(keys)
                 .and_then(|()| backend.bind(keys, &command))
-                .inspect_err(
-                    |error| log::warn!(target: "shortcuts.bind", "bind {keys}: {error}"),
-                )?;
+                .inspect_err(|error| log::warn!(target: "shortcuts.bind", "bind {keys}: {error}"));
+            if let Err(error) = result {
+                // The old binding is gone; do not advertise either one.
+                if let Ok(mut binds) = bind_binds.lock() {
+                    binds.remove(keys);
+                }
+                return Err(error);
+            }
             bind_binds
                 .lock()
                 .map_err(|_| "binds lock poisoned".to_owned())?
