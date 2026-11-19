@@ -8,6 +8,11 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 /// Writes `contents` to `path` via temp + rename, preserving the
 /// destination symlink target and its mode; new files get 0600.
 pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    write_atomic_bytes(path, contents.as_bytes())
+}
+
+/// Byte form of [`write_atomic`], for payloads that are not UTF-8 (screenshots).
+pub fn write_atomic_bytes(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let resolved;
     let path = match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -51,7 +56,7 @@ pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     let mut file = options.open(&temporary)?;
     use std::io::Write;
     let result = (|| {
-        file.write_all(contents.as_bytes())?;
+        file.write_all(contents)?;
         if let Some(mode) = mode {
             file.set_permissions(mode)?;
         }
