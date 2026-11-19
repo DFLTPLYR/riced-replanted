@@ -292,30 +292,51 @@ fn collect(
             .with_file_name(id)
             .to_string_lossy()
             .replace('/', "-");
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        if let Some(application) = parse(&path, id) {
-            applications.push(application);
+        match parse(&path, id.clone()) {
+            Parsed::Application(application) => {
+                if seen.insert(application.id.clone()) {
+                    applications.push(application);
+                }
+            }
+            // An explicit Hidden/NoDisplay entry masks lower-priority dirs.
+            Parsed::Suppress => {
+                seen.insert(id);
+            }
+            // A broken override must not hide a working lower-priority entry.
+            Parsed::Invalid => {}
         }
     }
 }
 
-fn parse(path: &Path, id: String) -> Option<Application> {
-    let entry = Entry::parse_file(path).ok()?;
+enum Parsed {
+    Application(Application),
+    Suppress,
+    Invalid,
+}
+
+fn parse(path: &Path, id: String) -> Parsed {
+    let Ok(entry) = Entry::parse_file(path) else {
+        return Parsed::Invalid;
+    };
     let section = entry.section("Desktop Entry");
-    if section.attr("Type").unwrap_or("Application") != "Application"
-        || flag(&section, "Hidden")
-        || flag(&section, "NoDisplay")
-    {
-        return None;
+    if section.attr("Type").unwrap_or("Application") != "Application" {
+        return Parsed::Invalid;
     }
-    let name = section.attr("Name")?.trim();
-    let exec = section.attr("Exec")?.trim();
+    if flag(&section, "Hidden") || flag(&section, "NoDisplay") {
+        return Parsed::Suppress;
+    }
+    let Some(name) = section.attr("Name") else {
+        return Parsed::Invalid;
+    };
+    let Some(exec) = section.attr("Exec") else {
+        return Parsed::Invalid;
+    };
+    let name = name.trim();
+    let exec = exec.trim();
     if name.is_empty() || exec.is_empty() {
-        return None;
+        return Parsed::Invalid;
     }
-    Some(Application {
+    Parsed::Application(Application {
         id,
         name: clamp(name, MAX_NAME),
         icon: clamp(section.attr("Icon").unwrap_or("").trim(), MAX_NAME),
@@ -453,6 +474,11 @@ mod tests {
             (
                 "system/applications/tool.desktop",
                 "[Desktop Entry]\nType=Application\nName=Tool\nExec=tool %U\n",
+            ),
+            // A broken user override must not hide the system entry.
+            (
+                "user/applications/tool.desktop",
+                "[Desktop Entry]\nName=Broken\n",
             ),
         ] {
             let path = root.join(name);
