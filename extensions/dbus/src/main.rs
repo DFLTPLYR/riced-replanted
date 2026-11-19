@@ -795,6 +795,7 @@ fn run(context: riced_extension_sdk::Context, model: Arc<Mutex<Model>>) {
             let mut model = model.lock().unwrap();
             model.connection = None;
             model.tray.clear();
+            model.tray_failures.clear();
             model.tray_menu = None;
             model.notifications.clear();
             model.own_watcher = false;
@@ -822,6 +823,7 @@ fn serve(
         let mut model = model.lock().unwrap();
         model.connection = Some(connection.clone());
         model.tray.clear();
+        model.tray_failures.clear();
         model.tray_menu = None;
         model.notifications.clear();
         model.dirty = true;
@@ -1011,6 +1013,10 @@ fn sync_external_watcher(
         }
         model.dirty = true;
     }
+    // A key that left the watcher must not keep its failure count (and memory)
+    // forever; the count only matters while the item is registered.
+    let keys = model.tray.keys().cloned().collect::<HashSet<_>>();
+    model.tray_failures.retain(|key, _| keys.contains(key));
     Ok(())
 }
 
