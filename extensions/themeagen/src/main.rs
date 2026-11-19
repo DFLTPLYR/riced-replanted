@@ -152,16 +152,27 @@ fn main() -> io::Result<()> {
     let generate_model = Arc::clone(&model);
     let populate_model = Arc::clone(&model);
     let regenerate_model = Arc::clone(&model);
+    // Calls run on separate threads; serialize them so the palette written to
+    // disk and the one published to Lua always come from the same request.
+    let gate = Arc::new(Mutex::new(()));
+    let generate_gate = Arc::clone(&gate);
+    let populate_gate = Arc::clone(&gate);
+    let regenerate_gate = Arc::clone(&gate);
 
     Plugin::new("themeagen")
         .state(["ready", "mode", "source", "colors"])
         .method("generate", false, move |args| {
+            let _gate = generate_gate.lock().unwrap_or_else(PoisonError::into_inner);
             handle_generate(&generate_model, args)
         })
         .method("populate", false, move |args| {
+            let _gate = populate_gate.lock().unwrap_or_else(PoisonError::into_inner);
             handle_populate(&populate_model, args)
         })
         .method("regenerate", false, move |args| {
+            let _gate = regenerate_gate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             handle_regenerate(&regenerate_model, args)
         })
         .serve(move |context| run(context, model))
