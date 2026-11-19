@@ -5,8 +5,8 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Cursor, Write},
-    os::unix::fs::FileExt,
+    io::{self, Cursor},
+    os::unix::fs::{FileExt, OpenOptionsExt},
     os::unix::io::AsFd,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
@@ -15,6 +15,7 @@ use std::{
 };
 
 use image::{ImageBuffer, Rgba};
+use riced_extension_sdk::write_atomic::write_atomic_bytes;
 use riced_extension_sdk::{Plugin, expand_home, log};
 use serde_json::{Value, json};
 use wayland_client::{
@@ -58,6 +59,7 @@ fn main() -> io::Result<()> {
                 store: Mutex::new(Store {
                     connected: false,
                     capturing: false,
+                    serial: 0,
                     last: Value::Null,
                 }),
             });
@@ -74,6 +76,9 @@ fn main() -> io::Result<()> {
 struct Store {
     connected: bool,
     capturing: bool,
+    // Monotonic id of the last capture; a timed-out worker must not clear the
+    // flag for a capture started after it.
+    serial: u64,
     last: Value,
 }
 
@@ -116,13 +121,15 @@ fn arguments(args: &Value) -> Result<(Option<String>, PathBuf), String> {
 
 /// Serializes captures so a second concurrent one is rejected immediately.
 fn capture(shared: &Arc<Shared>, output: Option<String>, path: PathBuf) -> Result<Value, String> {
-    {
+    let serial = {
         let mut store = shared.store.lock().unwrap();
         if store.capturing {
             return Err("a capture is already in progress".into());
         }
         store.capturing = true;
-    }
+        store.serial = store.serial.wrapping_add(1);
+        store.serial
+    };
     publish(shared);
     let (tx, rx) = mpsc::channel();
     let worker = {
@@ -133,7 +140,11 @@ fn capture(shared: &Arc<Shared>, output: Option<String>, path: PathBuf) -> Resul
                 let result = shoot(&shared, output.as_deref(), &path);
                 {
                     let mut store = shared.store.lock().unwrap();
-                    store.capturing = false;
+                    // A capture that timed out may finish after a newer one
+                    // started; only its own generation may clear the flag.
+                    if store.serial == serial {
+                        store.capturing = false;
+                    }
                     if let Ok(entry) = &result {
                         store.last = entry.clone();
                     }
@@ -152,10 +163,20 @@ fn capture(shared: &Arc<Shared>, output: Option<String>, path: PathBuf) -> Resul
     }
     match rx.recv_timeout(WAIT) {
         Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
-            "capture timed out after {}s and continues in the background",
-            WAIT.as_secs()
-        )),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // The worker is stuck in the compositor; let the caller try again.
+            // A late result still records `last`, but cannot clear a newer flag.
+            let mut store = shared.store.lock().unwrap();
+            if store.serial == serial {
+                store.capturing = false;
+            }
+            drop(store);
+            publish(shared);
+            Err(format!(
+                "capture timed out after {}s and continues in the background",
+                WAIT.as_secs()
+            ))
+        }
         Err(mpsc::RecvTimeoutError::Disconnected) => Err("capture thread crashed".into()),
     }
 }
@@ -240,7 +261,7 @@ fn select(names: &[String], want: Option<&str>) -> Result<usize, String> {
 /// Encodes and writes the PNG, returning the store/caller entry.
 fn entry(pixels: &Pixels, output: &str, path: &Path) -> Result<Value, String> {
     let bytes = encode_png(pixels)?;
-    write_atomic(path, &bytes)
+    write_atomic_bytes(path, &bytes)
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     log::info!(
         target: "screenshot.capture",
@@ -269,57 +290,9 @@ fn encode_png(pixels: &Pixels) -> Result<Vec<u8>, String> {
     Ok(png.into_inner())
 }
 
-/// Byte twin of the SDK's text-only `write_atomic` (temp + rename, new files
-/// 0600): PNG bytes are not UTF-8, so the SDK helper cannot take them.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let resolved;
-    let path = match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            resolved = fs::canonicalize(path)?;
-            resolved.as_path()
-        }
-        Ok(_) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => path,
-        Err(error) => return Err(error),
-    };
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("screenshot");
-    let mode = fs::metadata(path)
-        .ok()
-        .map(|metadata| metadata.permissions());
-    let suffix = now_nanos();
-    let temporary = path.with_file_name(format!(".{name}.tmp-{}-{suffix}", std::process::id()));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    let result = (|| {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    if let (Some(mode), Ok(())) = (mode, &result) {
-        fs::set_permissions(path, mode)?;
-    }
-    result
-}
-
 /// An unlinked file of `size` bytes; its fd backs the shm pool and lets us
-/// read the copied pixels back without mmap.
+/// read the copied pixels back without mmap. It holds screen contents, so it
+/// is created 0600 before the name is removed.
 fn shm_file(size: u64) -> Result<File, String> {
     let path = std::env::temp_dir().join(format!(
         "riced-screenshot-{}-{}",
@@ -330,6 +303,7 @@ fn shm_file(size: u64) -> Result<File, String> {
         .read(true)
         .write(true)
         .create_new(true)
+        .mode(0o600)
         .open(&path)
         .map_err(|error| format!("cannot create the shm file: {error}"))?;
     file.set_len(size)
@@ -672,14 +646,22 @@ mod tests {
         let _ = fs::remove_dir(&dir);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn shm_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = shm_file(16).unwrap();
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
     #[test]
     fn atomic_write_roundtrips_binary_and_replaces() {
         let path =
             std::env::temp_dir().join(format!("riced-screenshot-bytes-{}.png", std::process::id()));
         let png = [0u8, 137, 80, 78, 71, 13, 10, 26, 10, 255];
-        write_atomic(&path, &png).unwrap();
+        write_atomic_bytes(&path, &png).unwrap();
         assert_eq!(fs::read(&path).unwrap(), png);
-        write_atomic(&path, &[1]).unwrap();
+        write_atomic_bytes(&path, &[1]).unwrap();
         assert_eq!(fs::read(&path).unwrap(), [1]);
         let _ = fs::remove_file(&path);
     }
