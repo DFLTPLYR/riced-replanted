@@ -307,10 +307,6 @@ fn parse_layout(
     count: &mut usize,
     ids: &mut HashSet<i32>,
 ) -> Option<Value> {
-    if depth > MAX_MENU_DEPTH || *count >= MAX_MENU_ITEMS {
-        return None;
-    }
-    *count += 1;
     let (id, properties, children) = raw;
     let text = |key: &str| {
         properties
@@ -329,17 +325,25 @@ fn parse_layout(
             .get(key)
             .and_then(|value| i32::try_from(value).ok())
     };
+    // Hidden entries are dropped anyway; they must not use up the item budget
+    // that visible siblings need.
     if !flag("visible", true) {
         return None;
     }
+    if depth > MAX_MENU_DEPTH || *count >= MAX_MENU_ITEMS {
+        return None;
+    }
+    *count += 1;
     ids.insert(id);
-    let kind = match text("type") {
-        "" => "standard",
-        kind => kind,
+    let kind = clamp(text("type"), MAX_MENU_TEXT);
+    let kind = if kind.is_empty() {
+        "standard".to_owned()
+    } else {
+        kind
     };
     let label = clamp(text("label"), MAX_MENU_TEXT);
     let icon = clamp(text("icon-name"), MAX_MENU_TEXT);
-    let toggle = text("toggle-type");
+    let toggle = clamp(text("toggle-type"), MAX_MENU_TEXT);
     let checked = number("toggle-state").unwrap_or(0) == 1;
     let mut items = Vec::new();
     for child in children {
@@ -1218,12 +1222,24 @@ fn snapshot(model: &Model) -> Value {
             "notifications": model.notifications_available,
         },
         "tray": bounded_array(tray, MAX_LINE / 4),
-        "tray_menu": model.tray_menu.as_ref().map(|menu| json!({
-            "id": menu.id,
-            "revision": menu.revision,
-            "items": menu.items,
-            "error": menu.error,
-        })),
+        // Menu entries are bounded too: one oversized item would make the whole
+        // State message exceed the wire limit and drop tray and notifications.
+        "tray_menu": model.tray_menu.as_ref().map(|menu| {
+            let items = menu.items.as_array().cloned().unwrap_or_default();
+            let total = items.len();
+            let items = bounded_array(items, MAX_LINE / 4);
+            let error = if items.len() < total {
+                Some("menu too large; entries omitted".to_owned())
+            } else {
+                menu.error.clone()
+            };
+            json!({
+                "id": menu.id,
+                "revision": menu.revision,
+                "items": items,
+                "error": error,
+            })
+        }),
         "notifications": bounded_array(notifications, MAX_LINE / 4),
     })
 }
@@ -1693,6 +1709,73 @@ mod tests {
         ] {
             assert!(notice(&invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn hidden_entries_do_not_use_up_the_menu_budget() {
+        let children = (0..MAX_MENU_ITEMS + 10)
+            .map(|id| layout(id as i32, &[("visible", flag(false))], vec![]))
+            .chain([
+                layout(500, &[("label", text("One"))], vec![]),
+                layout(501, &[("label", text("Two"))], vec![]),
+            ])
+            .collect();
+        let root = layout(0, &[], children);
+        let mut count = 0;
+        let mut ids = HashSet::new();
+        let root = parse_layout(root, 0, &mut count, &mut ids).unwrap();
+        let items = root["children"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["label"], "One");
+    }
+
+    #[test]
+    fn oversized_menu_snapshots_fit_the_wire_limit() {
+        let mut model = Model::default();
+        let items = (0..500)
+            .map(|id| json!({"id": id, "label": "x".repeat(1000)}))
+            .collect::<Vec<_>>();
+        model.tray_menu = Some(TrayMenu {
+            id: "menu".into(),
+            revision: 1,
+            items: Value::Array(items),
+            ids: HashSet::new(),
+            error: None,
+        });
+        let store = snapshot(&model);
+        assert!(
+            store["tray_menu"]["items"].as_array().unwrap().len() < 500,
+            "menu entries must be bounded"
+        );
+        assert_eq!(
+            store["tray_menu"]["error"],
+            "menu too large; entries omitted"
+        );
+        let message = riced_extension_sdk::ToHost::State { store };
+        assert!(serde_json::to_vec(&message).unwrap().len() < MAX_LINE);
+    }
+
+    #[test]
+    fn menu_type_and_toggle_are_bounded() {
+        let long = "x".repeat(MAX_MENU_TEXT + 20);
+        let child = layout(
+            1,
+            &[("type", text(&long)), ("toggle-type", text(&long))],
+            vec![],
+        );
+        let root = layout(0, &[], vec![child]);
+        let mut count = 0;
+        let mut ids = HashSet::new();
+        let root = parse_layout(root, 0, &mut count, &mut ids).unwrap();
+        let item = &root["children"][0];
+        assert_eq!(
+            item["type"].as_str().unwrap().chars().count(),
+            MAX_MENU_TEXT
+        );
+        assert_eq!(
+            item["toggle"].as_str().unwrap().chars().count(),
+            MAX_MENU_TEXT
+        );
     }
 
     fn text(value: &str) -> OwnedValue {
