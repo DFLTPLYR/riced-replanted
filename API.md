@@ -1429,6 +1429,10 @@ so set `width` or `height` when aligning.
 Props: `content_fit` (`"contain"`, `"cover"`, `"fill"`, `"none"`,
 `"scale_down"`) and `opacity` from 0 to 1.
 
+Decoded image data is released when the window that showed it closes. Use
+`iced.icon_path(path, { size = ..., thumbnail = true })` for large files so the
+window only decodes a downscaled copy.
+
 #### `iced.rule(content, props)`
 
 Props: `direction` (`"horizontal"` or `"vertical"`, default horizontal),
