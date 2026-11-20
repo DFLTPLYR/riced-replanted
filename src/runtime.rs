@@ -340,6 +340,9 @@ pub struct App {
     toplevels: Vec<update::Window>,
     popups: Vec<Popup>,
     surfaces_dirty: Cell<bool>,
+    // Set when a window closes; the next render measures a throwaway pixel so
+    // iced releases the image memory that window decoded.
+    images_stale: Cell<bool>,
     pending: Vec<ExWlShellCustomActionWithId>,
     modules: Rc<RefCell<modules::Modules>>,
     mounts: Mounts,
@@ -577,6 +580,7 @@ pub fn load_with_plugins(
         toplevels: Vec::new(),
         popups: Vec::new(),
         surfaces_dirty: Cell::new(false),
+        images_stale: Cell::new(false),
         pending: Vec::new(),
         modules: Rc::new(RefCell::new(modules::Modules::default())),
         mounts: Rc::new(RefCell::new(HashMap::new())),
@@ -1096,6 +1100,7 @@ impl App {
     }
 
     fn window_closed(&mut self, id: window::Id) -> mlua::Result<Task<Message>> {
+        self.images_stale.set(true);
         let extra = self.extras.borrow_mut().remove(&id);
         if let Some(kind) = extra {
             self.forget_window(id)?;
@@ -2468,11 +2473,27 @@ impl App {
         // Frees evicted widget state once this window has replaced the tree
         // that referenced it. Only real renders count, not reload validation.
         widgets::begin_render(id);
-        checked_fallback(
+        let element = checked_fallback(
             app.borrow().view(id),
             iced::widget::Space::new().into(),
             "view",
-        )
+        );
+        // iced only trims its decoded image cache when another image loads.
+        // Laying out a throwaway pixel makes it drop the images a closed window
+        // left behind, so their memory does not outlive it.
+        if app.borrow().images_stale.replace(false) {
+            return iced::widget::Stack::with_children(vec![
+                element,
+                iced::widget::image(iced::widget::image::Handle::from_rgba(1, 1, vec![0u8; 4]))
+                    .width(0)
+                    .height(0)
+                    .into(),
+            ])
+            .width(iced::Length::Fill)
+            .height(iced::Length::Fill)
+            .into();
+        }
+        element
     }
 }
 
@@ -4029,8 +4050,24 @@ mod tests {
 
         let _ = app.update(Message::WindowClosed(id)).unwrap();
         assert!(app.toplevels.is_empty());
+        assert!(app.images_stale.get());
         assert!(!app.state.get::<bool>("open").unwrap());
         assert_eq!(app.redraw(&Message::WindowClosed(id)).unwrap(), Scope::All);
+    }
+
+    #[test]
+    fn a_render_after_a_window_closes_releases_cached_images_once() {
+        let mut app = load(LAYER_SHELL, Path::new("shell.lua")).unwrap();
+        app.prepare_layers().unwrap();
+        let window = app.layers[0].window;
+        app.images_stale.set(true);
+
+        let app = Rc::new(RefCell::new(app));
+        let _ = App::render(&app, window);
+        assert!(!app.borrow().images_stale.get());
+
+        let _ = App::render(&app, window);
+        assert!(!app.borrow().images_stale.get());
     }
 
     #[test]
