@@ -471,13 +471,13 @@ document for TOML. Missing parent directories are created. Writes are atomic
 destinations are updated; dangling links return an error. File errors are
 returned, not raised; `file.error` is updated.
 
-Files sync on the daemon's 250 ms poll. When a file's stat changes, the new
-contents replace `data` and `onLoaded` runs again; its return value behaves
-like an `update` return value, so the UI redraws. A change that fails to read
-or parse keeps the last good `data`, reports `onError`, and refuses `save`
-until `file:write` replaces the data — an external edit never silently
-destroys the file, and saving after a clean external change overwrites the
-file with your `data`. Watched Lua modules and `riced.watch` cover raw text
+Files sync on the daemon's 250 ms poll. When an external change updates a
+file's stat, the new contents replace `data` and `onLoaded` runs again; its
+return value behaves like an `update` return value, so the UI redraws. A change
+that fails to read or parse keeps the last good `data`, reports `onError`, and
+refuses `save` until `file:write` replaces the data — an external edit never
+silently destroys the file, and saving after a clean external change overwrites
+the file with your `data`. Watched Lua modules and `riced.watch` cover raw text
 and non-JSON/TOML files.
 
 Callbacks run during construction, so they run before the daemon starts. A file

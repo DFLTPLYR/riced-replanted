@@ -166,6 +166,8 @@ impl File {
         };
         match write_atomic(&self.path, &contents) {
             Ok(()) => {
+                // The poll must not treat our own write as an external change.
+                self.stamp = shell_stamp(&self.path);
                 self.error = None;
                 (true, None)
             }
@@ -426,6 +428,26 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(value["value"], 2);
+    }
+
+    #[test]
+    fn poll_after_save_does_not_reload() {
+        let (lua, dir) = setup("save-poll");
+        std::fs::write(dir.join("data.json"), r#"{"value": 1}"#).unwrap();
+        lua.load(
+            r#"
+            LOADED = 0
+            f = riced.file({path = "data.json", onLoaded = function() LOADED = LOADED + 1 end})
+            "#,
+        )
+        .exec()
+        .unwrap();
+        lua.load("f.data.value = 2; assert(f:save())")
+            .exec()
+            .unwrap();
+        poll(&lua).unwrap();
+        assert_eq!(lua.globals().get::<i32>("LOADED").unwrap(), 1);
+        assert_eq!(lua.load("return f.data.value").eval::<i32>().unwrap(), 2);
     }
 
     #[test]
