@@ -1,6 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     io::{self, BufRead, BufReader, Read, Write},
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
@@ -101,10 +103,9 @@ impl Plugins {
         })?;
         let profile = profile_dir
             .file_name()
-            .and_then(|name| name.to_str())
             .filter(|name| !name.is_empty())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid profile name"))?
-            .to_owned();
+            .to_os_string();
         let runtime = env::var_os("XDG_RUNTIME_DIR")
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR is not set"))?;
         let socket = PathBuf::from(runtime)
@@ -114,15 +115,12 @@ impl Plugins {
         let socket_id = fs::metadata(&socket)
             .ok()
             .map(|metadata| (metadata.dev(), metadata.ino()));
-        let dir = profile_dir.join("extensions");
-        let supervisor = dir.is_dir().then(|| {
-            Supervisor::new(
-                dir,
-                socket.clone(),
-                profile.clone(),
-                profile_dir.to_path_buf(),
-            )
-        });
+        let supervisor = Some(Supervisor::new(
+            profile_dir.join("extensions"),
+            socket.clone(),
+            profile,
+            profile_dir.to_path_buf(),
+        ));
         Ok(Self {
             socket: Some(socket),
             socket_id,
@@ -875,7 +873,7 @@ fn write_conn(mut stream: UnixStream, messages: Receiver<Vec<u8>>) {
 struct Supervisor {
     dir: PathBuf,
     socket: PathBuf,
-    profile: String,
+    profile: OsString,
     profile_dir: PathBuf,
     children: HashMap<PathBuf, ChildEntry>,
     last_scan: Instant,
@@ -907,7 +905,7 @@ fn reset_failures(failures: u32, lifetime: Duration) -> u32 {
 }
 
 impl Supervisor {
-    fn new(dir: PathBuf, socket: PathBuf, profile: String, profile_dir: PathBuf) -> Self {
+    fn new(dir: PathBuf, socket: PathBuf, profile: OsString, profile_dir: PathBuf) -> Self {
         Self {
             dir,
             socket,
@@ -1811,7 +1809,7 @@ mod tests {
         let mut supervisor = Supervisor::new(
             root.clone(),
             root.join("socket"),
-            "test".to_owned(),
+            "test".into(),
             root.clone(),
         );
 
@@ -1822,6 +1820,33 @@ mod tests {
         supervisor.poll();
         assert!(!supervisor.children.contains_key(&script));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn supervisor_picks_up_a_directory_created_after_start() {
+        let root =
+            std::env::temp_dir().join(format!("riced-supervisor-new-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut supervisor = Supervisor::new(
+            root.join("extensions"),
+            root.join("socket"),
+            "test".into(),
+            root.clone(),
+        );
+
+        supervisor.poll();
+        assert!(supervisor.children.is_empty());
+
+        let script = root.join("extensions/demo/riced-demo");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        supervisor.last_scan = Instant::now() - SCAN_EVERY;
+        supervisor.poll();
+        assert!(supervisor.children.get(&script).unwrap().child.is_some());
+
+        supervisor.stop();
         let _ = fs::remove_dir_all(root);
     }
 

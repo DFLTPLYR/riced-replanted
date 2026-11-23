@@ -436,6 +436,39 @@ fn default_named_and_explicit_directories_load_their_own_shells() {
 }
 
 #[test]
+fn non_utf8_profile_directory_loads() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let root = std::path::PathBuf::from(format!(
+        "/tmp/opencode/riced-nonutf8-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let mut bytes = format!("{}/profile-", root.display()).into_bytes();
+    bytes.push(0xff);
+    let profile = std::path::PathBuf::from(std::ffi::OsString::from_vec(bytes));
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(
+        profile.join("shell.lua"),
+        "error('non-utf8 profile loaded')",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riced"))
+        .env("XDG_RUNTIME_DIR", &root)
+        .arg("-p")
+        .arg(&profile)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("non-utf8 profile loaded"), "{stderr}");
+    assert!(!stderr.contains("invalid profile name"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn stubs_install_core_definitions_and_keep_existing_editor_config() {
     let root =
         std::path::PathBuf::from(format!("/tmp/opencode/riced-stubs-{}", std::process::id()));
