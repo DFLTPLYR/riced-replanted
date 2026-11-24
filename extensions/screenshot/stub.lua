@@ -24,6 +24,17 @@
 ---@param callback? fun(self: table, result: riced.ScreenshotLast?, error: string?)
 function riced.ScreenshotExtension:capture(output, path, callback) end
 
+---Captures a rectangle in global logical desktop coordinates (the space
+---`slurp` prints). The rectangle must fit inside one output; a selection that
+---spans outputs returns an error.
+---@param x integer
+---@param y integer
+---@param width integer
+---@param height integer
+---@param path string
+---@param callback? fun(self: table, result: riced.ScreenshotLast?, error: string?)
+function riced.ScreenshotExtension:capture_region(x, y, width, height, path, callback) end
+
 ---@overload fun(name: "screenshot"): riced.ScreenshotExtension
 ---@param name string
 ---@return riced.Extension

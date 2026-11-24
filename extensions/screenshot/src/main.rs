@@ -2,6 +2,8 @@
 //!
 //! shortcut: wlroots-family compositors only (hyprland, sway, niri, wlroots);
 //! the upgrade path for GNOME/KDE is `ext-image-copy-capture-v1`.
+//! shortcut: a region must fit inside one output (wlr screencopy is per
+//! output); spanning selections would need per-output stitching.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -28,6 +30,10 @@ use wayland_client::{
         wl_shm_pool::WlShmPool,
     },
 };
+use wayland_protocols::xdg::xdg_output::zv1::client::{
+    zxdg_output_manager_v1::ZxdgOutputManagerV1,
+    zxdg_output_v1::{self, ZxdgOutputV1},
+};
 use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
@@ -42,6 +48,7 @@ fn main() -> io::Result<()> {
     // state up from here once the run closure has published it.
     let ready = Arc::new(Mutex::new(None::<Arc<Shared>>));
     let handler = Arc::clone(&ready);
+    let region_handler = Arc::clone(&ready);
     Plugin::new("screenshot")
         .state(["connected", "capturing", "last"])
         .method("capture", false, move |args| {
@@ -51,7 +58,16 @@ fn main() -> io::Result<()> {
                 .unwrap()
                 .clone()
                 .ok_or_else(|| "extension is still starting".to_owned())?;
-            capture(&shared, output, path)
+            capture(&shared, Target::Output(output), path)
+        })
+        .method("capture_region", false, move |args| {
+            let (region, path) = region_arguments(args)?;
+            let shared = region_handler
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| "extension is still starting".to_owned())?;
+            capture(&shared, Target::Region(region), path)
         })
         .serve(move |context| {
             let shared = Arc::new(Shared {
@@ -108,7 +124,36 @@ fn arguments(args: &Value) -> Result<(Option<String>, PathBuf), String> {
         Value::String(name) if !name.is_empty() => Some(name.clone()),
         _ => return Err("output must be null or a non-empty name".into()),
     };
-    let path = args[1]
+    Ok((output, path_argument(&args[1])?))
+}
+
+/// Parses `[x, y, width, height, path]` in global logical coordinates.
+fn region_arguments(args: &Value) -> Result<(Rect, PathBuf), String> {
+    let args = args
+        .as_array()
+        .filter(|args| args.len() == 5)
+        .ok_or("capture_region requires [x, y, width, height, path]")?;
+    let number = |index: usize, what: &str| {
+        args[index]
+            .as_i64()
+            .and_then(|number| i32::try_from(number).ok())
+            .ok_or_else(|| format!("{what} must be a 32-bit integer"))
+    };
+    let region = Rect {
+        x: number(0, "x")?,
+        y: number(1, "y")?,
+        width: number(2, "width")?,
+        height: number(3, "height")?,
+    };
+    if region.width <= 0 || region.height <= 0 {
+        return Err("width and height must be positive".into());
+    }
+    Ok((region, path_argument(&args[4])?))
+}
+
+/// Expands `~` and rejects empty paths and directories.
+fn path_argument(value: &Value) -> Result<PathBuf, String> {
+    let path = value
         .as_str()
         .filter(|path| !path.is_empty())
         .ok_or("path must be a non-empty string")?;
@@ -116,11 +161,39 @@ fn arguments(args: &Value) -> Result<(Option<String>, PathBuf), String> {
     if path.is_dir() {
         return Err(format!("{} is a directory", path.display()));
     }
-    Ok((output, path))
+    Ok(path)
+}
+
+/// What to capture: one whole output, or a rectangle inside one output.
+#[derive(Clone)]
+enum Target {
+    Output(Option<String>),
+    Region(Rect),
+}
+
+/// A screen rectangle in global logical coordinates.
+#[derive(Clone, Copy)]
+struct Rect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl Rect {
+    fn contains(self, inner: Rect) -> bool {
+        let (left, top) = (i64::from(self.x), i64::from(self.y));
+        let (right, bottom) = (left + i64::from(self.width), top + i64::from(self.height));
+        let (inner_left, inner_top) = (i64::from(inner.x), i64::from(inner.y));
+        inner_left >= left
+            && inner_top >= top
+            && inner_left + i64::from(inner.width) <= right
+            && inner_top + i64::from(inner.height) <= bottom
+    }
 }
 
 /// Serializes captures so a second concurrent one is rejected immediately.
-fn capture(shared: &Arc<Shared>, output: Option<String>, path: PathBuf) -> Result<Value, String> {
+fn capture(shared: &Arc<Shared>, target: Target, path: PathBuf) -> Result<Value, String> {
     let serial = {
         let mut store = shared.store.lock().unwrap();
         if store.capturing {
@@ -137,7 +210,7 @@ fn capture(shared: &Arc<Shared>, output: Option<String>, path: PathBuf) -> Resul
         thread::Builder::new()
             .name("riced-screenshot".into())
             .spawn(move || {
-                let result = shoot(&shared, output.as_deref(), &path);
+                let result = shoot(&shared, &target, &path);
                 {
                     let mut store = shared.store.lock().unwrap();
                     // A capture that timed out may finish after a newer one
@@ -181,8 +254,8 @@ fn capture(shared: &Arc<Shared>, output: Option<String>, path: PathBuf) -> Resul
     }
 }
 
-/// One full capture: connect, bind, copy a frame into shm, encode, write.
-fn shoot(shared: &Shared, want: Option<&str>, path: &Path) -> Result<Value, String> {
+/// One capture: connect, bind, copy a frame into shm, encode, write.
+fn shoot(shared: &Shared, target: &Target, path: &Path) -> Result<Value, String> {
     let connection = Connection::connect_to_env()
         .map_err(|error| format!("cannot connect to the Wayland display: {error}"))?;
     let mut queue = connection.new_event_queue();
@@ -194,6 +267,16 @@ fn shoot(shared: &Shared, want: Option<&str>, path: &Path) -> Result<Value, Stri
     queue
         .roundtrip(&mut state)
         .map_err(|error| format!("wayland registry roundtrip failed: {error}"))?;
+    // xdg-output gives each output's layout position and size, which maps a
+    // global region onto one output.
+    if let Some(manager) = state.xdg_manager.clone() {
+        for output in &mut state.outputs {
+            output._xdg = Some(manager.get_xdg_output(&output.output, &qh, output.global));
+        }
+        queue
+            .roundtrip(&mut state)
+            .map_err(|error| format!("wayland output layout roundtrip failed: {error}"))?;
+    }
     log::debug!(
         target: "screenshot.registry",
         "bound {} output(s), screencopy manager {}",
@@ -207,10 +290,37 @@ fn shoot(shared: &Shared, want: Option<&str>, path: &Path) -> Result<Value, Stri
         "compositor does not support zwlr_screencopy_manager_v1 (wlroots-family compositors only)",
     )?;
     let names: Vec<String> = state.outputs.iter().map(Output::name).collect();
-    let index = select(&names, want)?;
-    let output = state.outputs[index].output.clone();
+    let (index, region) = match target {
+        Target::Output(want) => (select(&names, want.as_deref())?, None),
+        Target::Region(region) => (select_region(&state.outputs, *region)?, Some(*region)),
+    };
+    let selected = &state.outputs[index];
+    let output = selected.output.clone();
     let name = names[index].clone();
-    let frame = manager.capture_output(0, &output, &qh, ());
+    let frame = match region {
+        Some(region) => {
+            if state.manager_version < 2 {
+                return Err(
+                    "compositor's screencopy manager is too old for region capture (needs v2)"
+                        .into(),
+                );
+            }
+            let rect = selected
+                .rect()
+                .ok_or("compositor does not expose the output's layout position")?;
+            manager.capture_output_region(
+                0,
+                &output,
+                region.x - rect.x,
+                region.y - rect.y,
+                region.width,
+                region.height,
+                &qh,
+                (),
+            )
+        }
+        None => manager.capture_output(0, &output, &qh, ()),
+    };
     queue
         .roundtrip(&mut state)
         .map_err(|error| format!("capture setup failed: {error}"))?;
@@ -256,6 +366,35 @@ fn select(names: &[String], want: Option<&str>) -> Result<usize, String> {
         )),
         (None, None) => Err("compositor has no outputs".into()),
     }
+}
+
+/// Picks the output that fully contains the region. wlr screencopy region
+/// capture is per output, so a region spanning outputs is rejected.
+fn select_region(outputs: &[Output], region: Rect) -> Result<usize, String> {
+    outputs
+        .iter()
+        .position(|output| output.rect().is_some_and(|rect| rect.contains(region)))
+        .ok_or_else(|| {
+            let available: Vec<String> = outputs
+                .iter()
+                .filter_map(|output| {
+                    output
+                        .rect()
+                        .map(|rect| format!("{} {}x{}+{}+{}", output.name(), rect.width, rect.height, rect.x, rect.y))
+                })
+                .collect();
+            if available.is_empty() {
+                return "compositor does not expose output positions (xdg-output), so a global region cannot be mapped".to_owned();
+            }
+            format!(
+                "region {}x{}+{}+{} is not inside one output; available: {}",
+                region.width,
+                region.height,
+                region.x,
+                region.y,
+                available.join(", ")
+            )
+        })
 }
 
 /// Encodes and writes the PNG, returning the store/caller entry.
@@ -331,6 +470,10 @@ struct Output {
     global: u32,
     title: String,
     output: WlOutput,
+    // Kept alive for the layout position/size events; never read directly.
+    _xdg: Option<ZxdgOutputV1>,
+    position: Option<(i32, i32)>,
+    size: Option<(i32, i32)>,
 }
 
 impl Output {
@@ -341,6 +484,18 @@ impl Output {
         } else {
             self.title.clone()
         }
+    }
+
+    /// Global logical rectangle, once xdg-output reported it.
+    fn rect(&self) -> Option<Rect> {
+        let (x, y) = self.position?;
+        let (width, height) = self.size?;
+        Some(Rect {
+            x,
+            y,
+            width,
+            height,
+        })
     }
 }
 
@@ -365,6 +520,8 @@ struct Pixels {
 struct Shot {
     _registry: Option<WlRegistry>,
     manager: Option<ZwlrScreencopyManagerV1>,
+    manager_version: u32,
+    xdg_manager: Option<ZxdgOutputManagerV1>,
     shm: Option<WlShm>,
     outputs: Vec<Output>,
     layout: Option<Layout>,
@@ -499,18 +656,27 @@ impl Dispatch<WlRegistry, ()> for Shot {
                     global: name,
                     title: String::new(),
                     output,
+                    _xdg: None,
+                    position: None,
+                    size: None,
                 });
             }
             "wl_shm" if state.shm.is_none() => {
                 state.shm = Some(registry.bind::<WlShm, _, _>(name, 1, qh, ()));
             }
             "zwlr_screencopy_manager_v1" if state.manager.is_none() => {
+                // v2 adds region capture; v3 only adds dmabuf buffer events.
+                state.manager_version = version.min(2);
                 state.manager = Some(registry.bind::<ZwlrScreencopyManagerV1, _, _>(
                     name,
-                    version.min(1),
+                    state.manager_version,
                     qh,
                     (),
                 ));
+            }
+            "zxdg_output_manager_v1" if state.xdg_manager.is_none() => {
+                state.xdg_manager =
+                    Some(registry.bind::<ZxdgOutputManagerV1, _, _>(name, version.min(3), qh, ()));
             }
             _ => {}
         }
@@ -535,6 +701,32 @@ impl Dispatch<WlOutput, u32> for Shot {
             .find(|output| output.global == *global)
         {
             output.title = name;
+        }
+    }
+}
+
+impl Dispatch<ZxdgOutputV1, u32> for Shot {
+    fn event(
+        state: &mut Self,
+        _: &ZxdgOutputV1,
+        event: zxdg_output_v1::Event,
+        global: &u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let Some(output) = state
+            .outputs
+            .iter_mut()
+            .find(|output| output.global == *global)
+        else {
+            return;
+        };
+        match event {
+            zxdg_output_v1::Event::LogicalPosition { x, y } => output.position = Some((x, y)),
+            zxdg_output_v1::Event::LogicalSize { width, height } => {
+                output.size = Some((width, height));
+            }
+            _ => {}
         }
     }
 }
@@ -580,6 +772,7 @@ delegate_noop!(Shot: ignore WlShm);
 delegate_noop!(Shot: ignore WlShmPool);
 delegate_noop!(Shot: ignore wl_buffer::WlBuffer);
 delegate_noop!(Shot: ignore ZwlrScreencopyManagerV1);
+delegate_noop!(Shot: ignore ZxdgOutputManagerV1);
 
 #[cfg(test)]
 mod tests {
@@ -678,6 +871,67 @@ mod tests {
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert_eq!(decoded.dimensions(), (2, 1));
         assert_eq!(decoded.get_pixel(0, 0), &Rgba([1, 2, 3, 255]));
+    }
+
+    #[test]
+    fn region_arguments_validate_and_reject_bad_rectangles() {
+        for args in [
+            json!([]),
+            json!([0, 0, 10, 10]),
+            json!([0, 0, 0, 10, "/tmp/riced-screenshot-nothing.png"]),
+            json!([0, 0, 10, -1, "/tmp/riced-screenshot-nothing.png"]),
+            json!([0.5, 0, 10, 10, "/tmp/riced-screenshot-nothing.png"]),
+            json!([0, 0, 10, 10, ""]),
+            json!([0, 0, 10, 10, 7]),
+        ] {
+            assert!(region_arguments(&args).is_err(), "{args}");
+        }
+        let (region, path) = region_arguments(&json!([-1920, 40, 800, 600, "~/shot.png"])).unwrap();
+        assert_eq!(
+            (region.x, region.y, region.width, region.height),
+            (-1920, 40, 800, 600)
+        );
+        assert!(path.ends_with("shot.png"));
+    }
+
+    #[test]
+    fn rect_contains_handles_edges_and_neighbouring_outputs() {
+        let monitor = Rect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+        assert!(monitor.contains(Rect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440
+        }));
+        assert!(monitor.contains(Rect {
+            x: 2559,
+            y: 1439,
+            width: 1,
+            height: 1
+        }));
+        assert!(!monitor.contains(Rect {
+            x: 2560,
+            y: 0,
+            width: 1,
+            height: 1
+        }));
+        assert!(!monitor.contains(Rect {
+            x: -1,
+            y: 0,
+            width: 1,
+            height: 1
+        }));
+        assert!(!monitor.contains(Rect {
+            x: 2560,
+            y: 0,
+            width: 1920,
+            height: 1080
+        }));
     }
 
     #[test]

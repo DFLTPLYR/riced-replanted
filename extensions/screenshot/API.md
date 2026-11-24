@@ -6,7 +6,7 @@
 - Binary: `riced-screenshot`
 - Lua proxy: `riced.plugin("screenshot")` (also `iced.plugins("screenshot")`)
 - Store fields: `connected`, `capturing`, `last`
-- Methods: `capture`
+- Methods: `capture`, `capture_region`
 - Events: none
 
 ## Install
@@ -47,10 +47,28 @@ output. `path` may be `~/`-prefixed or absolute; the file is written atomically
 (0600). On success the callback receives `(last, nil)`; on failure
 `(nil, error)`. A second capture while one runs fails immediately.
 
+`capture_region(x, y, width, height, path)` captures a rectangle in global
+logical desktop coordinates, the same space `slurp` prints. Coordinates are
+mapped to the containing output through `xdg-output`, so any monitor works and
+HiDPI scale is handled by the compositor. The rectangle must fit inside one
+output; a selection spanning two monitors fails with an error listing the
+output rectangles. `path` follows the same rules as `capture`.
+
+```lua
+local screenshot = riced.plugin("screenshot")
+-- 800x600 at (100, 100) on the left monitor
+screenshot.capture_region(100, 100, 800, 600, "~/shot.png", function(last, err)
+    if err then
+        log(err)
+    end
+end)
+```
+
 ## Limits
 
 Requires a wlroots-family compositor (`zwlr-screencopy-v1`: sway, Hyprland,
-niri, river, wlroots-based). GNOME and KDE are not supported. Frames are
-converted from ARGB/XRGB8888 to RGBA8 with `y_invert` handled. A capture that
-hangs past the 30-second callback timeout keeps running in the background and
-still updates the store when it finishes.
+niri, river, wlroots-based). GNOME and KDE are not supported. Region capture
+also needs screencopy manager v2 and `xdg-output` for output positions. Frames
+are converted from ARGB/XRGB8888 to RGBA8 with `y_invert` handled. A capture
+that hangs past the 30-second callback timeout keeps running in the background
+and still updates the store when it finishes.

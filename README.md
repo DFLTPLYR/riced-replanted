@@ -142,8 +142,8 @@ The bundled extensions are:
   refresh, and `iced.openmeteo`.
 - [`riced-applications`](extensions/applications/API.md) — installed XDG desktop
   entries and launching them.
-- [`riced-screenshot`](extensions/screenshot/API.md) — output screenshots as
-  PNG via `zwlr-screencopy-v1` (wlroots-family compositors).
+- [`riced-screenshot`](extensions/screenshot/API.md) — output and region
+  screenshots as PNG via `zwlr-screencopy-v1` (wlroots-family compositors).
 - [`riced-shortcuts`](extensions/shortcuts/API.md) — compositor global
   keybindings (Hyprland, sway) forwarded to Lua as plugin events.
 
