@@ -54,6 +54,7 @@ pub enum Message {
     Tick,
     CheckReload,
     PollPlugins,
+    PollIpc,
     Reloaded,
     RedrawWindow(window::Id),
     Resized(window::Id, Size),
@@ -728,6 +729,7 @@ impl App {
             | Message::Editor(..)
             | Message::CheckReload
             | Message::PollPlugins
+            | Message::PollIpc
             | Message::Reloaded
             | Message::RedrawWindow(_)
             | Message::WindowClosed(_)
@@ -921,6 +923,8 @@ impl App {
             } else {
                 tasks.push(self.surface_tasks());
             }
+            // Handlers mutate state the poll's own message never redraws.
+            tasks.push(Task::done(Message::Reloaded));
         }
         Ok(Task::batch(tasks))
     }
@@ -1987,7 +1991,9 @@ impl App {
                     Scope::None
                 });
             }
-            Message::CheckReload | Message::PollPlugins => return Ok(Scope::None),
+            Message::CheckReload | Message::PollPlugins | Message::PollIpc => {
+                return Ok(Scope::None);
+            }
             Message::Reloaded => return Ok(Scope::All),
             Message::Noop | Message::Surface(_) => return Ok(Scope::None),
             Message::RedrawWindow(id) => return Ok(Scope::Window(*id)),
@@ -2407,10 +2413,6 @@ impl App {
                     } else {
                         Task::none()
                     };
-                    let ipc = app.poll_ipc().unwrap_or_else(|error| {
-                        log::error!(target: "ipc.poll", "IPC poll failed: {error}");
-                        Task::none()
-                    });
                     let watches = app.poll_watches().unwrap_or_else(|error| {
                         log::error!(target: "watch.poll", "file watch poll failed: {error}");
                         Task::none()
@@ -2425,10 +2427,15 @@ impl App {
                     });
                     return reload
                         .chain(surfaces)
-                        .chain(ipc)
                         .chain(watches)
                         .chain(files)
                         .chain(logs);
+                }
+                if matches!(message, Message::PollIpc) {
+                    return app.poll_ipc().unwrap_or_else(|error| {
+                        log::error!(target: "ipc.poll", "IPC poll failed: {error}");
+                        Task::none()
+                    });
                 }
                 if matches!(message, Message::PollPlugins) {
                     let (changed, tasks) = checked_fallback(
@@ -2452,6 +2459,11 @@ impl App {
                 checked_fallback(app.borrow().subscription(), Subscription::none(), "subscription"),
                 iced::time::every(Duration::from_millis(250)).map(|_| Message::CheckReload),
                 iced::time::every(Duration::from_millis(100)).map(|_| Message::PollPlugins),
+                // IPC opens surfaces (the launcher): poll it at frame rate so
+                // a hotkey maps the layer instead of waiting out the reload poll.
+                // shortcut: still a poll; send commands over the socket to wake
+                // the loop if 60 Hz idling ever matters.
+                iced::time::every(Duration::from_millis(16)).map(|_| Message::PollIpc),
             ])
         })
         .theme(|app: &Rc<RefCell<App>>, id| checked_fallback(app.borrow().theme(id), Theme::Dark, "theme"))
