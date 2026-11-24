@@ -144,8 +144,10 @@ The bundled extensions are:
   entries and launching them.
 - [`riced-screenshot`](extensions/screenshot/API.md) — output and region
   screenshots as PNG via `zwlr-screencopy-v1` (wlroots-family compositors).
-- [`riced-shortcuts`](extensions/shortcuts/API.md) — compositor global
-  keybindings (Hyprland, sway) forwarded to Lua as plugin events.
+
+Compositor keybindings do not need an extension: bind them to
+`riced ipc <command>` and handle the command with `riced.ipc`. See
+[`riced.ipc`](API.md#ricedipc) and the launcher example.
 
 The D-Bus and Wayland extensions bound display text and array snapshots to stay
 below the protocol's 256 KiB message limit. Entries that exceed an array's byte
@@ -164,7 +166,6 @@ just extension-lucide
 just extension-openmeteo
 just extension-applications
 just extension-screenshot
-just extension-shortcuts
 ```
 
 Build any Rust extension into an output directory:

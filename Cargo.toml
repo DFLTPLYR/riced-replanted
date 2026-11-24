@@ -10,7 +10,6 @@ members = [
   "extensions/openmeteo",
   "extensions/applications",
   "extensions/screenshot",
-  "extensions/shortcuts",
 ]
 resolver = "3"
 

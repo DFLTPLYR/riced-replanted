@@ -3857,14 +3857,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "riced-extension-shortcuts"
-version = "0.1.0"
-dependencies = [
- "riced-extension-sdk",
- "serde_json",
-]
-
-[[package]]
 name = "riced-extension-system"
 version = "0.1.0"
 dependencies = [

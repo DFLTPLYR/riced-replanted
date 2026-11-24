@@ -574,12 +574,12 @@ most once a minute, so a failing render does not notify on every tick. Lua
 | `openmeteo`    | `ready`, `latitude`, `longitude`, `current`, `current_units`, `timezone`, `updated_at`, `error`, `readings` | `configure`                                                                                                                                                                   | none   |
 | `applications` | `applications`                                                                                   | `launch`                                                                                                                                                                                 | none   |
 | `screenshot`   | `connected`, `capturing`, `last`                                                                 | `capture`, `capture_region`                                                                                                                                                               | none   |
-| `shortcuts`    | `connected`, `compositor`, `binds`                                                               | `bind`, `unbind`                                                                                                                                                                         | `{shortcut = string}` |
 
 All bundled extensions publish whole snapshots; each publish replaces the
 snapshot contents, so re-read a field in `view`
 instead of caching a nested table across updates; the proxy table itself stays
-live. Only `shortcuts` also pushes events. Store reads are synchronous and
+live. None of the bundled extensions push plugin events; the event path remains
+available to third-party extensions. Store reads are synchronous and
 subscribe to fields the first time Lua
 reads them. JSON `null` fields are exposed as `nil`, and `null` array entries are
 removed. Methods are asynchronous and use positional arguments. `system` has no
