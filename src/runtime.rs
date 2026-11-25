@@ -2275,9 +2275,10 @@ impl App {
         let mut affected = Vec::new();
         {
             let windows_of = self.windows_of.borrow();
+            let mut seen = HashSet::new();
             for module in &changed {
                 for &id in windows_of.get(module).into_iter().flatten() {
-                    if !affected.contains(&id) {
+                    if seen.insert(id) {
                         affected.push(id);
                     }
                 }
@@ -2299,8 +2300,9 @@ impl App {
                 })
             {
                 affected = self.windows.borrow().clone();
+                let mut seen = affected.iter().copied().collect::<HashSet<_>>();
                 for layer in &self.layers {
-                    if !affected.contains(&layer.window) {
+                    if seen.insert(layer.window) {
                         affected.push(layer.window);
                     }
                 }
@@ -2308,15 +2310,16 @@ impl App {
             for layer in &self.layers {
                 self.view(layer.window)?;
             }
+            let mut seen = affected.iter().copied().collect::<HashSet<_>>();
             for toplevel in &self.toplevels {
                 self.view(toplevel.window)?;
-                if !affected.contains(&toplevel.window) {
+                if seen.insert(toplevel.window) {
                     affected.push(toplevel.window);
                 }
             }
             for popup in &self.popups {
                 self.view(popup.window)?;
-                if !affected.contains(&popup.window) {
+                if seen.insert(popup.window) {
                     affected.push(popup.window);
                 }
             }
