@@ -717,7 +717,16 @@ fn file_uri_path(uri: &str) -> Result<String, String> {
             index += 1;
         }
     }
-    String::from_utf8(decoded).map_err(|_| format!("file path is not UTF-8: {uri}"))
+    String::from_utf8(decoded)
+        .map_err(|_| format!("file path is not UTF-8: {uri}"))
+        .and_then(|path| {
+            // A NUL byte decodes from %00 and would truncate the path later.
+            if path.contains('\0') {
+                Err(format!("file path contains a NUL byte: {uri}"))
+            } else {
+                Ok(path)
+            }
+        })
 }
 
 #[derive(Default)]
@@ -1548,6 +1557,7 @@ mod tests {
             "https://example.com/x",
             "file://",
             "file://otherhost/tmp/x",
+            "file:///tmp/nul%00.txt",
         ] {
             assert!(file_uri_path(uri).is_err(), "{uri}");
         }
