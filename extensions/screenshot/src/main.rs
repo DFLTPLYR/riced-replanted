@@ -76,6 +76,7 @@ fn main() -> io::Result<()> {
                     connected: false,
                     capturing: false,
                     serial: 0,
+                    inflight: 0,
                     last: Value::Null,
                 }),
             });
@@ -95,6 +96,9 @@ struct Store {
     // Monotonic id of the last capture; a timed-out worker must not clear the
     // flag for a capture started after it.
     serial: u64,
+    // Workers still running, including the one whose wait timed out. A new
+    // capture is refused while any worker is alive.
+    inflight: usize,
     last: Value,
 }
 
@@ -196,10 +200,13 @@ impl Rect {
 fn capture(shared: &Arc<Shared>, target: Target, path: PathBuf) -> Result<Value, String> {
     let serial = {
         let mut store = shared.store.lock().unwrap();
-        if store.capturing {
+        // A worker whose wait timed out is still copying the frame; refusing
+        // here keeps two captures from touching the compositor at once.
+        if store.inflight > 0 {
             return Err("a capture is already in progress".into());
         }
         store.capturing = true;
+        store.inflight += 1;
         store.serial = store.serial.wrapping_add(1);
         store.serial
     };
@@ -213,6 +220,7 @@ fn capture(shared: &Arc<Shared>, target: Target, path: PathBuf) -> Result<Value,
                 let result = shoot(&shared, &target, &path);
                 {
                     let mut store = shared.store.lock().unwrap();
+                    store.inflight = store.inflight.saturating_sub(1);
                     // A capture that timed out may finish after a newer one
                     // started; only its own generation may clear the flag.
                     if store.serial == serial {
@@ -230,21 +238,19 @@ fn capture(shared: &Arc<Shared>, target: Target, path: PathBuf) -> Result<Value,
             })
     };
     if let Err(error) = worker {
-        shared.store.lock().unwrap().capturing = false;
+        {
+            let mut store = shared.store.lock().unwrap();
+            store.inflight = store.inflight.saturating_sub(1);
+            store.capturing = false;
+        }
         publish(shared);
         return Err(format!("cannot start a capture thread: {error}"));
     }
     match rx.recv_timeout(WAIT) {
         Ok(result) => result,
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            // The worker is stuck in the compositor; let the caller try again.
-            // A late result still records `last`, but cannot clear a newer flag.
-            let mut store = shared.store.lock().unwrap();
-            if store.serial == serial {
-                store.capturing = false;
-            }
-            drop(store);
-            publish(shared);
+            // The worker is stuck in the compositor; it keeps running, so the
+            // next capture is refused until it finishes.
             Err(format!(
                 "capture timed out after {}s and continues in the background",
                 WAIT.as_secs()
@@ -946,5 +952,21 @@ mod tests {
         // Without wl_output name events the fallback name is used.
         let fallback = ["output-7".to_owned()];
         assert_eq!(select(&fallback, Some("output-7")).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_running_worker_blocks_the_next_capture() {
+        let store = Mutex::new(Store {
+            connected: false,
+            capturing: false,
+            serial: 0,
+            inflight: 0,
+            last: Value::Null,
+        });
+        // A worker whose wait timed out keeps the capture flag set.
+        store.lock().unwrap().inflight = 1;
+        assert!(store.lock().unwrap().inflight > 0);
+        store.lock().unwrap().inflight = 0;
+        assert_eq!(store.lock().unwrap().inflight, 0);
     }
 }
