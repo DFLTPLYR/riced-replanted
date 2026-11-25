@@ -75,8 +75,13 @@ fn bounds(id: &str) -> Option<Rectangle> {
 fn record(id: &str, window: Option<window::Id>, bounds: Rectangle) {
     let changed = BOUNDS.with_borrow_mut(|stored| {
         let key = (window, id.to_owned());
-        if stored.len() >= LIMIT && !stored.contains_key(&key) {
-            stored.clear();
+        if stored.len() >= LIMIT
+            && !stored.contains_key(&key)
+            && let Some(oldest) = stored.keys().next().cloned()
+        {
+            // Evict one entry instead of dropping every bound, so a shell with
+            // more than LIMIT widgets keeps its anchors.
+            stored.remove(&oldest);
         }
         stored.insert(key, bounds) != Some(bounds)
     });
@@ -84,8 +89,11 @@ fn record(id: &str, window: Option<window::Id>, bounds: Rectangle) {
     // bounds; skip the insert while a widget holds still.
     if changed {
         LATEST.with_borrow_mut(|stored| {
-            if stored.len() >= LIMIT && !stored.contains_key(id) {
-                stored.clear();
+            if stored.len() >= LIMIT
+                && !stored.contains_key(id)
+                && let Some(oldest) = stored.keys().next().cloned()
+            {
+                stored.remove(&oldest);
             }
             stored.insert(id.to_owned(), (window, bounds));
         });
@@ -292,5 +300,16 @@ mod tests {
         }
         BOUNDS.with_borrow(|bounds| assert!(bounds.len() <= LIMIT));
         LATEST.with_borrow(|bounds| assert!(bounds.len() <= LIMIT));
+    }
+
+    #[test]
+    fn eviction_keeps_the_other_bounds() {
+        let rect = Rectangle::new(Point::new(0.0, 0.0), Size::new(1.0, 1.0));
+        let kept = format!("kept-{}", std::process::id());
+        record_for_test(&kept, rect);
+        for index in 0..LIMIT + 8 {
+            record_for_test(&format!("evict-{index}"), rect);
+        }
+        assert_eq!(with_window(None, || bounds(&kept)), Some(rect));
     }
 }
