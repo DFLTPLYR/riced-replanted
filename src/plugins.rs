@@ -28,13 +28,24 @@ const PENDING_MAX: usize = 64;
 /// Store field names come from extensions and are short; a longer one cannot be
 /// subscribed to without risking an oversized wire line.
 const MAX_FIELD: usize = 256;
-const QUEUE: usize = 16;
+/// Messages waiting for the shell. Store snapshots do not use this queue, so
+/// it only holds registrations and method replies; it is sized to hold every
+/// reply the shell can have outstanding.
+const QUEUE: usize = PENDING_MAX + 16;
+/// Messages waiting to be written to one extension. A full queue means the
+/// extension is not reading its socket; the shell retries the subscription.
+const OUT_QUEUE: usize = 16;
 const POLL_MAX: usize = 256;
 const SCAN_EVERY: Duration = Duration::from_secs(1);
 const RESTART_DELAY: Duration = Duration::from_secs(1);
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(32);
 
 type Pending = Arc<Mutex<HashMap<u64, RegistryKey>>>;
+
+/// Latest store snapshot per connection. A snapshot replaces the previous one
+/// entirely, so a busy extension can publish faster than the shell reads
+/// without losing data or filling the message queue.
+type Latest = Arc<Mutex<HashMap<u64, Json>>>;
 
 pub enum Update {
     Event(String, Json),
@@ -62,10 +73,6 @@ enum Incoming {
         methods: HashMap<String, MethodSpec>,
         writer: SyncSender<Vec<u8>>,
     },
-    State {
-        conn: u64,
-        store: Json,
-    },
     Event {
         conn: u64,
         event: Json,
@@ -88,6 +95,7 @@ pub struct Plugins {
     started: Instant,
     _lock: Option<fs::File>,
     incoming: Receiver<Incoming>,
+    latest: Latest,
     conns: HashMap<u64, String>,
     handles: HashMap<String, Handle>,
     supervisor: Option<Supervisor>,
@@ -111,7 +119,7 @@ impl Plugins {
         let socket = PathBuf::from(runtime)
             .join("riced")
             .join(format!("{}.sock", crate::ipc::profile_id(profile_dir)?));
-        let (incoming, stop, lock) = listen(&socket)?;
+        let (incoming, stop, lock, latest) = listen(&socket)?;
         let socket_id = fs::metadata(&socket)
             .ok()
             .map(|metadata| (metadata.dev(), metadata.ino()));
@@ -127,6 +135,7 @@ impl Plugins {
             started: Instant::now(),
             _lock: Some(lock),
             incoming,
+            latest,
             conns: HashMap::new(),
             handles: HashMap::new(),
             supervisor,
@@ -197,6 +206,7 @@ impl Plugins {
             started: Instant::now(),
             _lock: None,
             incoming: rx,
+            latest: Arc::new(Mutex::new(HashMap::new())),
             conns: HashMap::new(),
             handles: HashMap::new(),
             supervisor: None,
@@ -228,6 +238,7 @@ impl Plugins {
             started: Instant::now(),
             _lock: None,
             incoming,
+            latest: Arc::new(Mutex::new(HashMap::new())),
             conns: HashMap::new(),
             handles: HashMap::new(),
             supervisor: None,
@@ -323,17 +334,6 @@ impl Plugins {
                     self.install_one(lua, &name)?;
                     self.write_status();
                 }
-                Incoming::State { conn, store } => {
-                    let Some(name) = self.conns.get(&conn).cloned() else {
-                        continue;
-                    };
-                    let Some(handle) = self.handles.get_mut(&name) else {
-                        continue;
-                    };
-                    handle.store = store;
-                    changed = true;
-                    self.refresh_store(lua, &name)?;
-                }
                 Incoming::Event { conn, event } => {
                     if let Some(name) = self.conns.get(&conn) {
                         events.push(Update::Event(name.clone(), event));
@@ -410,6 +410,25 @@ impl Plugins {
                     changed = true;
                 }
             }
+        }
+        // Snapshots waiting for the shell are applied after the queue, so a
+        // registration is always seen before its first snapshot. A busy
+        // extension always shows its newest state.
+        let pending = std::mem::take(&mut *self.latest.lock().unwrap());
+        for (conn, store) in pending {
+            let Some(name) = self.conns.get(&conn).cloned() else {
+                continue;
+            };
+            let Some(handle) = self.handles.get_mut(&name) else {
+                continue;
+            };
+            // An unchanged snapshot needs no redraw.
+            if handle.store == store {
+                continue;
+            }
+            handle.store = store;
+            changed = true;
+            self.refresh_store(lua, &name)?;
         }
         for handle in self.handles.values().filter(|handle| handle.alive) {
             let mut pending = handle.pending_subscriptions.lock().unwrap();
@@ -709,7 +728,7 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-'))
 }
 
-fn listen(socket: &Path) -> io::Result<(Receiver<Incoming>, Arc<AtomicBool>, fs::File)> {
+fn listen(socket: &Path) -> io::Result<(Receiver<Incoming>, Arc<AtomicBool>, fs::File, Latest)> {
     let parent = socket
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent"))?;
@@ -764,6 +783,8 @@ fn listen(socket: &Path) -> io::Result<(Receiver<Incoming>, Arc<AtomicBool>, fs:
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
     let (tx, rx) = mpsc::sync_channel(QUEUE);
+    let latest: Latest = Arc::new(Mutex::new(HashMap::new()));
+    let thread_latest = Arc::clone(&latest);
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = stop.clone();
     thread::Builder::new()
@@ -778,10 +799,11 @@ fn listen(socket: &Path) -> io::Result<(Receiver<Incoming>, Arc<AtomicBool>, fs:
                         next += 1;
                         let tx = tx.clone();
                         let stop = thread_stop.clone();
+                        let latest = Arc::clone(&thread_latest);
                         let _ = thread::Builder::new()
                             .name(format!("riced-plugin-{id}"))
                             .stack_size(256 * 1024)
-                            .spawn(move || read_conn(stream, id, tx, stop));
+                            .spawn(move || read_conn(stream, id, tx, stop, latest));
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(25));
@@ -790,16 +812,22 @@ fn listen(socket: &Path) -> io::Result<(Receiver<Incoming>, Arc<AtomicBool>, fs:
                 }
             }
         })?;
-    Ok((rx, stop, lock))
+    Ok((rx, stop, lock, latest))
 }
 
-fn read_conn(stream: UnixStream, id: u64, tx: SyncSender<Incoming>, stop: Arc<AtomicBool>) {
+fn read_conn(
+    stream: UnixStream,
+    id: u64,
+    tx: SyncSender<Incoming>,
+    stop: Arc<AtomicBool>,
+    latest: Latest,
+) {
     let mut reader = BufReader::new(stream);
     let writer = match reader.get_ref().try_clone() {
         Ok(writer) => writer,
         Err(_) => return,
     };
-    let (out_tx, out_rx) = mpsc::sync_channel::<Vec<u8>>(QUEUE);
+    let (out_tx, out_rx) = mpsc::sync_channel::<Vec<u8>>(OUT_QUEUE);
     if thread::Builder::new()
         .name(format!("riced-plugin-{id}-writer"))
         .stack_size(128 * 1024)
@@ -840,7 +868,14 @@ fn read_conn(stream: UnixStream, id: u64, tx: SyncSender<Incoming>, stop: Arc<At
                 methods,
                 writer: out_tx.clone(),
             },
-            ToHost::State { store } => Incoming::State { conn: id, store },
+            // A snapshot replaces the previous one entirely, so it goes into
+            // the latest-state slot instead of the message queue. The shell
+            // reads it on its next poll; nothing is lost when an extension
+            // publishes faster than the shell polls.
+            ToHost::State { store } => {
+                latest.lock().unwrap().insert(id, store);
+                continue;
+            }
             ToHost::Event { event } => Incoming::Event { conn: id, event },
             ToHost::Result {
                 id: call_id,
@@ -855,10 +890,17 @@ fn read_conn(stream: UnixStream, id: u64, tx: SyncSender<Incoming>, stop: Arc<At
                 error,
             },
         };
-        if tx.send(message).is_err() {
-            break;
+        // The core polls this queue; a full queue must not stall the socket
+        // reader, or the extension's own reply blocks.
+        match tx.try_send(message) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                log::warn!(target: "extension.backpressure", "extension {id} is sending faster than the shell reads; one reply was dropped");
+            }
+            Err(TrySendError::Disconnected(_)) => break,
         }
     }
+    latest.lock().unwrap().remove(&id);
     let _ = tx.send(Incoming::Closed { conn: id });
 }
 
@@ -1144,7 +1186,7 @@ mod tests {
     }
 
     fn register(tx: &SyncSender<Incoming>, methods: &[&str]) -> Receiver<Vec<u8>> {
-        let (writer, calls) = mpsc::sync_channel(16);
+        let (writer, calls) = mpsc::sync_channel(OUT_QUEUE);
         let methods = methods
             .iter()
             .map(|name| ((*name).to_owned(), MethodSpec::default()))
@@ -1159,6 +1201,11 @@ mod tests {
         })
         .unwrap();
         calls
+    }
+
+    /// Queues a store snapshot the way the socket reader does.
+    fn publish(plugins: &Plugins, conn: u64, store: serde_json::Value) {
+        plugins.latest.lock().unwrap().insert(conn, store);
     }
 
     #[test]
@@ -1200,11 +1247,7 @@ mod tests {
             .get("demo")
             .unwrap();
 
-        tx.send(Incoming::State {
-            conn: 1,
-            store: serde_json::json!({"value": 2}),
-        })
-        .unwrap();
+        publish(&plugins, 1, serde_json::json!({"value": 2}));
         let (changed, _) = plugins.poll(&lua).unwrap();
 
         assert!(changed);
@@ -1221,6 +1264,27 @@ mod tests {
                 .eval::<u32>()
                 .unwrap(),
             2
+        );
+    }
+
+    #[test]
+    fn a_busy_extension_keeps_only_its_newest_snapshot() {
+        let (tx, mut plugins, lua) = setup();
+        let _calls = register(&tx, &[]);
+        plugins.poll(&lua).unwrap();
+        // A snapshot published before the registration is seen still lands.
+        publish(&plugins, 1, serde_json::json!({"value": 1}));
+        plugins.poll(&lua).unwrap();
+        // Many snapshots in a row collapse into the newest one.
+        for value in 2..100 {
+            publish(&plugins, 1, serde_json::json!({"value": value}));
+        }
+        plugins.poll(&lua).unwrap();
+        assert_eq!(
+            lua.load("return riced.plugin('demo').value")
+                .eval::<u32>()
+                .unwrap(),
+            99
         );
     }
 
@@ -1249,15 +1313,15 @@ mod tests {
         let (tx, mut plugins, lua) = setup();
         let _calls = register(&tx, &[]);
         plugins.poll(&lua).unwrap();
-        tx.send(Incoming::State {
-            conn: 1,
-            store: serde_json::json!({
+        publish(
+            &plugins,
+            1,
+            serde_json::json!({
                 "tray_menu": null,
                 "tray": [{"id": "item", "menu": null, "icon_theme_path": null}],
                 "items": [null, 1, null, 2]
             }),
-        })
-        .unwrap();
+        );
         plugins.poll(&lua).unwrap();
         let result: (String, String, usize, u32, u32) = lua
             .load(
@@ -1302,7 +1366,7 @@ mod tests {
         let calls = register(&tx, &["noop"]);
         plugins.poll(&lua).unwrap();
 
-        for _ in 0..QUEUE {
+        for _ in 0..OUT_QUEUE {
             lua.load("riced.plugins('demo').noop()").exec().unwrap();
         }
         lua.load("return riced.plugins('demo').store.cpu")
@@ -1319,7 +1383,7 @@ mod tests {
                 .contains("cpu")
         );
 
-        for _ in 0..QUEUE {
+        for _ in 0..OUT_QUEUE {
             calls.try_recv().unwrap();
         }
         plugins.poll(&lua).unwrap();
@@ -1593,11 +1657,7 @@ mod tests {
     fn disconnect_keeps_the_store_and_marks_the_proxy_dead() {
         let (tx, mut plugins, lua) = setup();
         let _calls = register(&tx, &[]);
-        tx.send(Incoming::State {
-            conn: 1,
-            store: serde_json::json!({"value": 1}),
-        })
-        .unwrap();
+        publish(&plugins, 1, serde_json::json!({"value": 1}));
         plugins.poll(&lua).unwrap();
         tx.send(Incoming::Closed { conn: 1 }).unwrap();
         plugins.poll(&lua).unwrap();
@@ -1644,11 +1704,7 @@ mod tests {
     fn reload_rebuilds_proxies_from_host_snapshots() {
         let (tx, mut plugins, lua) = setup();
         let _calls = register(&tx, &[]);
-        tx.send(Incoming::State {
-            conn: 1,
-            store: serde_json::json!({"value": 7}),
-        })
-        .unwrap();
+        publish(&plugins, 1, serde_json::json!({"value": 7}));
         plugins.poll(&lua).unwrap();
 
         let next = Lua::new();
@@ -1681,8 +1737,9 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let socket = root.join("test.sock");
-        let (incoming, _stop, _lock) = listen(&socket).unwrap();
+        let (incoming, _stop, _lock, latest) = listen(&socket).unwrap();
         let mut plugins = Plugins::test(incoming);
+        plugins.latest = latest;
         let lua = Lua::new();
         crate::lua::load(&lua).unwrap();
         plugins.install(&lua).unwrap();
@@ -1735,17 +1792,65 @@ mod tests {
     }
 
     #[test]
+    fn a_fast_extension_over_a_socket_keeps_its_newest_snapshot() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "riced-plugins-fast-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let socket = root.join("test.sock");
+        let (incoming, _stop, _lock, latest) = listen(&socket).unwrap();
+        let mut plugins = Plugins::test(incoming);
+        plugins.latest = latest;
+        let lua = Lua::new();
+        crate::lua::load(&lua).unwrap();
+        plugins.install(&lua).unwrap();
+
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream
+            .write_all(b"{\"type\":\"register\",\"v\":1,\"name\":\"demo\"}\n")
+            .unwrap();
+        // The extension publishes far more snapshots than the shell reads.
+        for value in 0..500u32 {
+            stream
+                .write_all(
+                    format!("{{\"type\":\"state\",\"store\":{{\"value\":{value}}}}}\n").as_bytes(),
+                )
+                .unwrap();
+        }
+        stream.flush().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            plugins.poll(&lua).unwrap();
+            let value = lua
+                .load("return riced.plugin('demo').value")
+                .eval::<Option<u32>>()
+                .unwrap();
+            if value == Some(499) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the newest snapshot never arrived"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        _stop.store(true, Ordering::Relaxed);
+        drop(plugins);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn proxy_captured_before_registration_stays_live() {
         let (tx, mut plugins, lua) = setup();
         let early: Table = lua.load("return riced.plugins('demo')").eval().unwrap();
         assert!(!early.get::<bool>("alive").unwrap());
 
         let _calls = register(&tx, &[]);
-        tx.send(Incoming::State {
-            conn: 1,
-            store: serde_json::json!({"value": 5}),
-        })
-        .unwrap();
+        publish(&plugins, 1, serde_json::json!({"value": 5}));
         plugins.poll(&lua).unwrap();
 
         assert!(early.get::<bool>("alive").unwrap());
@@ -1774,7 +1879,7 @@ mod tests {
         let socket = root.join("test.sock");
         // A crashed instance can leave both a socket and queued requests behind.
         drop(UnixListener::bind(&socket).unwrap());
-        let (_incoming, stop, _lock) = listen(&socket).unwrap();
+        let (_incoming, stop, _lock, _latest) = listen(&socket).unwrap();
         assert!(!queue.exists());
         assert!(other.join("keep.ready").exists());
 
@@ -1958,8 +2063,8 @@ mod tests {
         ));
         let socket = root.join("test.sock");
         let results = std::thread::scope(|scope| {
-            let a = scope.spawn(|| listen(&socket).map(|(_, stop, lock)| (stop, lock)));
-            let b = scope.spawn(|| listen(&socket).map(|(_, stop, lock)| (stop, lock)));
+            let a = scope.spawn(|| listen(&socket).map(|(_, stop, lock, _latest)| (stop, lock)));
+            let b = scope.spawn(|| listen(&socket).map(|(_, stop, lock, _latest)| (stop, lock)));
             [a.join().unwrap(), b.join().unwrap()]
         });
         let mut owners = results
@@ -1985,7 +2090,7 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let socket = root.join("test.sock");
-        let (incoming, stop, lock) = listen(&socket).unwrap();
+        let (incoming, stop, lock, latest) = listen(&socket).unwrap();
         let metadata = fs::metadata(&socket).unwrap();
         let plugins = Plugins {
             socket: Some(socket.clone()),
@@ -1993,6 +2098,7 @@ mod tests {
             started: Instant::now(),
             _lock: Some(lock),
             incoming,
+            latest,
             conns: HashMap::new(),
             handles: HashMap::new(),
             supervisor: None,
