@@ -832,6 +832,7 @@ fn build(
         ],
         "mouse_area" => &[
             "on_press",
+            "on_press_delay",
             "on_release",
             "on_double_click",
             "on_right_press",
@@ -1614,6 +1615,26 @@ mod tests {
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn mouse_area_press_delay_needs_an_id_and_a_whole_number_of_ms() {
+        let lua = mlua::Lua::new();
+        for source in [
+            "{kind='mouse_area',content={kind='text',content='x'},on_press='p',on_press_delay=300}",
+            "{kind='mouse_area',content={kind='text',content='x'},on_press='p',on_press_delay=1.5}",
+            "{kind='mouse_area',content={kind='text',content='x'},on_press='p',on_press_delay=-1}",
+        ] {
+            assert!(
+                element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_err(),
+                "{source}"
+            );
+        }
+        let source = "{kind='mouse_area',content={kind='text',content='x'},id='a',on_press='p',on_press_delay=300}";
+        assert!(
+            element(lua.load(source).eval().unwrap(), &Ctx::new(0)).is_ok(),
+            "{source}"
+        );
     }
 
     #[test]

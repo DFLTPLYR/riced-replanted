@@ -1586,13 +1586,27 @@ sends the selected string; `on_input` sends the filter text.
 
 #### `iced.mouse_area(content, props)`
 
-Props: `on_press`, `on_release`, `on_double_click`, `on_right_press`,
-`on_right_release`, `on_middle_press`, `on_middle_release`, `on_enter`,
-`on_exit`, `on_move`, and `on_scroll`.
+Props: `on_press`, `on_press_delay`, `on_release`, `on_double_click`,
+`on_right_press`, `on_right_release`, `on_middle_press`, `on_middle_release`,
+`on_enter`, `on_exit`, `on_move`, and `on_scroll`.
 
 The button, enter, and exit handlers deliver their configured value directly to
 `update` (the same as `button.on_press`). `on_move` and `on_scroll` send wrapped
 events with `value = { x, y }`.
+
+`on_press_delay` holds the press for that many milliseconds before it reaches
+`update`. The press only lands if the button is still down when the timer
+expires; releasing first drops it, so a click can be told apart from a drag or
+a scroll. The delay needs a nonempty `id` prop to name the area, and
+`on_press_delay = 0` (the default) keeps the press immediate.
+
+```lua
+iced.mouse_area(paint(widget), {
+    id = "grab-" .. index,
+    on_press = { event = "widgets:grab", args = { index = index } },
+    on_press_delay = 300,
+})
+```
 
 #### `iced.sensor(content, props)`
 

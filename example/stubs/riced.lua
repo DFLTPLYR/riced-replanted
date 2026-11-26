@@ -292,6 +292,7 @@ config = {}
 ---@field on_resize? string
 ---@field on_enter? any
 ---@field on_exit? any
+---@field on_press_delay? number Milliseconds a press waits before it reaches update; needs an id.
 ---@field on_move? string
 ---@field on_double_click? any
 ---@field on_right_press? any

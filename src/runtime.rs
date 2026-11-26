@@ -35,6 +35,23 @@ pub enum Message {
         String,
         WidgetEvent,
     ),
+    /// A press held past `on_press_delay`; delivered when the timer expires.
+    Press(
+        u64,
+        Option<(String, u64, Option<window::Id>)>,
+        String,
+        Value,
+        u64,
+    ),
+    /// The release that cancels a pending press; carries the release payload.
+    Release(
+        u64,
+        Option<(String, u64, Option<window::Id>)>,
+        String,
+        Option<Value>,
+    ),
+    /// Fires the presses whose delay expired.
+    FlushPresses,
     Clipboard(u64, Option<String>),
     Key(u64, KeyEvent),
     Mouse(u64, MouseEvent),
@@ -262,6 +279,21 @@ enum Change {
     All,
 }
 
+/// How often the press timer runs while a press waits out its delay.
+const PRESS_TICK: Duration = Duration::from_millis(16);
+
+/// A press waiting out its `on_press_delay` before it reaches Lua.
+#[derive(Clone)]
+struct PendingPress {
+    /// When the press may be delivered.
+    deadline: Instant,
+    generation: u64,
+    component: Option<(String, u64, Option<window::Id>)>,
+    /// The `id` of the mouse area that took the press.
+    id: String,
+    value: Value,
+}
+
 #[derive(Clone)]
 struct Mount {
     module: String,
@@ -366,6 +398,8 @@ pub struct App {
     // (target, message) of the last log events delivered to `update`, so a
     // failing render does not notify on every tick.
     log_events: HashMap<(String, String), Instant>,
+    // Presses held past their `on_press_delay`, waiting for their timer.
+    pending_presses: Vec<PendingPress>,
 }
 
 impl App {
@@ -591,6 +625,7 @@ pub fn load_with_plugins(
         plugins,
         watches: HashMap::new(),
         log_events: HashMap::new(),
+        pending_presses: Vec::new(),
         restart: None,
         deferred_forgets: None,
         shell_stamp: shell_stamp(path).unwrap_or((None, 0)),
@@ -688,6 +723,60 @@ impl App {
                     component.map(|(id, _, _)| id),
                 )
             }
+            Message::Press(generation, component, id, value, delay)
+                if generation == self.generation =>
+            {
+                if self.stale(&component) {
+                    return Ok(Task::none());
+                }
+                // A second press on the same area replaces the first, so a
+                // held button only ever delivers one press.
+                self.pending_presses
+                    .retain(|press| press.id != id || press.component != component);
+                self.pending_presses.push(PendingPress {
+                    deadline: Instant::now() + Duration::from_millis(delay),
+                    generation,
+                    component,
+                    id,
+                    value,
+                });
+                return Ok(Task::none());
+            }
+            Message::Release(generation, component, id, value) if generation == self.generation => {
+                // Releasing before the delay expires drops the press.
+                self.pending_presses
+                    .retain(|press| press.id != id || press.component != component);
+                let Some(value) = value else {
+                    return Ok(Task::none());
+                };
+                if self.stale(&component) {
+                    return Ok(Task::none());
+                }
+                (value, component.as_ref().map(|(id, _, _)| id.clone()))
+            }
+            Message::FlushPresses => {
+                let now = Instant::now();
+                let mut due = Vec::new();
+                self.pending_presses.retain(|press| {
+                    if press.deadline <= now {
+                        due.push(press.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                let mut tasks = Vec::new();
+                for press in due {
+                    if press.generation != self.generation || self.stale(&press.component) {
+                        continue;
+                    }
+                    let event = press.value.clone();
+                    let origin = press.component.as_ref().map(|(id, _, _)| id.clone());
+                    let value = self.update.call((self.state.clone(), event, origin))?;
+                    tasks.push(self.tasks(value)?);
+                }
+                return Ok(Task::batch(tasks));
+            }
             Message::Clipboard(generation, value) if generation == self.generation => {
                 let event = self.lua.create_table()?;
                 event.set("type", "clipboard")?;
@@ -721,6 +810,8 @@ impl App {
             Message::Lua(..)
             | Message::Animation { .. }
             | Message::Widget(..)
+            | Message::Press(..)
+            | Message::Release(..)
             | Message::Clipboard(..)
             | Message::Key(..)
             | Message::Mouse(..)
@@ -1940,6 +2031,11 @@ impl App {
                     .map(|(generation, ())| Message::Hover(generation)),
             );
         }
+        // Presses waiting out their delay need a timer; it only runs while one
+        // is pending.
+        if !self.pending_presses.is_empty() {
+            subscriptions.push(iced::time::every(PRESS_TICK).map(|_| Message::FlushPresses));
+        }
         Ok(Subscription::batch(subscriptions))
     }
 
@@ -2055,6 +2151,9 @@ impl App {
                 widget_event(&self.lua, component, event, value)?
             }
             Message::Widget(..) => return Ok(Scope::None),
+            Message::Press(..) | Message::Release(..) | Message::FlushPresses => {
+                return Ok(Scope::None);
+            }
             Message::Tick => {
                 let event = self.lua.create_table()?;
                 event.set("type", "tick")?;
@@ -6022,5 +6121,135 @@ return m";
         )
         .unwrap();
         assert!(app.subscription().is_err());
+    }
+
+    #[test]
+    fn delayed_presses_wait_for_their_timer_and_a_release_cancels_them() {
+        let mut app = load(
+            r#"
+            local app = { presses = 0 }
+            function app:update(event)
+                if type(event) == 'table' and event.event == 'press' then
+                    self.presses = self.presses + 1
+                end
+            end
+            function app:view(props)
+                return iced.mouse_area(iced.text('x'), {
+                    id = 'area', on_press = { event = 'press' }, on_press_delay = 60,
+                })
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        let id = window::Id::unique();
+        app.view(id).unwrap();
+
+        let value = app.lua.load("{ event = 'press' }").eval().unwrap();
+        let _ = app
+            .update(Message::Press(
+                app.generation,
+                None,
+                "area".to_owned(),
+                value,
+                60,
+            ))
+            .unwrap();
+        // The press waits out its timer.
+        assert_eq!(app.state.get::<u32>("presses").unwrap(), 0);
+        assert_eq!(app.pending_presses.len(), 1);
+
+        // A release before the timer expires drops the press.
+        let _ = app
+            .update(Message::Release(
+                app.generation,
+                None,
+                "area".to_owned(),
+                None,
+            ))
+            .unwrap();
+        assert!(app.pending_presses.is_empty());
+        let _ = app.update(Message::FlushPresses).unwrap();
+        assert_eq!(app.state.get::<u32>("presses").unwrap(), 0);
+
+        // A press that is held long enough reaches update.
+        let _ = app
+            .update(Message::Press(
+                app.generation,
+                None,
+                "area".to_owned(),
+                app.lua.load("{ event = 'press' }").eval().unwrap(),
+                0,
+            ))
+            .unwrap();
+        let _ = app.update(Message::FlushPresses).unwrap();
+        assert_eq!(app.state.get::<u32>("presses").unwrap(), 1);
+    }
+
+    #[test]
+    fn a_press_timer_only_runs_while_a_press_is_pending() {
+        let mut app = load(
+            "return riced.daemon({}, 'test', function() end, function() return iced.text('x') end):run()",
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        assert!(app.pending_presses.is_empty());
+        // A pending press arms the timer that fires the delayed presses.
+        let _ = app
+            .update(Message::Press(
+                app.generation,
+                None,
+                "area".to_owned(),
+                app.lua.load("{ event = 'press' }").eval().unwrap(),
+                60,
+            ))
+            .unwrap();
+        assert_eq!(app.pending_presses.len(), 1);
+        assert!(app.subscription().is_ok());
+    }
+
+    #[test]
+    fn a_delayed_mouse_area_reports_its_press_to_the_runtime() {
+        let mut app = load(
+            r#"
+            local app = { presses = 0 }
+            function app:update(event)
+                if type(event) == 'table' and event.event == 'press' then
+                    self.presses = self.presses + 1
+                end
+            end
+            function app:view(props)
+                return iced.mouse_area(iced.text('x'), {
+                    id = 'area', on_press = { event = 'press' }, on_press_delay = 60,
+                })
+            end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        let id = window::Id::unique();
+        app.view(id).unwrap();
+
+        // The area takes the press and holds it until its timer expires.
+        let value = app.lua.load("{ event = 'press' }").eval().unwrap();
+        let _ = app
+            .update(Message::Press(
+                app.generation,
+                None,
+                "area".to_owned(),
+                value,
+                60,
+            ))
+            .unwrap();
+        assert_eq!(app.pending_presses.len(), 1);
+        assert_eq!(app.state.get::<u32>("presses").unwrap(), 0);
+
+        // Once the timer expires the press reaches update.
+        app.pending_presses[0].deadline = Instant::now();
+        let _ = app.update(Message::FlushPresses).unwrap();
+        assert_eq!(app.state.get::<u32>("presses").unwrap(), 1);
+        assert!(app.pending_presses.is_empty());
     }
 }

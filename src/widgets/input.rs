@@ -432,6 +432,26 @@ pub(super) fn mouse_area(node: &Table, ctx: &Ctx) -> mlua::Result<Element<'stati
     let mut area = widget::MouseArea::new(content);
     let generation = ctx.generation;
     let component = ctx.component.clone();
+    let delay = match node.get::<Option<f64>>("on_press_delay")? {
+        Some(ms) if !(0.0..=86_400_000.0).contains(&ms) || ms.fract() != 0.0 => {
+            return Err(mlua::Error::runtime(
+                "on_press_delay must be a whole number from 0 to 86400000 ms",
+            ));
+        }
+        Some(ms) => ms as u64,
+        None => 0,
+    };
+    // A delayed press waits out its timer, so the runtime has to tell the
+    // pending press from the release that cancels it; the id names the area.
+    let id = if delay > 0 {
+        Some(
+            node.get::<Option<String>>("id")?
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| mlua::Error::runtime("on_press_delay requires a nonempty id"))?,
+        )
+    } else {
+        None
+    };
     for (key, set) in [
         ("on_press", 0usize),
         ("on_release", 1),
@@ -444,7 +464,15 @@ pub(super) fn mouse_area(node: &Table, ctx: &Ctx) -> mlua::Result<Element<'stati
         ("on_exit", 8),
     ] {
         if let Some(value) = node.get::<Option<Value>>(key)? {
-            let message = Message::Lua(generation, component.clone(), value);
+            let message = match (set, &id) {
+                (0, Some(id)) => {
+                    Message::Press(generation, component.clone(), id.clone(), value, delay)
+                }
+                (1, Some(id)) => {
+                    Message::Release(generation, component.clone(), id.clone(), Some(value))
+                }
+                _ => Message::Lua(generation, component.clone(), value),
+            };
             area = match set {
                 0 => area.on_press(message),
                 1 => area.on_release(message),
@@ -457,6 +485,18 @@ pub(super) fn mouse_area(node: &Table, ctx: &Ctx) -> mlua::Result<Element<'stati
                 _ => area.on_exit(message),
             };
         }
+    }
+    // A delayed press is cancelled by the release, so the area always listens
+    // for one even when the shell asked for no release event.
+    if let Some(id) = id.as_ref()
+        && node.get::<Option<Value>>("on_release")?.is_none()
+    {
+        area = area.on_release(Message::Release(
+            generation,
+            component.clone(),
+            id.clone(),
+            None,
+        ));
     }
     if let Some(event) = node.get::<Option<String>>("on_move")? {
         let component = component.clone();
