@@ -27,6 +27,8 @@ struct Application {
     icon: String,
     comment: String,
     exec: String,
+    /// Window class of the app, used to match a running window to its entry.
+    wm_class: String,
     terminal: bool,
     path: PathBuf,
 }
@@ -342,6 +344,10 @@ fn parse(path: &Path, id: String) -> Parsed {
         icon: clamp(section.attr("Icon").unwrap_or("").trim(), MAX_NAME),
         comment: clamp(section.attr("Comment").unwrap_or("").trim(), MAX_COMMENT),
         exec: exec.to_owned(),
+        wm_class: clamp(
+            section.attr("StartupWMClass").unwrap_or("").trim(),
+            MAX_NAME,
+        ),
         terminal: flag(&section, "Terminal"),
         path: path.to_owned(),
     })
@@ -358,6 +364,7 @@ fn snapshot(applications: &[Application]) -> Value {
             "name": application.name,
             "icon": if application.icon.is_empty() { Value::Null } else { json!(application.icon) },
             "comment": if application.comment.is_empty() { Value::Null } else { json!(application.comment) },
+            "wm_class": if application.wm_class.is_empty() { Value::Null } else { json!(application.wm_class) },
             "terminal": application.terminal,
         })
     });
@@ -388,6 +395,7 @@ mod tests {
             icon: String::new(),
             comment: String::new(),
             exec: exec.into(),
+            wm_class: String::new(),
             terminal: false,
             path: PathBuf::from("/usr/share/applications/app.desktop"),
         }
