@@ -1071,6 +1071,18 @@ impl App {
             return Ok(Task::none());
         }
         self.log_events.retain(|_, at| at.elapsed() < REPEAT);
+        // Bound the dedup map: at most 256 distinct log lines survive, so a
+        // pathological profile cannot grow it without limit.
+        const MAX_LOG_EVENTS: usize = 256;
+        while self.log_events.len() >= MAX_LOG_EVENTS {
+            let oldest = self
+                .log_events
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(key, _)| key.clone());
+            let Some(oldest) = oldest else { break };
+            self.log_events.remove(&oldest);
+        }
         let mut tasks = Vec::new();
         for (level, target, message) in events {
             let key = (target.clone(), message.clone());
