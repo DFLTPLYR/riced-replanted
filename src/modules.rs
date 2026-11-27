@@ -195,8 +195,12 @@ impl Modules {
     }
 
     // Stats watched files; reads only those whose mtime or size changed.
+    // Files that vanish are pruned from the watch list; an in-memory module
+    // may still be loaded as a value, so the entry is dropped, not the module.
     pub fn detect_changes(&mut self) -> Vec<String> {
         let mut changed = Vec::new();
+        // Entries whose file vanished are pruned from the watch list below.
+        let mut pruned = Vec::new();
         for (name, loaded) in &mut self.loaded {
             let metadata = match std::fs::metadata(&loaded.path) {
                 Ok(metadata) => metadata,
@@ -205,6 +209,11 @@ impl Modules {
                         loaded.warned = true;
                         log::warn!(target: "module.watch", "cannot watch {}: {error}", loaded.path.display());
                     }
+                    // File is gone: drop the watch record. The module may
+                    // still be loaded in `package.loaded` as a value, so the
+                    // revision machinery is untouched; the watch list is the
+                    // only place the stale entry lived.
+                    pruned.push(name.clone());
                     continue;
                 }
             };
@@ -230,6 +239,12 @@ impl Modules {
                     }
                 }
             }
+        }
+        for name in pruned {
+            // The file is gone; the watch record goes with it. The module may
+            // still be loaded in package.loaded, so the revision machinery is
+            // untouched.
+            self.loaded.remove(&name);
         }
         changed
     }
