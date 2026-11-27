@@ -415,8 +415,19 @@ pub(super) fn markdown(content: &str) -> Rc<Vec<iced::widget::markdown::Item>> {
         if let Some(items) = cache.get(content) {
             return Rc::clone(items);
         }
-        if cache.len() >= 32 {
-            cache.clear();
+        if cache.len() >= 32 && !cache.contains_key(content) {
+            // Evict the entry with no live references first, so an old
+            // parse result is dropped before a live one.
+            let candidates = cache
+                .iter()
+                .filter(|(_, items)| Rc::strong_count(items) <= 1)
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            if let Some(victim) = candidates.first() {
+                cache.remove(victim);
+            } else if let Some(victim) = cache.keys().next().cloned() {
+                cache.remove(&victim);
+            }
         }
         let items = Rc::new(iced::widget::markdown::parse(content).collect());
         cache.insert(content.to_owned(), Rc::clone(&items));
