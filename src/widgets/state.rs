@@ -51,6 +51,7 @@ enum Retired {
     Editor(Rc<RefCell<text_editor::Content>>),
     Combo(ComboState),
     Pane(PaneState),
+    List(ListEntry),
 }
 
 thread_local! {
@@ -107,12 +108,42 @@ fn normalize(value: &Value) -> Option<Key> {
 }
 
 pub(crate) fn forget_window(generation: u64, window: iced::window::Id) {
+    // The closed window's element tree is gone, so its list state can be
+    // dropped directly; the USED records go with it.
+    let mut dropped = Vec::new();
     LISTS.with_borrow_mut(|lists| {
-        lists.retain(|(owner, id, _), _| *owner != generation || *id != Some(window))
+        let keys = lists
+            .iter()
+            .filter(|((owner, id, _), _)| *owner == generation && *id == Some(window))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(entry) = lists.remove(&key) {
+                dropped.push(entry);
+            }
+        }
     });
-    // The window's element tree is gone; its state no longer needs to wait.
+    for entry in dropped {
+        if entry.entry != 0 {
+            USED.with_borrow_mut(|used| {
+                used.remove(&entry.entry);
+            });
+        }
+        drop(entry);
+    }
+    // A closed window's USED records can never prove safe again; drop them
+    // so the eviction machinery cannot spin on them. Editors, combos and
+    // panes keyed by (generation, id) are not reachable from the closed tree
+    // only if they were always window-scoped; the safe general rule is to
+    // drop only the records naming this window.
     EPOCH.with_borrow_mut(|epochs| {
         epochs.remove(&window);
+    });
+    USED.with_borrow_mut(|used| {
+        for list in used.values_mut() {
+            list.retain(|(id, _)| *id != window);
+        }
+        used.retain(|_, list| !list.is_empty());
     });
 }
 
@@ -169,7 +200,30 @@ fn touch(entry: u64, window: Option<iced::window::Id>) {
 }
 
 pub(crate) fn forget_generation(generation: u64) {
-    LISTS.with_borrow_mut(|lists| lists.retain(|(owner, _, _), _| *owner != generation));
+    let mut orphaned = Vec::new();
+    LISTS.with_borrow_mut(|lists| {
+        let keys = lists
+            .iter()
+            .filter(|((owner, _, _), _)| *owner == generation)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(entry) = lists.remove(&key) {
+                orphaned.push(entry);
+            }
+        }
+    });
+    // Dropping in memory is fine here: the Lua instance being retired is
+    // dead by the time the entry is dropped; the explicit entry records go
+    // with it.
+    for entry in orphaned {
+        if entry.entry != 0 {
+            USED.with_borrow_mut(|used| {
+                used.remove(&entry.entry);
+            });
+        }
+        drop(entry);
+    }
     let mut retiring = Vec::new();
     EDITORS.with_borrow_mut(|editors| {
         editors.retain(|(owner, _), state| {
@@ -260,6 +314,7 @@ struct ListEntry {
     leaving: Vec<ListLeaving>,
     nodes: HashMap<u64, mlua::Table>,
     owner: Option<Control>,
+    entry: u64,
 }
 
 impl Drop for ListEntry {
@@ -270,6 +325,11 @@ impl Drop for ListEntry {
         for leaving in &self.leaving {
             leaving.control.cancel();
         }
+        // In-flight exit nodes hold a live Control (retained via
+        // `_animations.retain`); its Animated handle is shared, so the
+        // cancel above is what ends the exit. The tables themselves may
+        // belong to a Lua instance that is already torn down, so we must
+        // not query them here.
     }
 }
 
@@ -290,6 +350,8 @@ pub(super) struct ListState {
 }
 
 pub(crate) fn sweep_animations() {
+    // Dead owners cancel their exit animations through ListEntry::drop; this
+    // also frees the entry itself.
     LISTS.with_borrow_mut(|lists| {
         lists.retain(|_, entry| entry.owner.as_ref().is_none_or(|owner| owner.state().alive))
     });
@@ -451,13 +513,22 @@ pub(super) fn list(
         let mut lists = lists.borrow_mut();
         let key = (generation, window, id.to_owned());
         if lists.len() >= LIMIT && !lists.contains_key(&key) {
-            // Evict one entry like editors/combos do; clearing the whole map
-            // would cancel every list's exit animations at once.
-            if let Some(oldest) = lists.keys().next().cloned() {
-                lists.remove(&oldest);
-            }
+            // Evict the oldest entry through the delayed-free path, keeping
+            // allocations alive if an element tree still references it.
+            retire_one(
+                generation,
+                &mut lists,
+                |entry| entry.entry,
+                Retired::List,
+            );
         }
         let entry = lists.entry(key).or_default();
+        if entry.entry == 0 {
+            // First build for this key; next_entry records the usage.
+            entry.entry = next_entry(window);
+        } else {
+            touch(entry.entry, window);
+        }
         entry.owner = owner;
         let previous = std::mem::take(&mut entry.items);
         let mut old_used = vec![false; previous.len()];
@@ -955,6 +1026,38 @@ mod tests {
                 <= LIMIT
         );
         free_retired();
+        free_evicted(u64::MAX);
+    }
+}
+
+#[cfg(test)]
+mod eviction_tests {
+    use super::*;
+
+    #[test]
+    fn list_eviction_keeps_the_allocation_alive_until_the_window_renders_twice() {
+        let generation = 999;
+        let window = iced::window::Id::unique();
+        LISTS.with_borrow_mut(HashMap::clear);
+        USED.with_borrow_mut(HashMap::clear);
+        EVICTED.with_borrow_mut(Vec::clear);
+        EPOCH.with_borrow_mut(HashMap::clear);
+        begin_render(window); // epoch 1
+        let items = vec![Value::Integer(1)];
+        for index in 0..LIMIT {
+            list(generation, Some(window), &format!("l-{index}"), items.clone(), &items, true, None);
+        }
+        // The first list is evicted once the map is full; it must stay alive
+        // through the eviction list, not silently dropped.
+        let overflow = list(generation, Some(window), "overflow", items.clone(), &items, true, None);
+        assert!(!overflow.tokens.is_empty());
+        assert_eq!(EVICTED.with_borrow(|evicted| evicted.len()), 1);
+        begin_render(window); // epoch 2
+        assert_eq!(EVICTED.with_borrow(|evicted| evicted.len()), 1);
+        begin_render(window); // epoch 3
+        assert!(EVICTED.with_borrow(|evicted| evicted.is_empty()));
+        forget_window(generation, window);
+        forget_generation(generation);
         free_evicted(u64::MAX);
     }
 }
