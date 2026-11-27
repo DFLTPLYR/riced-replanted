@@ -267,6 +267,8 @@ pub(super) fn list_view(
         .ok_or_else(|| mlua::Error::runtime("list_view requires a non-empty id"))?;
     let id = if let Value::Table(owner) = &ctx.owner {
         format!("{}:{id}", owner.get::<String>("__animation_key")?)
+    } else if let Some((name, _, _)) = &ctx.component {
+        format!("{name}:{id}")
     } else {
         id
     };
