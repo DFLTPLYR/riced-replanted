@@ -301,8 +301,11 @@ fn read(path: &Path, profile: Option<&Path>) -> Result<Arc<str>, String> {
         let source: Arc<str> = fs::read_to_string(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?
             .into();
-        if cache.len() >= FILE_CACHE {
-            cache.clear();
+        if cache.len() >= FILE_CACHE && !cache.contains_key(&path) {
+            let oldest = cache.keys().next().cloned();
+            if let Some(oldest) = oldest {
+                cache.remove(&oldest);
+            }
         }
         cache.insert(
             path.clone(),
@@ -339,8 +342,12 @@ fn validate(key: u64, source: &str) -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
             fragment_entry(&module)
         })();
-        if cache.len() >= VALIDATION_CACHE {
-            cache.clear();
+        if cache.len() >= VALIDATION_CACHE && !cache.contains_key(&key) {
+            // Evict the oldest entry rather than dropping the whole cache.
+            let oldest = cache.keys().next().copied();
+            if let Some(oldest) = oldest {
+                cache.remove(&oldest);
+            }
         }
         cache.insert(key, result.clone());
         result
