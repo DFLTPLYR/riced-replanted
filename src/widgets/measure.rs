@@ -16,12 +16,28 @@ type Key = (Option<window::Id>, String);
 /// Upper bound on measured widgets kept per daemon, mirroring the widget state maps.
 const LIMIT: usize = 256;
 
+/// Bounds plus their draw order, so eviction drops the least recently drawn one.
+#[derive(Clone, Copy)]
+struct Bound {
+    seq: u64,
+    bounds: Rectangle,
+}
+
 thread_local! {
-    static BOUNDS: RefCell<HashMap<Key, Rectangle>> = RefCell::new(HashMap::new());
-    static LATEST: RefCell<HashMap<String, (Option<window::Id>, Rectangle)>> =
+    static BOUNDS: RefCell<HashMap<Key, Bound>> = RefCell::new(HashMap::new());
+    static LATEST: RefCell<HashMap<String, (Option<window::Id>, Bound)>> =
         RefCell::new(HashMap::new());
     static CURRENT_WINDOW: Cell<Option<window::Id>> = const { Cell::new(None) };
     static CHANGED: Cell<bool> = const { Cell::new(false) };
+    static NEXT_SEQ: Cell<u64> = const { Cell::new(0) };
+}
+
+fn next_seq() -> u64 {
+    NEXT_SEQ.with(|next| {
+        let seq = next.get().wrapping_add(1);
+        next.set(seq);
+        seq
+    })
 }
 
 /// Makes `iced.bounds` resolve against the window currently being built.
@@ -58,15 +74,15 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
 
 /// Last measured rectangle for `id` on any surface, for popup anchoring.
 pub(crate) fn latest(id: &str) -> Option<Rectangle> {
-    LATEST.with_borrow(|bounds| bounds.get(id).map(|(_, bounds)| *bounds))
+    LATEST.with_borrow(|bounds| bounds.get(id).map(|(_, measured)| measured.bounds))
 }
 
 fn bounds(id: &str) -> Option<Rectangle> {
     let current = CURRENT_WINDOW.get();
-    if let Some(bounds) =
+    if let Some(measured) =
         BOUNDS.with_borrow(|bounds| bounds.get(&(current, id.to_owned())).copied())
     {
-        return Some(bounds);
+        return Some(measured.bounds);
     }
     // Popups and other surfaces may anchor to a widget measured on the parent surface.
     latest(id)
@@ -75,28 +91,52 @@ fn bounds(id: &str) -> Option<Rectangle> {
 fn record(id: &str, window: Option<window::Id>, bounds: Rectangle) {
     let changed = BOUNDS.with_borrow_mut(|stored| {
         let key = (window, id.to_owned());
+        let changed = stored
+            .get(&key)
+            .is_none_or(|measured| measured.bounds != bounds);
         if stored.len() >= LIMIT
             && !stored.contains_key(&key)
-            && let Some(oldest) = stored.keys().next().cloned()
+            && let Some(oldest) = stored
+                .iter()
+                .min_by_key(|(_, measured)| measured.seq)
+                .map(|(key, _)| key.clone())
         {
-            // Evict one entry instead of dropping every bound, so a shell with
-            // more than LIMIT widgets keeps its anchors.
+            // Evict the least recently drawn bound instead of a random one.
             stored.remove(&oldest);
         }
-        stored.insert(key, bounds) != Some(bounds)
+        stored.insert(
+            key,
+            Bound {
+                seq: next_seq(),
+                bounds,
+            },
+        );
+        changed
     });
     // The id-keyed map only serves cross-surface anchoring, which cares about
-    // bounds; skip the insert while a widget holds still.
+    // bounds; refresh its order so active anchors are not evicted first.
+    LATEST.with_borrow_mut(|stored| {
+        if stored.len() >= LIMIT
+            && !stored.contains_key(id)
+            && let Some(oldest) = stored
+                .iter()
+                .min_by_key(|(_, (_, measured))| measured.seq)
+                .map(|(key, _)| key.clone())
+        {
+            stored.remove(&oldest);
+        }
+        stored.insert(
+            id.to_owned(),
+            (
+                window,
+                Bound {
+                    seq: next_seq(),
+                    bounds,
+                },
+            ),
+        );
+    });
     if changed {
-        LATEST.with_borrow_mut(|stored| {
-            if stored.len() >= LIMIT
-                && !stored.contains_key(id)
-                && let Some(oldest) = stored.keys().next().cloned()
-            {
-                stored.remove(&oldest);
-            }
-            stored.insert(id.to_owned(), (window, bounds));
-        });
         CHANGED.set(true);
     }
 }
@@ -306,10 +346,25 @@ mod tests {
     fn eviction_keeps_the_other_bounds() {
         let rect = Rectangle::new(Point::new(0.0, 0.0), Size::new(1.0, 1.0));
         let kept = format!("kept-{}", std::process::id());
-        record_for_test(&kept, rect);
         for index in 0..LIMIT + 8 {
             record_for_test(&format!("evict-{index}"), rect);
         }
+        // A recently drawn bound survives the next eviction.
+        record_for_test(&kept, rect);
         assert_eq!(with_window(None, || bounds(&kept)), Some(rect));
+    }
+
+    #[test]
+    fn eviction_drops_the_least_recently_drawn_bound() {
+        let rect = Rectangle::new(Point::new(0.0, 0.0), Size::new(1.0, 1.0));
+        let old = format!("old-{}", std::process::id());
+        let fresh = format!("fresh-{}", std::process::id());
+        record_for_test(&old, rect);
+        for index in 0..LIMIT {
+            record_for_test(&format!("fill-{index}-{}", std::process::id()), rect);
+        }
+        record_for_test(&fresh, rect);
+        assert_eq!(with_window(None, || bounds(&old)), None);
+        assert_eq!(with_window(None, || bounds(&fresh)), Some(rect));
     }
 }
