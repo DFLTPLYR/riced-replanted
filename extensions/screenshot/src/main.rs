@@ -199,6 +199,9 @@ fn path_argument(value: &Value) -> Result<PathBuf, String> {
         .filter(|path| !path.is_empty())
         .ok_or("path must be a non-empty string")?;
     let path = expand_home(path);
+    if !path.is_absolute() {
+        return Err("path must be absolute or start with ~/".into());
+    }
     if path.is_dir() {
         return Err(format!("{} is a directory", path.display()));
     }
@@ -865,6 +868,8 @@ mod tests {
             json!([7, "shot.png"]),
             json!(["", "shot.png"]),
             json!([null, ""]),
+            json!([null, "shot.png"]),
+            json!(["DP-1", "relative.png"]),
             json!([null, 5]),
             json!([null, dir.to_str().unwrap()]),
         ] {
@@ -926,6 +931,7 @@ mod tests {
             json!([0.5, 0, 10, 10, "/tmp/riced-screenshot-nothing.png"]),
             json!([0, 0, 10, 10, ""]),
             json!([0, 0, 10, 10, 7]),
+            json!([0, 0, 10, 10, "shot.png"]),
         ] {
             assert!(region_arguments(&args).is_err(), "{args}");
         }
