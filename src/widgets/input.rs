@@ -465,9 +465,14 @@ pub(super) fn mouse_area(node: &Table, ctx: &Ctx) -> mlua::Result<Element<'stati
     ] {
         if let Some(value) = node.get::<Option<Value>>(key)? {
             let message = match (set, &id) {
-                (0, Some(id)) => {
-                    Message::Press(generation, component.clone(), id.clone(), value, delay)
-                }
+                (0, Some(id)) => Message::Press(
+                    generation,
+                    component.clone(),
+                    id.clone(),
+                    value,
+                    delay,
+                    ctx.window(),
+                ),
                 (1, Some(id)) => {
                     Message::Release(generation, component.clone(), id.clone(), Some(value))
                 }

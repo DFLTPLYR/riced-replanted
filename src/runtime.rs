@@ -42,6 +42,7 @@ pub enum Message {
         String,
         Value,
         u64,
+        Option<window::Id>,
     ),
     /// The release that cancels a pending press; carries the release payload.
     Release(
@@ -292,6 +293,8 @@ struct PendingPress {
     /// The `id` of the mouse area that took the press.
     id: String,
     value: Value,
+    /// Surface that took the press; dropped if it closes before delivery.
+    window: Option<window::Id>,
 }
 
 #[derive(Clone)]
@@ -678,6 +681,16 @@ impl App {
         })
     }
 
+    /// Delivers a widget handler value: functions run immediately, every other
+    /// value reaches `app:update` as its event.
+    fn deliver(&mut self, value: Value, origin: Option<String>) -> mlua::Result<Task<Message>> {
+        if let Value::Function(callback) = value {
+            return self.tasks(callback.call(())?);
+        }
+        let result = self.update.call((self.state.clone(), value, origin))?;
+        self.tasks(result)
+    }
+
     fn update(&mut self, message: Message) -> mlua::Result<Task<Message>> {
         if let Message::WindowClosed(id) = message {
             return self.window_closed(id);
@@ -723,7 +736,7 @@ impl App {
                     component.map(|(id, _, _)| id),
                 )
             }
-            Message::Press(generation, component, id, value, delay)
+            Message::Press(generation, component, id, value, delay, window)
                 if generation == self.generation =>
             {
                 if self.stale(&component) {
@@ -739,6 +752,7 @@ impl App {
                     component,
                     id,
                     value,
+                    window,
                 });
                 return Ok(Task::none());
             }
@@ -752,7 +766,7 @@ impl App {
                 if self.stale(&component) {
                     return Ok(Task::none());
                 }
-                (value, component.as_ref().map(|(id, _, _)| id.clone()))
+                return self.deliver(value, component.map(|(id, _, _)| id));
             }
             Message::FlushPresses => {
                 let now = Instant::now();
@@ -770,10 +784,14 @@ impl App {
                     if press.generation != self.generation || self.stale(&press.component) {
                         continue;
                     }
-                    let event = press.value.clone();
+                    if press
+                        .window
+                        .is_some_and(|id| !self.windows.borrow().contains(&id))
+                    {
+                        continue;
+                    }
                     let origin = press.component.as_ref().map(|(id, _, _)| id.clone());
-                    let value = self.update.call((self.state.clone(), event, origin))?;
-                    tasks.push(self.tasks(value)?);
+                    tasks.push(self.deliver(press.value, origin)?);
                 }
                 return Ok(Task::batch(tasks));
             }
@@ -1208,6 +1226,9 @@ impl App {
 
     fn window_closed(&mut self, id: window::Id) -> mlua::Result<Task<Message>> {
         self.images_stale.set(true);
+        // A press targeting this surface must not fire after it is gone.
+        self.pending_presses
+            .retain(|press| press.window != Some(id));
         let extra = self.extras.borrow_mut().remove(&id);
         if let Some(kind) = extra {
             self.forget_window(id)?;
@@ -6166,6 +6187,7 @@ return m";
                 "area".to_owned(),
                 value,
                 60,
+                None,
             ))
             .unwrap();
         // The press waits out its timer.
@@ -6193,6 +6215,7 @@ return m";
                 "area".to_owned(),
                 app.lua.load("{ event = 'press' }").eval().unwrap(),
                 0,
+                None,
             ))
             .unwrap();
         let _ = app.update(Message::FlushPresses).unwrap();
@@ -6215,6 +6238,7 @@ return m";
                 "area".to_owned(),
                 app.lua.load("{ event = 'press' }").eval().unwrap(),
                 60,
+                None,
             ))
             .unwrap();
         assert_eq!(app.pending_presses.len(), 1);
@@ -6253,6 +6277,7 @@ return m";
                 "area".to_owned(),
                 value,
                 60,
+                None,
             ))
             .unwrap();
         assert_eq!(app.pending_presses.len(), 1);
@@ -6263,5 +6288,108 @@ return m";
         let _ = app.update(Message::FlushPresses).unwrap();
         assert_eq!(app.state.get::<u32>("presses").unwrap(), 1);
         assert!(app.pending_presses.is_empty());
+    }
+
+    #[test]
+    fn delayed_presses_and_releases_call_function_handlers() {
+        let mut app = load(
+            r#"
+            PRESSES = 0
+            RELEASES = 0
+            local app = {}
+            function app:update() end
+            function app:view() return iced.text('x') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        let press = app
+            .lua
+            .load("function() PRESSES = PRESSES + 1 end")
+            .eval()
+            .unwrap();
+        let release = app
+            .lua
+            .load("function() RELEASES = RELEASES + 1 end")
+            .eval()
+            .unwrap();
+
+        let _ = app
+            .update(Message::Press(
+                app.generation,
+                None,
+                "area".to_owned(),
+                press,
+                60,
+                None,
+            ))
+            .unwrap();
+        app.pending_presses[0].deadline = Instant::now();
+        let _ = app.update(Message::FlushPresses).unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("PRESSES").unwrap(), 1);
+
+        let _ = app
+            .update(Message::Release(
+                app.generation,
+                None,
+                "area".to_owned(),
+                Some(release),
+            ))
+            .unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("RELEASES").unwrap(), 1);
+    }
+
+    #[test]
+    fn delayed_presses_are_dropped_when_their_window_is_gone() {
+        let mut app = load(
+            r#"
+            PRESSES = 0
+            local app = {}
+            function app:update() end
+            function app:view() return iced.text('x') end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#,
+            Path::new("shell.lua"),
+        )
+        .unwrap();
+        let gone = window::Id::unique();
+        app.view(gone).unwrap();
+        let _ = app
+            .update(Message::Press(
+                app.generation,
+                None,
+                "area".to_owned(),
+                app.lua
+                    .load("function() PRESSES = PRESSES + 1 end")
+                    .eval()
+                    .unwrap(),
+                60,
+                Some(gone),
+            ))
+            .unwrap();
+        app.forget_window(gone).unwrap();
+        app.pending_presses[0].deadline = Instant::now();
+        let _ = app.update(Message::FlushPresses).unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("PRESSES").unwrap(), 0);
+
+        let live = window::Id::unique();
+        app.view(live).unwrap();
+        let _ = app
+            .update(Message::Press(
+                app.generation,
+                None,
+                "area".to_owned(),
+                app.lua
+                    .load("function() PRESSES = PRESSES + 1 end")
+                    .eval()
+                    .unwrap(),
+                60,
+                Some(live),
+            ))
+            .unwrap();
+        app.pending_presses[0].deadline = Instant::now();
+        let _ = app.update(Message::FlushPresses).unwrap();
+        assert_eq!(app.lua.globals().get::<u32>("PRESSES").unwrap(), 1);
     }
 }
