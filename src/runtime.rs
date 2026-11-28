@@ -2373,7 +2373,17 @@ impl App {
                     Ok(change)
                 } else {
                     self.reload_error = Some(message);
-                    Err(error)
+                    if matches!(&change, Change::None) {
+                        Err(error)
+                    } else {
+                        // Modules did reload even though the shell save was
+                        // rejected; report it here so the caller still redraws.
+                        log::warn!(
+                            target: "reload.rejected",
+                            "reload rejected; keeping current app: {error}"
+                        );
+                        Ok(change)
+                    }
                 }
             }
         }
@@ -3211,6 +3221,30 @@ mod tests {
 
         let _ = app.run_ipc("add", &[]).unwrap();
         assert_eq!(app.state.get::<u32>("hits").unwrap(), 2);
+    }
+
+    #[test]
+    fn loaded_modules_still_redraw_when_the_shell_save_is_broken() {
+        let source = r#"
+            local state = require('state')
+            local app = { value = state.value }
+            function app:update() end
+            function app:view() return iced.text(tostring(app.value)) end
+            return riced.daemon(app, 'test', app.update, app.view):run()
+        "#;
+        let profile = Profile::new(&[("shell.lua", source), ("state.lua", "return {value = 1}")]);
+        let mut app = load(source, &profile.shell()).unwrap();
+        app.view(window::Id::unique()).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        profile.write("state.lua", "return {value = 2}");
+        profile.write("shell.lua", "error('broken shell')");
+
+        let change = app
+            .check_reload()
+            .expect("a loaded module must still request its redraw");
+        assert!(matches!(change, Change::Windows(_)));
+        assert_eq!(app.modules.borrow().revision("state"), 1);
     }
 
     #[test]
