@@ -67,14 +67,24 @@ thread_local! {
     // One counter per window, advanced by `begin_render`.
     static EPOCH: RefCell<HashMap<iced::window::Id, u64>> = RefCell::new(HashMap::new());
     static NEXT_ENTRY: Cell<u64> = const { Cell::new(0) };
-    static MARKDOWN: RefCell<HashMap<String, Rc<Vec<iced::widget::markdown::Item>>>> =
-        RefCell::new(HashMap::new());
+    static MARKDOWN: RefCell<HashMap<String, (u64, MarkdownItems)>> = RefCell::new(HashMap::new());
+    static NEXT_MARKDOWN: Cell<u64> = const { Cell::new(0) };
     static LISTS: RefCell<HashMap<ListKey, ListEntry>> = RefCell::new(HashMap::new());
     static NEXT_LIST_TOKEN: Cell<u64> = const { Cell::new(0) };
 }
 
+fn next_markdown_seq() -> u64 {
+    NEXT_MARKDOWN.with(|next| {
+        let seq = next.get().wrapping_add(1);
+        next.set(seq);
+        seq
+    })
+}
+
 /// Upper bound for id-keyed state; bounds configs that generate unique ids.
 const LIMIT: usize = 256;
+
+type MarkdownItems = Rc<Vec<iced::widget::markdown::Item>>;
 
 /// Hashable form of a Lua list key. Exotic values return `None` and fall back
 /// to the linear scan, so matching stays exactly `Value::eq`.
@@ -471,28 +481,27 @@ pub(super) fn combo(
 }
 
 /// A small parse cache; live widgets retain their own references across eviction.
-pub(super) fn markdown(content: &str) -> Rc<Vec<iced::widget::markdown::Item>> {
+pub(super) fn markdown(content: &str) -> MarkdownItems {
     MARKDOWN.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if let Some(items) = cache.get(content) {
+        if let Some((_, items)) = cache.get(content) {
             return Rc::clone(items);
         }
         if cache.len() >= 32 && !cache.contains_key(content) {
-            // Evict the entry with no live references first, so an old
+            // Evict the oldest entry with no live references first, so an old
             // parse result is dropped before a live one.
-            let candidates = cache
+            let victim = cache
                 .iter()
-                .filter(|(_, items)| Rc::strong_count(items) <= 1)
-                .map(|(key, _)| key.clone())
-                .collect::<Vec<_>>();
-            if let Some(victim) = candidates.first() {
-                cache.remove(victim);
-            } else if let Some(victim) = cache.keys().next().cloned() {
+                .filter(|(_, (_, items))| Rc::strong_count(items) <= 1)
+                .min_by_key(|(_, (seq, _))| *seq)
+                .or_else(|| cache.iter().min_by_key(|(_, (seq, _))| *seq))
+                .map(|(key, _)| key.clone());
+            if let Some(victim) = victim {
                 cache.remove(&victim);
             }
         }
         let items = Rc::new(iced::widget::markdown::parse(content).collect());
-        cache.insert(content.to_owned(), Rc::clone(&items));
+        cache.insert(content.to_owned(), (next_markdown_seq(), Rc::clone(&items)));
         items
     })
 }
