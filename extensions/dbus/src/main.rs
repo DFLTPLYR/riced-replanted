@@ -895,10 +895,22 @@ fn register_objects(
     Ok(())
 }
 
-/// Takes over a free watcher or notification name after the previous owner exits.
+/// Takes over a free watcher or notification name after the previous owner
+/// exits, and notices when another owner replaces one of ours.
 fn retry_roles(connection: &Connection, model: &Arc<Mutex<Model>>) {
+    let lost_watcher =
+        model.lock().unwrap().own_watcher && !owns_name(connection, WATCHER).unwrap_or(true);
+    if lost_watcher {
+        let mut model = model.lock().unwrap();
+        model.own_watcher = false;
+        model.tray_available = false;
+        model.tray.clear();
+        model.tray_failures.clear();
+        model.tray_menu = None;
+        model.dirty = true;
+    }
     let own_watcher = model.lock().unwrap().own_watcher;
-    if !own_watcher && !name_has_owner(connection, WATCHER).unwrap_or(true) {
+    if !own_watcher && (lost_watcher || !name_has_owner(connection, WATCHER).unwrap_or(true)) {
         match setup_watcher(connection, model) {
             Ok((tray, own)) => {
                 let mut model = model.lock().unwrap();
@@ -908,6 +920,14 @@ fn retry_roles(connection: &Connection, model: &Arc<Mutex<Model>>) {
             }
             Err(error) => log::warn!(target: "dbus.watcher", "{error}"),
         }
+    }
+    let lost_notifications = model.lock().unwrap().notifications_available
+        && !owns_name(connection, NOTIFICATIONS).unwrap_or(true);
+    if lost_notifications {
+        let mut model = model.lock().unwrap();
+        model.notifications_available = false;
+        model.notifications.clear();
+        model.dirty = true;
     }
     let notifications = model.lock().unwrap().notifications_available;
     if !notifications && !name_has_owner(connection, NOTIFICATIONS).unwrap_or(true) {
@@ -968,6 +988,29 @@ fn name_has_owner(connection: &Connection, name: &str) -> Result<bool, Box<dyn E
         &(name),
     )?;
     Ok(reply.body().deserialize()?)
+}
+
+/// True when this connection is the current owner of `name`.
+fn owns_name(connection: &Connection, name: &str) -> Result<bool, Box<dyn Error>> {
+    let Some(unique) = connection.unique_name() else {
+        return Ok(false);
+    };
+    if !name_has_owner(connection, name)? {
+        return Ok(false);
+    }
+    let reply = connection.call_method(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        Some("org.freedesktop.DBus"),
+        "GetNameOwner",
+        &(name),
+    )?;
+    let owner: String = reply.body().deserialize()?;
+    Ok(is_owner(Some(unique.as_str()), &owner))
+}
+
+fn is_owner(unique: Option<&str>, owner: &str) -> bool {
+    unique == Some(owner)
 }
 
 fn register_host(connection: &Connection) {
@@ -1481,6 +1524,13 @@ impl NotificationsServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_when_another_owner_replaced_us() {
+        assert!(is_owner(Some(":1.42"), ":1.42"));
+        assert!(!is_owner(Some(":1.42"), ":1.7"));
+        assert!(!is_owner(None, ":1.7"));
+    }
 
     #[test]
     fn parses_item_registrations() {
