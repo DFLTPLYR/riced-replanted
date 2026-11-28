@@ -515,12 +515,7 @@ pub(super) fn list(
         if lists.len() >= LIMIT && !lists.contains_key(&key) {
             // Evict the oldest entry through the delayed-free path, keeping
             // allocations alive if an element tree still references it.
-            retire_one(
-                generation,
-                &mut lists,
-                |entry| entry.entry,
-                Retired::List,
-            );
+            retire_one(generation, &mut lists, |entry| entry.entry, Retired::List);
         }
         let entry = lists.entry(key).or_default();
         if entry.entry == 0 {
@@ -1045,11 +1040,27 @@ mod eviction_tests {
         begin_render(window); // epoch 1
         let items = vec![Value::Integer(1)];
         for index in 0..LIMIT {
-            list(generation, Some(window), &format!("l-{index}"), items.clone(), &items, true, None);
+            list(
+                generation,
+                Some(window),
+                &format!("l-{index}"),
+                items.clone(),
+                &items,
+                true,
+                None,
+            );
         }
         // The first list is evicted once the map is full; it must stay alive
         // through the eviction list, not silently dropped.
-        let overflow = list(generation, Some(window), "overflow", items.clone(), &items, true, None);
+        let overflow = list(
+            generation,
+            Some(window),
+            "overflow",
+            items.clone(),
+            &items,
+            true,
+            None,
+        );
         assert!(!overflow.tokens.is_empty());
         assert_eq!(EVICTED.with_borrow(|evicted| evicted.len()), 1);
         begin_render(window); // epoch 2
