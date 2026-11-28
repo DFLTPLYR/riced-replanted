@@ -82,10 +82,12 @@ fn main() -> io::Result<()> {
             });
             *ready.lock().unwrap() = Some(Arc::clone(&shared));
             publish(&shared);
+            probe(&shared);
             // Captures run on their own threads; this one just keeps the
             // process alive until riced disconnects (the SDK then exits).
             loop {
                 thread::sleep(Duration::from_secs(60));
+                probe(&shared);
             }
         })
 }
@@ -115,6 +117,41 @@ fn publish(shared: &Shared) {
         "capturing": store.capturing,
         "last": store.last,
     }));
+}
+
+/// Binds the screencopy manager once so `connected` reports support before the
+/// first capture.
+fn probe(shared: &Shared) {
+    let connected = match Connection::connect_to_env() {
+        Ok(connection) => {
+            let mut queue = connection.new_event_queue();
+            let qh = queue.handle();
+            let mut state = Shot {
+                _registry: Some(connection.display().get_registry(&qh, ())),
+                ..Default::default()
+            };
+            match queue.roundtrip(&mut state) {
+                Ok(_) => state.manager.is_some(),
+                Err(error) => {
+                    log::debug!(target: "screenshot.probe", "registry roundtrip failed: {error}");
+                    false
+                }
+            }
+        }
+        Err(error) => {
+            log::debug!(target: "screenshot.probe", "cannot connect to the Wayland display: {error}");
+            false
+        }
+    };
+    let changed = {
+        let mut store = shared.store.lock().unwrap();
+        let changed = store.connected != connected;
+        store.connected = connected;
+        changed
+    };
+    if changed {
+        publish(shared);
+    }
 }
 
 /// Parses `[output_name_or_null, path]`; a leading `~` expands against `$HOME`.
