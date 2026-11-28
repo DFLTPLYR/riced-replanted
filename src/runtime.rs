@@ -1044,8 +1044,10 @@ impl App {
     fn poll_watches(&mut self) -> mlua::Result<Task<Message>> {
         let table: Table = self.lua.named_registry_value("riced.file_watchers")?;
         let mut tasks = Vec::new();
+        let mut registered = HashSet::new();
         for pair in table.pairs::<String, Function>() {
             let (raw, callback) = pair?;
+            registered.insert(raw.clone());
             let path = self.watch_path(&raw);
             let stamp = shell_stamp(&path);
             let watch = self.watches.entry(raw.clone()).or_default();
@@ -1077,6 +1079,7 @@ impl App {
                 }
             }
         }
+        self.watches.retain(|raw, _| registered.contains(raw));
         Ok(Task::batch(tasks))
     }
 
@@ -3090,6 +3093,14 @@ mod tests {
         let _ = app.poll_watches().unwrap();
         assert_eq!(app.lua.globals().get::<u32>("PROBES").unwrap(), 2);
         assert!(app.lua.globals().get::<Value>("LAST").unwrap().is_nil());
+
+        // Removing a watch also drops its stored stamp.
+        app.lua
+            .load("riced.watch('notes.txt', nil)")
+            .exec()
+            .unwrap();
+        let _ = app.poll_watches().unwrap();
+        assert!(app.watches.is_empty());
     }
 
     #[test]
